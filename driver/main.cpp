@@ -1,10 +1,10 @@
 #include <algorithm>
 
+#include "driver_utils.h"
 #include "envs_io.h"
 #include "envs_mpi.h"
-#include "timefreq.h"
-#include "librpa.h"
 #include "inputfile.h"
+#include "librpa.h"
 #include "meanfield.h"
 #include "params.h"
 #include "pbc.h"
@@ -12,13 +12,13 @@
 #include "read_data.h"
 #include "stl_io_helper.h"
 #include "task.h"
-#include "utils_io.h"
-
-#include "task_rpa.h"
 #include "task_exx.h"
 #include "task_gw.h"
 #include "task_gw_band.h"
+#include "task_rpa.h"
 #include "task_screened_coulomb.h"
+#include "timefreq.h"
+#include "utils_io.h"
 
 static void initialize(int argc, char **argv)
 {
@@ -29,7 +29,8 @@ static void initialize(int argc, char **argv)
     MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
     if (MPI_THREAD_MULTIPLE != provided)
     {
-        lib_printf("Warning: MPI_Init_thread provide %d != required %d", provided, MPI_THREAD_MULTIPLE);
+        lib_printf("Warning: MPI_Init_thread provide %d != required %d", provided,
+                   MPI_THREAD_MULTIPLE);
     }
 
     initialize_librpa_environment(MPI_COMM_WORLD, 0, 0, "");
@@ -57,11 +58,11 @@ static void finalize()
 
 int main(int argc, char **argv)
 {
-    using LIBRPA::envs::mpi_comm_global_h;
-    using LIBRPA::envs::blacs_ctxt_global_h;
-    using LIBRPA::ParallelRouting;
     using LIBRPA::parallel_routing;
+    using LIBRPA::ParallelRouting;
     using LIBRPA::task_t;
+    using LIBRPA::envs::blacs_ctxt_global_h;
+    using LIBRPA::envs::mpi_comm_global_h;
     using LIBRPA::envs::ofs_myid;
     using LIBRPA::utils::lib_printf;
 
@@ -108,7 +109,6 @@ int main(int argc, char **argv)
     else
         throw std::logic_error("Unknown task (" + Params::task + "). Please check your input");
 
-
     if (mpi_comm_global_h.is_root())
     {
         system(("mkdir -p " + Params::output_dir).c_str());
@@ -131,9 +131,16 @@ int main(int argc, char **argv)
         double emin, emax;
         meanfield.get_E_min_max(emin, emax);
         cout << "| Minimal transition energy (Ha): " << emin << endl
-             << "| Maximal transition energy (Ha): " << emax << endl << endl;
+             << "| Maximal transition energy (Ha): " << emax << endl
+             << endl;
     }
     Profiler::stop("driver_band_out");
+
+    Profiler::start("driver_read_common_input_data", "Driver Read Task-Common Input Data");
+    read_stru(meanfield.get_n_kpoints(), "stru_out");
+    Vector3_Order<int> period{kv_nmp[0], kv_nmp[1], kv_nmp[2]};
+    auto Rlist = construct_R_grid(period);
+    const int Rt_num = Rlist.size() * Params::nfreq;
 
     // early exit for print_minimax task
     if (task == task_t::print_minimax)
@@ -142,17 +149,23 @@ int main(int argc, char **argv)
         meanfield.get_E_min_max(emin, emax);
         TFGrids tfg(Params::nfreq);
         tfg.generate_minimax(emin, emax);
-        if (mpi_comm_global_h.is_root())
-            tfg.show();
+        // head test--------------------------------------------------------------
+        std::vector<double> test;
+        if (Params::replace_w_head)
+        {
+            std::vector<double> omegas_dielect_test;
+            std::vector<double> dielect_func_test;
+            read_dielec_func("dielecfunc_out", omegas_dielect_test, dielect_func_test);
+
+            test = interpolate_dielec_func(Params::option_dielect_func, omegas_dielect_test,
+                                           dielect_func_test, tfg.get_freq_nodes());
+        }
+        // head test--------------------------------------------------------------
+        if (mpi_comm_global_h.is_root()) tfg.show();
         finalize();
         return 0;
     }
 
-    Profiler::start("driver_read_common_input_data", "Driver Read Task-Common Input Data");
-    read_stru(meanfield.get_n_kpoints(), "stru_out");
-    Vector3_Order<int> period {kv_nmp[0], kv_nmp[1], kv_nmp[2]};
-    auto Rlist = construct_R_grid(period);
-    const int Rt_num = Rlist.size() * Params::nfreq;
     if (mpi_comm_global_h.is_root())
     {
         cout << "Lattice vectors (Bohr)" << endl;
@@ -163,14 +176,14 @@ int main(int argc, char **argv)
         cout << "k-points read (Cartisian in 2Pi Bohr^-1 | fractional):" << endl;
         for (int ik = 0; ik != meanfield.get_n_kpoints(); ik++)
         {
-            lib_printf("ik %4d: %12.7f %12.7f %12.7f | %12.7f %12.7f %12.7f\n",
-                   ik+1, kvec_c[ik].x, kvec_c[ik].y, kvec_c[ik].z,
-                   kfrac_list[ik].x, kfrac_list[ik].y, kfrac_list[ik].z);
+            lib_printf("ik %4d: %12.7f %12.7f %12.7f | %12.7f %12.7f %12.7f\n", ik + 1,
+                       kvec_c[ik].x, kvec_c[ik].y, kvec_c[ik].z, kfrac_list[ik].x, kfrac_list[ik].y,
+                       kfrac_list[ik].z);
         }
         cout << "R-points to compute:" << endl;
         for (int iR = 0; iR != Rlist.size(); iR++)
         {
-            lib_printf("%4d: %3d %3d %3d\n", iR+1, Rlist[iR].x, Rlist[iR].y, Rlist[iR].z);
+            lib_printf("%4d: %3d %3d %3d\n", iR + 1, Rlist[iR].x, Rlist[iR].y, Rlist[iR].z);
         }
         cout << endl;
     }
@@ -193,48 +206,54 @@ int main(int argc, char **argv)
     // barrier to wait for information print on master process
     mpi_comm_global_h.barrier();
 
-    //para_mpi.chi_parallel_type=Parallel_MPI::parallel_type::ATOM_PAIR;
-    // vector<atpair_t> local_atpair;
-    if(parallel_routing == ParallelRouting::ATOM_PAIR)
+    // para_mpi.chi_parallel_type=Parallel_MPI::parallel_type::ATOM_PAIR;
+    //  vector<atpair_t> local_atpair;
+    if (parallel_routing == ParallelRouting::ATOM_PAIR)
     {
         // vector<int> atoms_list(natom);
         // for(int iat=0;iat!=natom;iat++)
         //     atoms_list[iat]=iat;
         // std::array<int,3> period_arr{kv_nmp[0], kv_nmp[1], kv_nmp[2]};
-        // std::pair<std::vector<int>, std::vector<std::vector<std::pair<int, std::array<int, 3>>>>> list_loc_atp
-        // = RI::Distribute_Equally::distribute_atoms(mpi_comm_global_h.comm, atoms_list, period_arr, 2, false);
+        // std::pair<std::vector<int>, std::vector<std::vector<std::pair<int, std::array<int, 3>>>>>
+        // list_loc_atp = RI::Distribute_Equally::distribute_atoms(mpi_comm_global_h.comm,
+        // atoms_list, period_arr, 2, false);
         // // for(auto &atp:list_loc_atp.first)
         // //     printf("| myid: %d   atp.first: %d\n",mpi_comm_global_h.myid,atp);
         // // for(auto &atps:list_loc_atp.second)
         // //     printf("| myid: %d   atp.second: %d\n",mpi_comm_global_h.myid,atps);
         // std::ofstream ofs("out."+std::to_string(RI::MPI_Wrapper::mpi_get_rank(mpi_comm_global)));
         // for(auto &af:list_loc_atp.first)
-		//     ofs<<af<<"  ";
-		// ofs<<endl;
+        //     ofs<<af<<"  ";
+        // ofs<<endl;
         // for( auto &a1 : list_loc_atp.second)
         //     for(auto &a2:a1)
-        //         ofs<<a2.first<<"  ("<<a2.second[0]<<", "<<a2.second[1]<<", "<<a2.second[2]<<" )"<<endl;
-        if (mpi_comm_global_h.is_root())
-            lib_printf("Triangular dispatching of atom pairs\n");
-        auto trangular_loc_atpair= dispatch_upper_trangular_tasks(natom,blacs_ctxt_global_h.myid,blacs_ctxt_global_h.nprows,blacs_ctxt_global_h.npcols,blacs_ctxt_global_h.myprow,blacs_ctxt_global_h.mypcol);
-        //local_atpair = dispatch_vector(tot_atpair, mpi_comm_global_h.myid, mpi_comm_global_h.nprocs, true);
-        for(auto &iap:trangular_loc_atpair)
-            local_atpair.push_back(iap);
-        read_Cs("./", Params::cs_threshold,local_atpair, Params::binary_input);
+        //         ofs<<a2.first<<"  ("<<a2.second[0]<<", "<<a2.second[1]<<", "<<a2.second[2]<<"
+        //         )"<<endl;
+        if (mpi_comm_global_h.is_root()) lib_printf("Triangular dispatching of atom pairs\n");
+        auto trangular_loc_atpair = dispatch_upper_trangular_tasks(
+            natom, blacs_ctxt_global_h.myid, blacs_ctxt_global_h.nprows, blacs_ctxt_global_h.npcols,
+            blacs_ctxt_global_h.myprow, blacs_ctxt_global_h.mypcol);
+        // local_atpair = dispatch_vector(tot_atpair, mpi_comm_global_h.myid,
+        // mpi_comm_global_h.nprocs, true);
+        for (auto &iap : trangular_loc_atpair) local_atpair.push_back(iap);
+        read_Cs("./", Params::cs_threshold, local_atpair, Params::binary_input);
         // for(auto &ap:local_atpair)
-        //     printf("   |process %d , local_atom_pair:  %d,  %d\n", mpi_comm_global_h.myid,ap.first,ap.second);
+        //     printf("   |process %d , local_atom_pair:  %d,  %d\n",
+        //     mpi_comm_global_h.myid,ap.first,ap.second);
         read_Vq_row("./", "coulomb_mat", Params::vq_threshold, local_atpair, false);
         // test_libcomm_for_system(Vq);
     }
-    else if(parallel_routing == ParallelRouting::LIBRI)
+    else if (parallel_routing == ParallelRouting::LIBRI)
     {
         if (mpi_comm_global_h.is_root()) lib_printf("Evenly distributed Cs and V for LibRI\n");
-        read_Cs_evenly_distribute("./", Params::cs_threshold, mpi_comm_global_h.myid, mpi_comm_global_h.nprocs, Params::binary_input);
+        read_Cs_evenly_distribute("./", Params::cs_threshold, mpi_comm_global_h.myid,
+                                  mpi_comm_global_h.nprocs, Params::binary_input);
         // Vq distributed using the same strategy
         // There should be no duplicate for V
-        auto trangular_loc_atpair= dispatch_upper_trangular_tasks(natom,blacs_ctxt_global_h.myid,blacs_ctxt_global_h.nprows,blacs_ctxt_global_h.npcols,blacs_ctxt_global_h.myprow,blacs_ctxt_global_h.mypcol);
-        for(auto &iap:trangular_loc_atpair)
-            local_atpair.push_back(iap);
+        auto trangular_loc_atpair = dispatch_upper_trangular_tasks(
+            natom, blacs_ctxt_global_h.myid, blacs_ctxt_global_h.nprows, blacs_ctxt_global_h.npcols,
+            blacs_ctxt_global_h.myprow, blacs_ctxt_global_h.mypcol);
+        for (auto &iap : trangular_loc_atpair) local_atpair.push_back(iap);
         read_Vq_row("./", "coulomb_mat", Params::vq_threshold, local_atpair, false);
         // test_libcomm_for_system(Vq);
     }
@@ -253,14 +272,16 @@ int main(int argc, char **argv)
             if (Cs_data.use_libri)
             {
                 lib_printf("| process %d: Cs size %d from local atpair size %zu\n",
-                        mpi_comm_global_h.myid, get_num_keys(Cs_data.data_libri), local_atpair.size());
+                           mpi_comm_global_h.myid, get_num_keys(Cs_data.data_libri),
+                           local_atpair.size());
                 // ofs_myid << "Cs size: " << get_num_keys(Cs_data.data_libri) << ", with keys:\n";
                 // print_keys(ofs_myid, Cs_data.data_libri);
             }
             else
             {
                 lib_printf("| process %d: Cs size %d from local atpair size %zu\n",
-                        mpi_comm_global_h.myid, get_num_keys(Cs_data.data_IJR), local_atpair.size());
+                           mpi_comm_global_h.myid, get_num_keys(Cs_data.data_IJR),
+                           local_atpair.size());
                 // ofs_myid << "Cs size: " << get_num_keys(Cs_data.data_IJR) << ", with keys:\n";
                 // print_keys(ofs_myid, Cs_data.data_IJR);
             }

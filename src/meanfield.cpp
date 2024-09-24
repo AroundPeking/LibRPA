@@ -1,9 +1,11 @@
 #include "meanfield.h"
-#include "lapack_connector.h"
-#include "constants.h"
-#include <stdexcept>
+
 #include <iostream>
+#include <stdexcept>
+
+#include "constants.h"
 #include "envs_mpi.h"
+#include "lapack_connector.h"
 
 void MeanField::resize(int ns, int nk, int nb, int nao)
 {
@@ -14,6 +16,7 @@ void MeanField::resize(int ns, int nk, int nb, int nao)
         eskb.clear();
         wg.clear();
         wfc.clear();
+        velocity.clear();
     }
 
     n_spins = ns;
@@ -24,21 +27,27 @@ void MeanField::resize(int ns, int nk, int nb, int nao)
     eskb.resize(n_spins);
     wg.resize(n_spins);
     wfc.resize(n_spins);
+    velocity.resize(n_spins);
 
     for (int is = 0; is < n_spins; is++)
     {
         eskb[is].create(n_kpoints, n_bands);
         wg[is].create(n_kpoints, n_bands);
         wfc[is].resize(n_kpoints);
+        velocity[is].resize(n_kpoints);
         for (int ik = 0; ik < n_kpoints; ik++)
+        {
             wfc[is][ik].create(n_bands, n_aos);
+            velocity[is][ik].resize(3);
+            for (int ia = 0; ia < 3; ia++)
+            {
+                velocity[is][ik][ia].create(n_bands, n_aos);
+            }
+        }
     }
 }
 
-MeanField::MeanField(int ns, int nk, int nb, int nao)
-{
-    resize(ns, nk, nb, nao);
-}
+MeanField::MeanField(int ns, int nk, int nb, int nao) { resize(ns, nk, nb, nao); }
 
 void MeanField::set(int ns, int nk, int nb, int nao)
 {
@@ -68,7 +77,7 @@ double MeanField::get_E_min_max(double &emin, double &emax) const
         for (int ik = 0; ik != n_kpoints; ik++)
         {
             lb = (lb > eskb[is](ik, 0)) ? eskb[is](ik, 0) : lb;
-            ub = (ub < eskb[is](ik, n_bands-1)) ? eskb[is](ik, n_bands-1) : ub;
+            ub = (ub < eskb[is](ik, n_bands - 1)) ? eskb[is](ik, n_bands - 1) : ub;
         }
     double gap = get_band_gap();
     emax = ub - lb;
@@ -84,7 +93,7 @@ double MeanField::get_band_gap() const
     double midpoint = 1.0 / (n_spins * n_kpoints);
     for (int is = 0; is != n_spins; is++)
     {
-        //print_matrix("mf.eskb: ",this->eskb[is]);
+        // print_matrix("mf.eskb: ",this->eskb[is]);
         for (int ik = 0; ik != n_kpoints; ik++)
         {
             int homo_level = -1;
@@ -95,12 +104,13 @@ double MeanField::get_band_gap() const
                     homo_level = n;
                 }
             }
-            //cout<<"|is ik: "<<is<<" "<<ik<<"  homo_level: "<<homo_level<<"   eskb0: "<<eskb[is](ik, homo_level)<<"  eskb1: "<<eskb[is](ik, homo_level + 1)<<endl;
-            lumo = eskb[is](ik, homo_level + 1) < lumo ?  eskb[is](ik, homo_level + 1) : lumo;
-            if(homo_level != -1)
+            // cout<<"|is ik: "<<is<<" "<<ik<<"  homo_level: "<<homo_level<<"   eskb0:
+            // "<<eskb[is](ik, homo_level)<<"  eskb1: "<<eskb[is](ik, homo_level + 1)<<endl;
+            lumo = eskb[is](ik, homo_level + 1) < lumo ? eskb[is](ik, homo_level + 1) : lumo;
+            if (homo_level != -1)
                 homo = eskb[is](ik, homo_level) > homo ? eskb[is](ik, homo_level) : homo;
-            
-            //cout<<"   homo: "<<homo<<"  lumo: "<<lumo<<endl;
+
+            // cout<<"   homo: "<<homo<<"  lumo: "<<lumo<<endl;
         }
     }
     gap = lumo - homo;
@@ -113,17 +123,20 @@ ComplexMatrix MeanField::get_dmat_cplx(int ispin, int ikpt) const
     assert(ikpt < this->n_kpoints);
     auto scaled_wfc_conj = conj(wfc[ispin][ikpt]);
     for (int ib = 0; ib != this->n_bands; ib++)
-        LapackConnector::scal(this->n_aos, this->wg[ispin](ikpt, ib), scaled_wfc_conj.c + n_aos * ib, 1);
+        LapackConnector::scal(this->n_aos, this->wg[ispin](ikpt, ib),
+                              scaled_wfc_conj.c + n_aos * ib, 1);
     auto dmat_cplx = transpose(this->wfc[ispin][ikpt], false) * scaled_wfc_conj;
     return dmat_cplx;
 }
 
-ComplexMatrix MeanField::get_dmat_cplx_R(int ispin, const std::vector<Vector3_Order<double>>&kfrac_list, const Vector3_Order<int>& R) const
+ComplexMatrix MeanField::get_dmat_cplx_R(int ispin,
+                                         const std::vector<Vector3_Order<double>> &kfrac_list,
+                                         const Vector3_Order<int> &R) const
 {
     ComplexMatrix dmat_cplx(this->n_aos, this->n_aos);
     for (int ik = 0; ik != this->n_kpoints; ik++)
     {
-        auto ang = - (kfrac_list[ik] * R) * TWO_PI;
+        auto ang = -(kfrac_list[ik] * R) * TWO_PI;
         complex<double> kphase = complex<double>(cos(ang), sin(ang));
         dmat_cplx += kphase * this->get_dmat_cplx(ispin, ik);
     }
@@ -192,10 +205,11 @@ std::map<double, std::map<Vector3_Order<int>, matrix>> MeanField::get_gf_real_im
     const std::vector<Vector3_Order<int>> &Rs) const
 {
     std::map<double, std::map<Vector3_Order<int>, matrix>> gf_tau_R;
-    for (const auto &tau_gf_cplx_R: this->get_gf_cplx_imagtimes_Rs(ispin, kfrac_list, imagtimes, Rs))
+    for (const auto &tau_gf_cplx_R :
+         this->get_gf_cplx_imagtimes_Rs(ispin, kfrac_list, imagtimes, Rs))
     {
         const auto &tau = tau_gf_cplx_R.first;
-        for (const auto &R_gf_cplx: tau_gf_cplx_R.second)
+        for (const auto &R_gf_cplx : tau_gf_cplx_R.second)
         {
             const auto &R = R_gf_cplx.first;
             gf_tau_R[tau][R] = R_gf_cplx.second.real();
@@ -210,22 +224,23 @@ void MeanField::allredue_wfc_isk()
 {
     using LIBRPA::envs::mpi_comm_global_h;
 
-    for(int is=0;is!=n_spins;is++)
-        for(int ik=0;ik!=n_kpoints;ik++)
-            {
-                ComplexMatrix loc_wfc(n_bands,n_aos);
-                ComplexMatrix glo_wfc(n_bands,n_aos);
-                // if(mpi_comm_world_h.is_root())
-                // {
-                //     loc_wfc=wfc[is][ik];
-                // }
-                // mpi_comm_world_h.allreduce_ComplexMatrix(loc_wfc,glo_wfc);
-                // if(!mpi_comm_world_h.is_root())
-                // {
-                //     wfc[is][ik]=glo_wfc;
-                // }
-                mpi_comm_global_h.allreduce_ComplexMatrix(wfc[is][ik],glo_wfc);
-                wfc[is][ik]=glo_wfc;
-            }
+    for (int is = 0; is != n_spins; is++)
+        for (int ik = 0; ik != n_kpoints; ik++)
+        {
+            ComplexMatrix loc_wfc(n_bands, n_aos);
+            ComplexMatrix glo_wfc(n_bands, n_aos);
+            // if(mpi_comm_world_h.is_root())
+            // {
+            //     loc_wfc=wfc[is][ik];
+            // }
+            // mpi_comm_world_h.allreduce_ComplexMatrix(loc_wfc,glo_wfc);
+            // if(!mpi_comm_world_h.is_root())
+            // {
+            //     wfc[is][ik]=glo_wfc;
+            // }
+            mpi_comm_global_h.allreduce_ComplexMatrix(wfc[is][ik], glo_wfc);
+            wfc[is][ik] = glo_wfc;
+        }
 }
 MeanField meanfield = MeanField();
+MeanField pyatb_meanfield = MeanField();
