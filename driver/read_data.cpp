@@ -251,6 +251,9 @@ int read_eigenvector(const string &dir_path, MeanField &mf)
 
 void read_velocity(const string &file_path, MeanField &mf)
 {
+    const double h_divide_e2 = 25812.80745;
+    const double hbar = 1.05457182e-34;
+    const double A_to_m = 1.0e-10;
     ifstream infile;
     infile.open(file_path);
     string alpha, kk, single_re, single_im;
@@ -276,6 +279,7 @@ void read_velocity(const string &file_path, MeanField &mf)
                 {
                     infile >> single_re >> single_im;
                     velocity.at(is).at(ik).at(ia).c[i] =
+                        A_to_m * sqrt(hbar / h_divide_e2 / 2) *
                         complex<double>(stod(single_re), stod(single_im));
                 }
             }
@@ -1268,12 +1272,13 @@ void read_stru(const int &n_kpoints, const std::string &file_path)
     }
 }
 
-std::vector<Vector3_Order<double>> read_band_kpath_info(int &n_basis, int &n_states, int &n_spin)
+std::vector<Vector3_Order<double>> read_band_kpath_info(int &n_basis, int &n_states, int &n_spin,
+                                                        const std::string &file_path)
 {
     std::vector<Vector3_Order<double>> kfrac_band;
 
     ifstream infile;
-    infile.open("band_kpath_info");
+    infile.open(file_path);
 
     string x, y, z;
     int n_kpoints_band;
