@@ -150,7 +150,7 @@ int main(int argc, char **argv)
         TFGrids tfg(Params::nfreq);
         tfg.generate_minimax(emin, emax);
         // head test--------------------------------------------------------------
-        std::vector<double> test;
+        /* std::vector<double> test;
         if (Params::replace_w_head)
         {
             std::vector<double> omegas_dielect_test;
@@ -159,7 +159,7 @@ int main(int argc, char **argv)
 
             test = interpolate_dielec_func(Params::option_dielect_func, omegas_dielect_test,
                                            dielect_func_test, tfg.get_freq_nodes());
-        }
+        } */
         // head test--------------------------------------------------------------
         if (mpi_comm_global_h.is_root()) tfg.show();
         finalize();
