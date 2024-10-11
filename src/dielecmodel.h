@@ -71,9 +71,11 @@ class diele_func
     void test_head();
 
     void cal_wing();  // atpair_k_cplx_mat_t &Vq_cut, Cs_LRI &Cs_data
+    std::complex<double> compute_wing(int alpha,int lambda,int iomega);
     // tranform Cs_ij(R) to Cs_ij(k)
     void FT_R2k();
     void Cs_ij2mn();
+    std::complex<double> compute_Cs_ij2mn(int mu, int m, int n, int ik);
     void get_Xv();  // diagonalize Vq_cut(q=0)
     void test_wing();
 };
