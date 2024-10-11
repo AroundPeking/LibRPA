@@ -116,11 +116,11 @@ double diele_func::cal_factor(string name)
     const double primitive_cell_volume = latvec.Det() * BOHR2ANG * BOHR2ANG * BOHR2ANG;
     // latvec.print();
     if (name == "head")
-        dielectric_unit = 2 * TWO_PI / primitive_cell_volume / this->meanfield_df.get_n_kpoints() *
-                          1.0e30 / epsilon0 / eV;
+        dielectric_unit = TWO_PI * hbar / h_divide_e2 / primitive_cell_volume /
+                          this->meanfield_df.get_n_kpoints() * 1.0e30 / epsilon0 / eV;
     else if (name == "wing")
-        dielectric_unit = 2 * sqrt(2 * TWO_PI / primitive_cell_volume * 1.0e30) /
-                          this->meanfield_df.get_n_kpoints() / epsilon0 / eV;
+        dielectric_unit = TWO_PI * hbar / h_divide_e2 * sqrt(2 * TWO_PI / primitive_cell_volume) *
+                          1.0e15 / this->meanfield_df.get_n_kpoints() / epsilon0 / TWO_PI / eV;
     else
         throw std::logic_error("Unsupported value for head/wing factor");
     return dielectric_unit;
@@ -176,24 +176,12 @@ void diele_func::test_head()
 
 void diele_func::cal_wing()
 {
-    const int n_abf = LIBRPA::atomic_basis_abf.nb_total;
     int n_lambda = this->n_nonsingular - 1;
-    int nk = kfrac_band.size();
-    auto &velocity = this->meanfield_df.get_velocity();
-    auto &eigenvalues = this->meanfield_df.get_eigenvals();
-    auto &wg = this->meanfield_df.get_weight()[n_spin - 1];
-    int nocc = 0;
-    for (int i = 0; i != wg.size; i++)
-    {
-        if (wg.c[i] == 0.)
-        {
-            nocc = i;
-            break;
-        }
-    }
+
     init_Cs();
     FT_R2k();
     Cs_ij2mn();
+
 #pragma omp parallel for schedule(dynamic) collapse(3)
     for (int iomega = 0; iomega != this->omega.size(); iomega++)
     {
@@ -201,31 +189,7 @@ void diele_func::cal_wing()
         {
             for (int il = 0; il != n_lambda; il++)
             {
-                for (int mu = 0; mu != n_abf; mu++)
-                {
-                    std::complex<double> tmp = 0.0;
-                    double omega_ev = this->omega[iomega] * HA2EV;
-                    for (int ik = 0; ik != nk; ik++)
-                    {
-                        for (int ispin = 0; ispin != n_spin; ispin++)
-                        {
-                            for (int iocc = 0; iocc != nocc; iocc++)
-                            {
-                                for (int iunocc = nocc; iunocc != n_states; iunocc++)
-                                {
-                                    double egap = (eigenvalues[ispin](ik, iunocc) -
-                                                   eigenvalues[ispin](ik, iocc)) *
-                                                  HA2EV;
-
-                                    tmp += conj(this->Ctri_mn[mu][iocc][iunocc][kfrac_band[ik]] *
-                                                velocity[ispin][ik][alpha](iunocc, iocc)) /
-                                           (omega_ev * omega_ev + egap * egap);
-                                }
-                            }
-                        }
-                    }
-                    this->wing.at(alpha).at(il).at(iomega) += this->Coul_vector.at(il).at(mu) * tmp;
-                }
+                this->wing.at(alpha).at(il).at(iomega) = compute_wing(alpha, il, iomega);
             }
         }
     }
@@ -260,7 +224,51 @@ void diele_func::cal_wing()
             }
         }
     }
+    std::cout << "wing(0,0,0): " << wing.at(0).at(0).at(0) << std::endl;
     std::cout << "* Success: calculate wing term.\n";
+};
+
+std::complex<double> diele_func::compute_wing(int alpha, int lambda, int iomega)
+{
+    const int n_abf = LIBRPA::atomic_basis_abf.nb_total;
+    int nk = kfrac_band.size();
+    auto &wg = this->meanfield_df.get_weight()[n_spin - 1];
+    auto &velocity = this->meanfield_df.get_velocity();
+    auto &eigenvalues = this->meanfield_df.get_eigenvals();
+    int nocc = 0;
+    for (int i = 0; i != wg.size; i++)
+    {
+        if (wg.c[i] == 0.)
+        {
+            nocc = i;
+            break;
+        }
+    }
+    std::complex<double> wing_term;
+
+    for (int mu = 0; mu != n_abf; mu++)
+    {
+        std::complex<double> tmp = 0.0;
+        double omega_ev = this->omega[iomega] * HA2EV;
+        for (int ik = 0; ik != nk; ik++)
+        {
+            for (int ispin = 0; ispin != n_spin; ispin++)
+            {
+                for (int iocc = 0; iocc != nocc; iocc++)
+                {
+                    for (int iunocc = nocc; iunocc != n_states; iunocc++)
+                    {
+                        double egap =
+                            (eigenvalues[ispin](ik, iunocc) - eigenvalues[ispin](ik, iocc)) * HA2EV;
+                        tmp += conj(this->Ctri_mn[mu][iocc][iunocc][kfrac_band[ik]] *
+                                    velocity[ispin][ik][alpha](iunocc, iocc)) /
+                               (omega_ev * omega_ev + egap * egap);
+                    }
+                }
+            }
+        }
+        wing_term += conj(this->Coul_vector.at(lambda).at(mu)) * tmp;
+    }
 };
 
 void diele_func::init_Cs()
@@ -328,9 +336,9 @@ void diele_func::init_Cs()
 
 void diele_func::FT_R2k()
 {
-// Vector3_Order<int> period{kv_nmp[0], kv_nmp[1], kv_nmp[2]};
-// auto Rlist = construct_R_grid(period);
-#pragma omp parallel for schedule(dynamic)
+    // Vector3_Order<int> period{kv_nmp[0], kv_nmp[1], kv_nmp[2]};
+    // auto Rlist = construct_R_grid(period);
+    // #pragma omp parallel for schedule(dynamic)
     for (auto k_frac : this->kfrac_band)
     {
         const std::array<int, 3> k_array = {k_frac.x, k_frac.y, k_frac.z};
@@ -367,61 +375,65 @@ void diele_func::FT_R2k()
 
 void diele_func::Cs_ij2mn()
 {
-    using LIBRPA::atomic_basis_wfc;
-    int nspin = this->meanfield_df.get_n_spins();  //! spin = 1 only
+    const int n_abf = LIBRPA::atomic_basis_abf.nb_total;
     int nk = this->kfrac_band.size();
     int nbands = this->meanfield_df.get_n_bands();
-    std::complex<double> term1 = 0.0;
-    std::complex<double> term2 = 0.0;
-    for (int ispin = 0; ispin != nspin; ispin++)
+
+#pragma omp parallel for schedule(dynamic) collapse(4)
+    for (int ik = 0; ik != nk; ik++)
     {
-#pragma omp parallel for schedule(dynamic) collapse(3)
-        for (int ik = 0; ik != nk; ik++)
+        for (int m = 0; m != nbands; m++)
         {
-            for (int m = 0; m != nbands; m++)
+            for (int n = 0; n != nbands; n++)
             {
-                for (int n = 0; n != nbands; n++)
+                for (int mu = 0; mu != n_abf; mu++)
                 {
-                    for (const auto &outer : Ctri_ij.data_libri)
-                    {
-                        int Mu = outer.first;
-                        for (const auto &inner : outer.second)
-                        {
-                            std::pair<int, std::array<int, 3UL>> pair = inner.first;
-                            int J = pair.first;
-                            int n_mu_I = inner.second.shape[0];
-                            int n_ao_I = inner.second.shape[1];
-                            int n_ao_J = inner.second.shape[2];
-                            for (int i = 0; i != n_ao_I; i++)
-                            {
-                                for (int j = 0; j != n_ao_J; j++)
-                                {
-                                    for (int mu = 0; mu != n_mu_I; mu++)
-                                    {
-                                        term1 = conj(meanfield_df.get_eigenvectors()[ispin][ik](
-                                                    m, atomic_basis_wfc.get_global_index(Mu, i))) *
-                                                inner.second(mu, i, j) *
-                                                meanfield_df.get_eigenvectors()[ispin][ik](
-                                                    n, atomic_basis_wfc.get_global_index(J, j));
-                                        term2 = meanfield_df.get_eigenvectors()[ispin][ik](
-                                                    n, atomic_basis_wfc.get_global_index(Mu, i)) *
-                                                conj(inner.second(mu, i, j)) *
-                                                conj(meanfield_df.get_eigenvectors()[ispin][ik](
-                                                    m, atomic_basis_wfc.get_global_index(J, j)));
-                                        this->Ctri_mn.at(n_mu_I * Mu + mu)
-                                            .at(m)
-                                            .at(n)
-                                            .at(kfrac_band[ik]) += term1 + term2;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    this->Ctri_mn.at(mu).at(m).at(n).at(kfrac_band[ik]) =
+                        compute_Cs_ij2mn(mu, m, n, ik);
                 }
             }
         }
     }
+
+    std::cout << "Ctri_mn(0,10,10,k0): " << Ctri_mn.at(0).at(10).at(10).at(kfrac_band[0])
+              << std::endl;
     std::cout << "* Success: transform of Cs^mu_ij(k) to Cs^mu_mn(k).\n";
+};
+
+std::complex<double> diele_func::compute_Cs_ij2mn(int mu, int m, int n, int ik)
+{
+    using LIBRPA::atomic_basis_abf;
+    using LIBRPA::atomic_basis_wfc;
+    const std::array<int, 3> k_array = {kfrac_band[ik].x, kfrac_band[ik].y, kfrac_band[ik].z};
+    std::complex<double> total = 0.0;
+    std::complex<double> term1 = 0.0;
+    std::complex<double> term2 = 0.0;
+    int Mu = atomic_basis_abf.get_i_atom(mu);
+    int mu_local = atomic_basis_abf.get_local_index(mu, Mu);
+    const int n_atom = Ctri_ij.data_libri.size();
+    const int n_ao_Mu = atomic_basis_wfc.get_atom_nb(Mu);
+    const ComplexMatrix eigenvectors = meanfield_df.get_eigenvectors()[0][ik];  // spin=1 only
+
+    for (int i = 0; i != n_ao_Mu; i++)
+    {
+        for (int J = 0; J != n_atom; J++)
+        {
+            int n_ao_J = atomic_basis_wfc.get_atom_nb(J);
+            for (int j = 0; j != n_ao_J; j++)
+            {
+                term1 = conj(eigenvectors(m, atomic_basis_wfc.get_global_index(Mu, i))) *
+                        Ctri_ij.data_libri[Mu][{J, k_array}](mu_local, i, j) *
+                        eigenvectors(n, atomic_basis_wfc.get_global_index(J, j));
+                term2 = eigenvectors(n, atomic_basis_wfc.get_global_index(Mu, i)) *
+                        conj(Ctri_ij.data_libri[Mu][{J, k_array}](mu_local, i, j)) *
+                        conj(eigenvectors(m, atomic_basis_wfc.get_global_index(J, j)));
+                // #pragma omp critical
+                total += term1 + term2;
+            }
+        }
+    }
+
+    return total;
 };
 
 void diele_func::get_Xv()
@@ -488,6 +500,8 @@ void diele_func::get_Xv()
     }
     std::reverse(this->Coul_value.begin(), this->Coul_value.end());
     std::reverse(this->Coul_vector.begin(), this->Coul_vector.end());
+    std::cout << "The largest/smallest eigenvalue of Coulomb matrix: " << this->Coul_value.front()
+              << ", " << this->Coul_value.back() << std::endl;
     std::cout << "* Success: diagonalize Coulomb matrix in the ABFs repre.\n";
 };
 
