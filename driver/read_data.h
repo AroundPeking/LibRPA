@@ -7,10 +7,12 @@
 #include <string>
 #include <vector>
 
+#include "constants.h"
 #include "matrix.h"
 #include "meanfield.h"
 #include "ri.h"
 #include "vector3_order.h"
+
 using std::string;
 
 /*!
@@ -29,6 +31,7 @@ int read_vxc(const string &file_path, std::vector<matrix> &vxc);
 int read_eigenvector(const string &dir_path, MeanField &mf);
 
 void read_velocity(const string &file_path, MeanField &mf);
+void read_velocity_aims(MeanField &mf, const string &file_path);
 
 size_t read_Cs(const string &dir_path, double threshold, const vector<atpair_t> &local_atpair,
                bool binary = false);

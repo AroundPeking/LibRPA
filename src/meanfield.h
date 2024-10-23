@@ -62,7 +62,7 @@ class MeanField
                                   const Vector3_Order<int>& R) const;
     std::vector<std::vector<ComplexMatrix>>& get_eigenvectors() { return wfc; }
     const std::vector<std::vector<ComplexMatrix>>& get_eigenvectors() const { return wfc; }
-    const std::vector<std::vector<std::vector<ComplexMatrix>>>& get_velocity() const
+    std::vector<std::vector<std::vector<ComplexMatrix>>>& get_velocity()
     {
         return velocity;
     }
