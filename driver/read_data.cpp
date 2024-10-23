@@ -202,9 +202,6 @@ void read_eigenvector(const string &dir_path, MeanField &mf)
 
 void read_velocity(const string &file_path, MeanField &mf)
 {
-    // const double h_divide_e2 = 25812.80745;
-    // const double hbar = 1.05457182e-34;
-    const double A_to_m = 1.0e-10;
     ifstream infile;
     infile.open(file_path);
     string alpha, kk, single_re, single_im;
@@ -230,11 +227,118 @@ void read_velocity(const string &file_path, MeanField &mf)
                 {
                     infile >> single_re >> single_im;
                     velocity.at(is).at(ik).at(ia).c[i] =
-                        A_to_m * complex<double>(stod(single_re), stod(single_im));
+                        ANG2BOHR * complex<double>(stod(single_re), stod(single_im)) / HA2EV;
                 }
             }
         }
     }
+}
+
+void read_velocity_aims(MeanField &mf, const string &file_path)
+{
+    int nk = mf.get_n_kpoints();
+    int n_spins = mf.get_n_spins();
+    int nbands = mf.get_n_bands();
+    auto &velocity = mf.get_velocity();
+
+    ifstream infile;
+    for (int ik = 0; ik != nk; ik++)
+    {
+        vector<complex<double>> px(n_spins * nbands * nbands), py(n_spins * nbands * nbands),
+            pz(n_spins * nbands * nbands);
+        // Load momentum matrix
+        std::stringstream ss;
+        ss << file_path << "moment_KS_spin_01_kpt_" << std::setfill('0') << std::setw(6) << ik + 1
+           << ".dat";
+        infile.open(ss.str());
+        if (!infile.is_open())
+        {
+            cerr << "Failed to open file: " << ss.str() << endl;
+            continue;
+        }
+        std::string px_re, px_im, py_re, py_im, pz_re, pz_im;
+        int line = 0;
+        while (infile.peek() != EOF)
+        {
+            infile >> px_re >> px_im >> py_re >> py_im >> pz_re >> pz_im;
+            px[line] = complex<double>(stod(px_re), stod(px_im));
+            py[line] = complex<double>(stod(py_re), stod(py_im));
+            pz[line] = complex<double>(stod(pz_re), stod(pz_im));
+            line++;
+        }
+        infile.close();
+        int iline = 0;
+        for (int im = 0; im != nbands; im++)
+        {
+            for (int in = im; in != nbands; in++)
+            {
+                for (int is = 0; is != n_spins; is++)
+                {
+                    velocity.at(is).at(ik).at(0)(in, im) = px[iline];
+                    velocity.at(is).at(ik).at(1)(in, im) = py[iline];
+                    velocity.at(is).at(ik).at(2)(in, im) = pz[iline];
+                    velocity.at(is).at(ik).at(0)(im, in) = conj(px[iline]);
+                    velocity.at(is).at(ik).at(1)(im, in) = conj(py[iline]);
+                    velocity.at(is).at(ik).at(2)(im, in) = conj(pz[iline]);
+                    iline++;
+                    /*if (in == im)
+                    {
+                        std::cout << velocity.at(is).at(ik).at(0)(in, im).imag() << std::endl;
+                    }*/
+                }
+            }
+        }
+    }
+    /*while (infile.peek() != EOF)
+    {
+        infile >> px_re >> px_im >> py_re >> py_im >> pz_re >> pz_im;
+        if (infile.peek() == EOF) break;
+        for (int is = 0; is != n_spins; is++)
+        {
+            velocity.at(is).at(ik).at(0).c[m * nbands + n] =
+                complex<double>(stod(px_re), stod(px_im));
+            velocity.at(is).at(ik).at(1).c[m * nbands + n] =
+                complex<double>(stod(py_re), stod(py_im));
+            velocity.at(is).at(ik).at(2).c[m * nbands + n] =
+                complex<double>(stod(pz_re), stod(pz_im));
+        }
+        n++;
+        if (n % nbands == 0)
+        {
+            m++;
+            n = m;
+        }
+    }
+    for (int im = 0; im != nbands; im++)
+    {
+        for (int in = 0; in != nbands; in++)
+        {
+            for (int is = 0; is != n_spins; is++)
+            {
+                if (im > in)
+                {
+                    velocity.at(is).at(ik).at(0).c[im * nbands + in] =
+                        velocity.at(is).at(ik).at(0).c[in * nbands + im];
+                    velocity.at(is).at(ik).at(1).c[im * nbands + in] =
+                        velocity.at(is).at(ik).at(1).c[in * nbands + im];
+                    velocity.at(is).at(ik).at(2).c[im * nbands + in] =
+                        velocity.at(is).at(ik).at(2).c[in * nbands + im];
+                }
+            }
+        }
+    }
+}*/
+    /*std::cout << "velocity k=26,px: " << std::endl;
+    for (int m = 0; m != nbands; m++)
+    {
+        for (int n = m; n != nbands; n++)
+        {
+            std::cout << velocity[0][26][0](n, m) << std::endl;
+        }
+    }*/
+    // std::cout << "px(k=26, m=5, n=40): " << velocity.at(0).at(26).at(0)(5, 40) << std::endl;
+    // std::cout << "px(k=26, m=40, n=5): " << velocity.at(0).at(26).at(0)(40, 5) << std::endl;
+    std::cout << "* Success: read the pk matrix of aims." << std::endl;
 }
 
 static size_t handle_Cs_file(const string &file_path, double threshold,
@@ -246,7 +350,8 @@ static size_t handle_Cs_file(const string &file_path, double threshold,
         loc_atp_index.insert(lap.first);
         loc_atp_index.insert(lap.second);
     }
-    // cout<<"READING Cs from file: "<<file_path<<"  Cs_first_size: "<<loc_atp_index.size()<<endl;
+    // cout<<"READING Cs from file: "<<file_path<<"  Cs_first_size:
+    // "<<loc_atp_index.size()<<endl;
     // map<size_t,map<size_t,map<Vector3_Order<int>,std::shared_ptr<matrix>>>> Cs_m;
     size_t cs_discard = 0;
     string natom_s, ncell_s, ia1_s, ia2_s, ic_1, ic_2, ic_3, i_s, j_s, mu_s, Cs_ele;
@@ -315,7 +420,8 @@ static size_t handle_Cs_file_binary(const string &file_path, double threshold,
         loc_atp_index.insert(lap.first);
         loc_atp_index.insert(lap.second);
     }
-    // cout<<"READING Cs from file: "<<file_path<<"  Cs_first_size: "<<loc_atp_index.size()<<endl;
+    // cout<<"READING Cs from file: "<<file_path<<"  Cs_first_size:
+    // "<<loc_atp_index.size()<<endl;
     // map<size_t,map<size_t,map<Vector3_Order<int>,std::shared_ptr<matrix>>>> Cs_m;
     size_t cs_discard = 0;
     ifstream infile;
@@ -488,7 +594,8 @@ std::vector<size_t> handle_Cs_file_binary_dry(const string &file_path, double th
         {
             Cs_ids_keep.push_back(i_file);
 #ifdef LIBRPA_DEBUG
-            // LIBRPA::envs::ofs_myid << i_file << " (" << ic1 << "," << ic2 << "," << ic3 << ") "
+            // LIBRPA::envs::ofs_myid << i_file << " (" << ic1 << "," << ic2 << "," << ic3 << ")
+            // "
             // << maxval << " kept, maxval: " << maxval << endl;
 #endif
         }
@@ -755,7 +862,8 @@ static int handle_Vq_full_file(const string &file_path,
         infile >> nbasbas >> begin_row >> end_row >> begin_col >> end_col;
         if (infile.peek() == EOF) break;
         if (!infile.good()) return 2;
-        // cout << "vq range: " << begin_row << " ~ " << end_row << "  ,   " << begin_col << " ~ "
+        // cout << "vq range: " << begin_row << " ~ " << end_row << "  ,   " << begin_col << " ~
+        // "
         // << end_col << endl;
         infile >> q_num >> q_weight;
         if (!infile.good()) return 3;
@@ -896,8 +1004,8 @@ size_t read_Vq_full(const string &dir_path, const string &vq_fprefix, bool is_cu
     // cout << "vq threshold: " << threshold << endl;
     // cout << "vq_save:    " << vq_save << endl;
     // cout << "vq_dicard:  " << vq_discard << endl;
-    // cout << "  Vq_dim   " << coulomb_mat.size() << "    " << coulomb_mat[0].size() << "   " <<
-    // coulomb_mat[0][0].size() << endl; for (auto &irk : irk_weight)
+    // cout << "  Vq_dim   " << coulomb_mat.size() << "    " << coulomb_mat[0].size() << "   "
+    // << coulomb_mat[0][0].size() << endl; for (auto &irk : irk_weight)
     // {
     //     cout << " irk_vec and weight: " << irk.first << "  " << irk.second << endl;
     // }
@@ -922,7 +1030,8 @@ static int handle_Vq_row_file(
         infile >> nbasbas >> begin_row >> end_row >> begin_col >> end_col;
         if (infile.peek() == EOF) break;
         if (!infile.good()) return 2;
-        // cout << "vq range: " << begin_row << " ~ " << end_row << "  ,   " << begin_col << " ~ "
+        // cout << "vq range: " << begin_row << " ~ " << end_row << "  ,   " << begin_col << " ~
+        // "
         // << end_col << endl;
         infile >> q_num >> q_weight;
         if (!infile.good()) return 3;
@@ -996,7 +1105,8 @@ static int handle_Vq_row_file(
                         {
                             int J_loc, nu_loc;
                             J_loc = atom_mu_glo2loc(i, nu_loc);
-                            // printf("|i: %d   J: %d   J_loc: %d, nu_loc: %d\n",i,J,J_loc,nu_loc);
+                            // printf("|i: %d   J: %d   J_loc: %d, nu_loc:
+                            // %d\n",i,J,J_loc,nu_loc);
                             assert(J == J_loc);
                             (*coulomb[I_loc][J_loc][iq])(mu_loc, nu_loc) = tmp_row[i - bcol];
                         }
@@ -1038,8 +1148,8 @@ size_t read_Vq_row(const string &dir_path, const string &vq_fprefix, double thre
     }
     // MYZ: now the map coulomb contains the complete atom-pair matrix.
     // Call the API to parse the data.
-    // To reduce memory consumption during this process, we erase the data in temporary object once
-    // it is parsed.
+    // To reduce memory consumption during this process, we erase the data in temporary object
+    // once it is parsed.
     auto it_I = coulomb.begin();
     while (it_I != coulomb.end())
     {
@@ -1086,7 +1196,8 @@ size_t read_Vq_row(const string &dir_path, const string &vq_fprefix, double thre
     //         {
     //             std::stringstream sm;
     //             sm<<"I,J "<<Ip.first<<"  "<<Jp.first;
-    //             //printf("|process %d  I J: %d, %d\n",para_mpi.get_myid(), Ip.first,Jp.first);
+    //             //printf("|process %d  I J: %d, %d\n",para_mpi.get_myid(),
+    //             Ip.first,Jp.first);
     //             print_complex_matrix_file(sm.str().c_str(),(*qp.second),fs,false);
     //         }
 
