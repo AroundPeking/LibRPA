@@ -7,6 +7,11 @@
 #include <omp.h>
 #include <map>
 #include <functional>
+
+#include "constants.h"
+#include "matrix_m.h"
+#include "parallel_mpi.h"
+#include "profiler.h"
 #include "scalapack_connector.h"
 #include "utils_io.h"
 #ifdef LIBRPA_USE_LIBRI
@@ -19,8 +24,7 @@ template <typename T>
 matrix_m<T> init_local_mat(const LIBRPA::Array_Desc &ad, MAJOR major)
 {
     matrix_m<T> mat_lo(ad.m_loc(), ad.n_loc(), major);
-    if (mat_lo.size() == 0)
-        mat_lo.resize(1, 1);
+    if (mat_lo.size() == 0) mat_lo.resize(1, 1);
     return mat_lo;
 }
 
@@ -42,8 +46,7 @@ matrix_m<T> get_local_mat(const matrix_m<T> &mat_go, const LIBRPA::Array_Desc &a
             mat_lo(i_lo, j_lo) = mat_go(i, j);
         }
     }
-    if (mat_lo.size() == 0)
-        mat_lo.resize(1, 1);
+    if (mat_lo.size() == 0) mat_lo.resize(1, 1);
     return mat_lo;
 }
 
@@ -64,22 +67,18 @@ matrix_m<T> get_local_mat(const T *pv, MAJOR major_pv, const LIBRPA::Array_Desc 
             mat_lo(i_lo, j_lo) = pv[picker(nr, i, nc, j)];
         }
     }
-    if (mat_lo.size() == 0)
-        mat_lo.resize(1, 1);
+    if (mat_lo.size() == 0) mat_lo.resize(1, 1);
     return mat_lo;
 }
 
 template <typename Tdst, typename Tsrc>
-void collect_block_from_IJ_storage(
-    matrix_m<Tdst> &mat_lo,
-    const LIBRPA::Array_Desc &ad,
-    const LIBRPA::AtomicBasis &atbasis_row,
-    const LIBRPA::AtomicBasis &atbasis_col,
-    const int &I, const int &J,
-    Tdst alpha, const Tsrc *pvIJ, MAJOR major_pv)
+void collect_block_from_IJ_storage(matrix_m<Tdst> &mat_lo, const LIBRPA::Array_Desc &ad,
+                                   const LIBRPA::AtomicBasis &atbasis_row,
+                                   const LIBRPA::AtomicBasis &atbasis_col, const int &I,
+                                   const int &J, Tdst alpha, const Tsrc *pvIJ, MAJOR major_pv)
 {
     // assert(mat_lo.nr() == ad.m_loc() && mat_lo.nc() == ad.n_loc());
-    assert(ad.m() == atbasis_row.nb_total && ad.n() == atbasis_col.nb_total );
+    assert(ad.m() == atbasis_row.nb_total && ad.n() == atbasis_col.nb_total);
     const int row_start_id = atbasis_row.get_part_range()[I];
     const int col_start_id = atbasis_col.get_part_range()[J];
     const int row_nb = atbasis_row.get_atom_nb(I);
@@ -96,7 +95,8 @@ void collect_block_from_IJ_storage(
             int jlo = ad.indx_g2l_c(col_start_id + jJ);
             // LIBRPA::utils::lib_printf("col jgo %d jlo %d\n", col_start_id + jJ, jlo);
             if (jlo < 0) continue;
-            // cout << "pickerID " << picker(row_nb, iI, col_nb, jJ) << " " << pvIJ[picker(row_nb, iI, col_nb, jJ)] << " matloc befor " << mat_lo(ilo, jlo);
+            // cout << "pickerID " << picker(row_nb, iI, col_nb, jJ) << " " << pvIJ[picker(row_nb,
+            // iI, col_nb, jJ)] << " matloc befor " << mat_lo(ilo, jlo);
             mat_lo(ilo, jlo) += alpha * pvIJ[picker(row_nb, iI, col_nb, jJ)];
             // cout << " after " << mat_lo(ilo, jlo) << endl;
         }
@@ -104,24 +104,22 @@ void collect_block_from_IJ_storage(
 }
 
 template <typename Tdst, typename Tsrc, typename TA, typename TC, typename TAC = std::pair<TA, TC>>
-void collect_block_from_IJ_storage_tensor(
-    matrix_m<Tdst> &mat_lo,
-    const LIBRPA::Array_Desc &ad,
-    const LIBRPA::AtomicBasis &atbasis_row,
-    const LIBRPA::AtomicBasis &atbasis_col,
-    const TC &cell,
-    Tdst alpha, const std::map<TA,std::map<TAC, RI::Tensor<Tsrc>>> &TMAP)
+void collect_block_from_IJ_storage_tensor(matrix_m<Tdst> &mat_lo, const LIBRPA::Array_Desc &ad,
+                                          const LIBRPA::AtomicBasis &atbasis_row,
+                                          const LIBRPA::AtomicBasis &atbasis_col, const TC &cell,
+                                          Tdst alpha,
+                                          const std::map<TA, std::map<TAC, RI::Tensor<Tsrc>>> &TMAP)
 {
     // assert(mat_lo.nr() == ad.m_loc() && mat_lo.nc() == ad.n_loc());
-    assert(ad.m() == atbasis_row.nb_total && ad.n() == atbasis_col.nb_total );
+    assert(ad.m() == atbasis_row.nb_total && ad.n() == atbasis_col.nb_total);
 
-    matrix_m<Tdst> tmp_loc(mat_lo.nr(),mat_lo.nc(), MAJOR::ROW);
-    size_t cp_size= ad.n_loc()*sizeof(Tdst);
+    matrix_m<Tdst> tmp_loc(mat_lo.nr(), mat_lo.nc(), MAJOR::ROW);
+    size_t cp_size = ad.n_loc() * sizeof(Tdst);
 
     omp_lock_t mat_lock;
     omp_init_lock(&mat_lock);
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int ilo = 0; ilo != ad.m_loc(); ilo++)
     {
         int I_loc, J_loc, i_ab, j_ab;
@@ -132,18 +130,19 @@ void collect_block_from_IJ_storage_tensor(
         {
             int j_gl = ad.indx_l2g_c(jlo);
             atbasis_col.get_local_index(j_gl, J_loc, j_ab);
-            //Tdst temp;
-            // LIBRPA::utils::lib_printf("i_gl I_loc i_ab %d %d %d j_gl J_loc j_ab %d %d %d\n", i_gl, I_loc, i_ab, j_gl, J_loc, j_ab);
+            // Tdst temp;
+            //  LIBRPA::utils::lib_printf("i_gl I_loc i_ab %d %d %d j_gl J_loc j_ab %d %d %d\n",
+            //  i_gl, I_loc, i_ab, j_gl, J_loc, j_ab);
             tmp_loc_row[jlo] = TMAP.at(I_loc).at({J_loc, cell})(i_ab, j_ab);
         }
-        Tdst *row_ptr=tmp_loc.ptr() + ilo* ad.n_loc();
+        Tdst *row_ptr = tmp_loc.ptr() + ilo * ad.n_loc();
         omp_set_lock(&mat_lock);
-        memcpy(row_ptr,&tmp_loc_row[0],cp_size);
+        memcpy(row_ptr, &tmp_loc_row[0], cp_size);
         omp_unset_lock(&mat_lock);
     }
-    #pragma omp barrier
+#pragma omp barrier
     omp_destroy_lock(&mat_lock);
-    if(mat_lo.is_col_major())
+    if (mat_lo.is_col_major())
     {
         tmp_loc.swap_to_col_major();
     }
@@ -152,23 +151,21 @@ void collect_block_from_IJ_storage_tensor(
 
 template <typename Tdst, typename Tsrc, typename TA, typename TAC>
 void collect_block_from_IJ_storage_tensor_transform(
-    matrix_m<Tdst> &mat_lo,
-    const LIBRPA::Array_Desc &ad,
-    const LIBRPA::AtomicBasis &atbasis_row,
+    matrix_m<Tdst> &mat_lo, const LIBRPA::Array_Desc &ad, const LIBRPA::AtomicBasis &atbasis_row,
     const LIBRPA::AtomicBasis &atbasis_col,
     const std::function<Tdst(const TA &, const TAC &)> &transform,
-    const std::map<TA,std::map<TAC, RI::Tensor<Tsrc>>> &TMAP)
+    const std::map<TA, std::map<TAC, RI::Tensor<Tsrc>>> &TMAP)
 {
     // assert(mat_lo.nr() == ad.m_loc() && mat_lo.nc() == ad.n_loc());
-    assert(ad.m() == atbasis_row.nb_total && ad.n() == atbasis_col.nb_total );
+    assert(ad.m() == atbasis_row.nb_total && ad.n() == atbasis_col.nb_total);
 
-    matrix_m<Tdst> tmp_loc(mat_lo.nr(),mat_lo.nc(), MAJOR::ROW);
-    size_t cp_size= ad.n_loc()*sizeof(Tdst);
+    matrix_m<Tdst> tmp_loc(mat_lo.nr(), mat_lo.nc(), MAJOR::ROW);
+    size_t cp_size = ad.n_loc() * sizeof(Tdst);
 
     omp_lock_t mat_lock;
     omp_init_lock(&mat_lock);
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int ilo = 0; ilo != ad.m_loc(); ilo++)
     {
         int I_loc, J_loc, i_ab, j_ab;
@@ -193,14 +190,14 @@ void collect_block_from_IJ_storage_tensor_transform(
                 }
             }
         }
-        Tdst *row_ptr=tmp_loc.ptr() + ilo* ad.n_loc();
+        Tdst *row_ptr = tmp_loc.ptr() + ilo * ad.n_loc();
         omp_set_lock(&mat_lock);
-        memcpy(row_ptr,&tmp_loc_row[0],cp_size);
+        memcpy(row_ptr, &tmp_loc_row[0], cp_size);
         omp_unset_lock(&mat_lock);
     }
-    #pragma omp barrier
+#pragma omp barrier
     omp_destroy_lock(&mat_lock);
-    if(mat_lo.is_col_major())
+    if (mat_lo.is_col_major())
     {
         tmp_loc.swap_to_col_major();
     }
@@ -209,12 +206,10 @@ void collect_block_from_IJ_storage_tensor_transform(
 
 //! collect 2D block from a IJ-pair storage exploiting its symmetric/Hermitian property
 template <typename Tdst, typename Tsrc>
-void collect_block_from_IJ_storage_syhe(
-    matrix_m<Tdst> &mat_lo,
-    const LIBRPA::Array_Desc &ad,
-    const LIBRPA::AtomicBasis &atbasis,
-    const int &I, const int &J, bool conjugate,
-    Tdst alpha, const Tsrc *pvIJ, MAJOR major_pv)
+void collect_block_from_IJ_storage_syhe(matrix_m<Tdst> &mat_lo, const LIBRPA::Array_Desc &ad,
+                                        const LIBRPA::AtomicBasis &atbasis, const int &I,
+                                        const int &J, bool conjugate, Tdst alpha, const Tsrc *pvIJ,
+                                        MAJOR major_pv)
 {
     // assert(mat_lo.nr() == ad.m_loc() && mat_lo.nc() == ad.n_loc());
     assert(ad.m() == atbasis.nb_total && ad.n() == atbasis.nb_total);
@@ -224,8 +219,8 @@ void collect_block_from_IJ_storage_syhe(
         collect_block_from_IJ_storage(mat_lo, ad, atbasis, atbasis, I, J, alpha, pvIJ, major_pv);
         return;
     }
-    const std::function<Tdst(Tdst)> filter = conjugate ? [](Tdst a) { return get_conj(a); }
-                                                 : [](Tdst a) { return a; };
+    const std::function<Tdst(Tdst)> filter =
+        conjugate ? [](Tdst a) { return get_conj(a); } : [](Tdst a) { return a; };
     const int I_nb = atbasis.get_atom_nb(I);
     const int J_nb = atbasis.get_atom_nb(J);
     const auto picker = Indx_pickers_2d[major_pv];
@@ -238,18 +233,21 @@ void collect_block_from_IJ_storage_syhe(
             atbasis.get_local_index(i_gl, I_loc, i_ab);
             atbasis.get_local_index(j_gl, J_loc, j_ab);
             Tdst temp;
-            // LIBRPA::utils::lib_printf("i_gl I_loc i_ab %d %d %d j_gl J_loc j_ab %d %d %d\n", i_gl, I_loc, i_ab, j_gl, J_loc, j_ab);
+            // LIBRPA::utils::lib_printf("i_gl I_loc i_ab %d %d %d j_gl J_loc j_ab %d %d %d\n",
+            // i_gl, I_loc, i_ab, j_gl, J_loc, j_ab);
             if ((I_loc == I) && (J_loc == J))
             {
                 // in the same block
                 temp = pvIJ[picker(I_nb, i_ab, J_nb, j_ab)];
-                // cout << "same block pickerID " << picker(I_nb, i_ab, J_nb, j_ab) << " " << temp << " matloc befor " << mat_lo(ilo, jlo);
+                // cout << "same block pickerID " << picker(I_nb, i_ab, J_nb, j_ab) << " " << temp
+                // << " matloc befor " << mat_lo(ilo, jlo);
             }
             else if ((I_loc == J) && (J_loc == I))
             {
                 // in the opposite block
                 temp = filter(pvIJ[picker(I_nb, j_ab, J_nb, i_ab)]);
-                // cout << "opposite block pickerID " << picker(I_nb, j_ab, J_nb, i_ab) << " " << temp << " matloc befor " << mat_lo(ilo, jlo);
+                // cout << "opposite block pickerID " << picker(I_nb, j_ab, J_nb, i_ab) << " " <<
+                // temp << " matloc befor " << mat_lo(ilo, jlo);
             }
             else
                 continue;
@@ -259,23 +257,21 @@ void collect_block_from_IJ_storage_syhe(
 }
 
 template <typename Tdst, typename TA, typename TC, typename TAC = std::pair<TA, TC>>
-void collect_block_from_ALL_IJ_Tensor(
-    matrix_m<Tdst> &mat_lo,
-    const LIBRPA::Array_Desc &ad,
-    const LIBRPA::AtomicBasis &atbasis,
-    const TC &cell,
-    bool conjugate,
-    Tdst alpha, const std::map<TA,std::map<TAC, RI::Tensor<Tdst>>> TMAP, MAJOR major_pv)
+void collect_block_from_ALL_IJ_Tensor(matrix_m<Tdst> &mat_lo, const LIBRPA::Array_Desc &ad,
+                                      const LIBRPA::AtomicBasis &atbasis, const TC &cell,
+                                      bool conjugate, Tdst alpha,
+                                      const std::map<TA, std::map<TAC, RI::Tensor<Tdst>>> TMAP,
+                                      MAJOR major_pv)
 {
     // assert(mat_lo.nr() == ad.m_loc() && mat_lo.nc() == ad.n_loc());
     assert(ad.m() == atbasis.nb_total && ad.n() == atbasis.nb_total);
-    matrix_m<Tdst> tmp_loc(mat_lo.nr(),mat_lo.nc(), MAJOR::ROW);
-    size_t cp_size= ad.n_loc()*sizeof(Tdst);
+    matrix_m<Tdst> tmp_loc(mat_lo.nr(), mat_lo.nc(), MAJOR::ROW);
+    size_t cp_size = ad.n_loc() * sizeof(Tdst);
 
     omp_lock_t mat_lock;
     omp_init_lock(&mat_lock);
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int ilo = 0; ilo != ad.m_loc(); ilo++)
     {
         int I_loc, J_loc, i_ab, j_ab;
@@ -284,46 +280,43 @@ void collect_block_from_ALL_IJ_Tensor(
         vector<Tdst> tmp_loc_row(ad.n_loc());
         for (int jlo = 0; jlo != ad.n_loc(); jlo++)
         {
-
             int j_gl = ad.indx_l2g_c(jlo);
 
             atbasis.get_local_index(j_gl, J_loc, j_ab);
-            //Tdst temp;
-            // LIBRPA::utils::lib_printf("i_gl I_loc i_ab %d %d %d j_gl J_loc j_ab %d %d %d\n", i_gl, I_loc, i_ab, j_gl, J_loc, j_ab);
-            if(I_loc<=J_loc)
+            // Tdst temp;
+            //  LIBRPA::utils::lib_printf("i_gl I_loc i_ab %d %d %d j_gl J_loc j_ab %d %d %d\n",
+            //  i_gl, I_loc, i_ab, j_gl, J_loc, j_ab);
+            if (I_loc <= J_loc)
             {
-                tmp_loc_row[jlo]= TMAP.at(I_loc).at({J_loc, cell})(i_ab,j_ab);
+                tmp_loc_row[jlo] = TMAP.at(I_loc).at({J_loc, cell})(i_ab, j_ab);
             }
             else
             {
                 Tdst tmp_ele;
-                tmp_ele= TMAP.at(J_loc).at({I_loc, cell})(j_ab,i_ab);
-                if(conjugate)
-                    tmp_ele=get_conj(tmp_ele);
-                tmp_loc_row[jlo]=tmp_ele;
+                tmp_ele = TMAP.at(J_loc).at({I_loc, cell})(j_ab, i_ab);
+                if (conjugate) tmp_ele = get_conj(tmp_ele);
+                tmp_loc_row[jlo] = tmp_ele;
             }
         }
-        Tdst *row_ptr=tmp_loc.ptr()+ilo* ad.n_loc();
+        Tdst *row_ptr = tmp_loc.ptr() + ilo * ad.n_loc();
         omp_set_lock(&mat_lock);
-        memcpy(row_ptr,&tmp_loc_row[0],cp_size);
+        memcpy(row_ptr, &tmp_loc_row[0], cp_size);
         omp_unset_lock(&mat_lock);
     }
-    #pragma omp barrier
+#pragma omp barrier
     omp_destroy_lock(&mat_lock);
-    if(mat_lo.is_col_major())
+    if (mat_lo.is_col_major())
     {
         tmp_loc.swap_to_col_major();
     }
-    mat_lo=tmp_loc;
+    mat_lo = tmp_loc;
 }
-
 
 //! collect a IJ-pair storage from a 2D block local matrix
 template <typename T>
 void map_block_to_IJ_storage(map<int, map<int, matrix_m<T>>> &IJmap,
                              const LIBRPA::AtomicBasis &atbasis_row,
-                             const LIBRPA::AtomicBasis &atbasis_col,
-                             const matrix_m<T> &mat_lo,
+                             const LIBRPA::AtomicBasis &atbasis_col, const matrix_m<T> &mat_lo,
                              const LIBRPA::Array_Desc &desc, MAJOR major_map)
 {
     assert(desc.m() == atbasis_row.nb_total && desc.n() == atbasis_col.nb_total);
@@ -337,7 +330,8 @@ void map_block_to_IJ_storage(map<int, map<int, matrix_m<T>>> &IJmap,
             int j_glo = desc.indx_l2g_c(j_lo);
             atbasis_col.get_local_index(j_glo, J, jJ);
             if (IJmap.count(I) == 0 || IJmap.at(I).count(J) == 0 || IJmap.at(I).at(J).size() == 0)
-                IJmap[I][J] = matrix_m<T>{static_cast<int>(atbasis_row.get_atom_nb(I)), static_cast<int>(atbasis_col.get_atom_nb(J)), major_map};
+                IJmap[I][J] = matrix_m<T>{static_cast<int>(atbasis_row.get_atom_nb(I)),
+                                          static_cast<int>(atbasis_col.get_atom_nb(J)), major_map};
             IJmap[I][J](iI, jJ) = mat_lo(i_lo, j_lo);
         }
     }
@@ -458,13 +452,12 @@ template <typename T>
 matrix_m<std::complex<T>> power_hemat_blacs(matrix_m<std::complex<T>> &A_local,
                                             const LIBRPA::Array_Desc &ad_A,
                                             matrix_m<std::complex<T>> &Z_local,
-                                            const LIBRPA::Array_Desc &ad_Z,
-                                            size_t &n_filtered, T *W, T power,
-                                            const T &threshold = -1.e5)
+                                            const LIBRPA::Array_Desc &ad_Z, size_t &n_filtered,
+                                            T *W, T power, const T &threshold = -1.e5)
 {
     using LIBRPA::envs::ofs_myid;
 
-    assert (A_local.is_col_major() && Z_local.is_col_major());
+    assert(A_local.is_col_major() && Z_local.is_col_major());
     const bool is_int_power = fabs(power - int(power)) < 1e-4;
     const int n = ad_A.m();
     const char jobz = 'V';
@@ -479,8 +472,8 @@ matrix_m<std::complex<T>> power_hemat_blacs(matrix_m<std::complex<T>> &A_local,
     ad_A_opt.init(n, n, blocksize_row_opt, blocksize_col_opt, 0, 0);
     auto A_local_opt = init_local_mat<std::complex<T>>(ad_A_opt, MAJOR::COL);
     // NOTE: imply A and Z should be in the same context
-    ScalapackConnector::pgemr2d_f(n, n, A_local.ptr(), 1, 1, ad_A.desc,
-                                  A_local_opt.ptr(), 1, 1, ad_A_opt.desc, ad_A.ictxt());
+    ScalapackConnector::pgemr2d_f(n, n, A_local.ptr(), 1, 1, ad_A.desc, A_local_opt.ptr(), 1, 1,
+                                  ad_A_opt.desc, ad_A.ictxt());
 
     // initialize descriptor of array Z for optimized block size
     if (ad_A.ictxt() != ad_Z.ictxt())
@@ -494,20 +487,20 @@ matrix_m<std::complex<T>> power_hemat_blacs(matrix_m<std::complex<T>> &A_local,
 
     Profiler::start("power_hemat_blacs_1");
     int lwork = -1, lrwork = -1, info = 0;
-    std::complex<T>  *work;
+    std::complex<T> *work;
     T *rwork;
     {
-        work  = new std::complex<T>[1];
+        work = new std::complex<T>[1];
         rwork = new T[1];
         // query the optimal lwork and lrwork
         T *Wquery = new T[1];
         // LIBRPA::utils::lib_printf("power_hemat_blacs descA %s\n", ad_A.info_desc().c_str());
-        ScalapackConnector::pheev_f(jobz, uplo,
-                n, A_local_opt.ptr(), 1, 1, ad_A_opt.desc,
-                Wquery, Z_local_opt.ptr(), 1, 1, ad_A_opt.desc, work, lwork, rwork, lrwork, info);
+        ScalapackConnector::pheev_f(jobz, uplo, n, A_local_opt.ptr(), 1, 1, ad_A_opt.desc, Wquery,
+                                    Z_local_opt.ptr(), 1, 1, ad_A_opt.desc, work, lwork, rwork,
+                                    lrwork, info);
         lwork = int(work[0].real());
         lrwork = int(rwork[0]);
-        delete [] work, Wquery, rwork;
+        delete[] work, Wquery, rwork;
     }
     Profiler::stop("power_hemat_blacs_1");
 
@@ -540,17 +533,22 @@ matrix_m<std::complex<T>> power_hemat_blacs(matrix_m<std::complex<T>> &A_local,
     // filter and scale the eigenvalues, store in a temp array
     Profiler::start("power_hemat_blacs_4");
     T W_temp[n];
-    for (int i = 0; i != n_filtered; i++)
-        W_temp[i] = 0.0;
+    for (int i = 0; i != n_filtered; i++) W_temp[i] = 0.0;
     for (int i = n_filtered; i != n; i++)
     {
         if (W[i] < 0 && !is_int_power)
         {
-            LIBRPA::utils::lib_printf("Warning! unfiltered negative eigenvalue with non-integer power: # %d ev = %f , pow = %f\n", i, W[i], power);
+            LIBRPA::utils::lib_printf(
+                "Warning! unfiltered negative eigenvalue with non-integer power: # %d ev = %f , "
+                "pow = %f\n",
+                i, W[i], power);
         }
         if (fabs(W[i]) < 1e-10 && power < 0)
         {
-            LIBRPA::utils::lib_printf("Warning! unfiltered nearly-singular eigenvalue with negative power: # %d ev = %f , pow = %f\n", i, W[i], power);
+            LIBRPA::utils::lib_printf(
+                "Warning! unfiltered nearly-singular eigenvalue with negative power: # %d ev = %f "
+                ", pow = %f\n",
+                i, W[i], power);
         }
         W_temp[i] = std::pow(W[i], power);
     }
@@ -579,7 +577,8 @@ matrix_m<std::complex<T>> power_hemat_blacs(matrix_m<std::complex<T>> &A_local,
 }
 
 template <typename T, typename Treal = typename to_real<T>::type>
-void print_matrix_mm_parallel(ostream &os, const matrix_m<T> &mat_loc, const LIBRPA::Array_Desc &ad, Treal threshold = 1e-15, bool row_first = true)
+void print_matrix_mm_parallel(ostream &os, const matrix_m<T> &mat_loc, const LIBRPA::Array_Desc &ad,
+                              Treal threshold = 1e-15, bool row_first = true)
 {
     LIBRPA::Array_Desc ad_fb(ad.ictxt());
     const int nr = ad.m(), nc = ad.n();
@@ -587,7 +586,8 @@ void print_matrix_mm_parallel(ostream &os, const matrix_m<T> &mat_loc, const LIB
     ad_fb.init(nr, nc, nr, nc, irsrc, icsrc);
     matrix_m<T> mat_glo = init_local_mat<T>(ad_fb, mat_loc.major());
 
-    ScalapackConnector::pgemr2d_f(nr, nc, mat_loc.ptr(), 1, 1, ad.desc, mat_glo.ptr(), 1, 1, ad_fb.desc, ad.ictxt());
+    ScalapackConnector::pgemr2d_f(nr, nc, mat_loc.ptr(), 1, 1, ad.desc, mat_glo.ptr(), 1, 1,
+                                  ad_fb.desc, ad.ictxt());
     if (ad_fb.is_src() && os.good())
     {
         print_matrix_mm(mat_glo, os, threshold, row_first);
@@ -595,11 +595,12 @@ void print_matrix_mm_parallel(ostream &os, const matrix_m<T> &mat_loc, const LIB
 }
 
 template <typename T, typename Treal = typename to_real<T>::type>
-void print_matrix_mm_file_parallel(const char *fn, const matrix_m<T> &mat_loc, const LIBRPA::Array_Desc &ad, Treal threshold = 1e-15, bool row_first = true)
+void print_matrix_mm_file_parallel(const char *fn, const matrix_m<T> &mat_loc,
+                                   const LIBRPA::Array_Desc &ad, Treal threshold = 1e-15,
+                                   bool row_first = true)
 {
     ofstream fs;
-    if (ad.is_src())
-        fs.open(fn);
+    if (ad.is_src()) fs.open(fn);
     print_matrix_mm_parallel(fs, mat_loc, ad, threshold, row_first);
 }
 
@@ -626,11 +627,9 @@ matrix_m<T> multiply_scalapack(const matrix_m<T> &m1_loc, const LIBRPA::Array_De
     matrix_m<T> prod_loc = init_local_mat<T>(desc_prod, m1_loc.major());
     if (m1_loc.is_col_major())
     {
-        ScalapackConnector::pgemm_f('N', 'N', m, n, k, 1.0,
-                m1_loc.ptr(), 1, 1, desc_m1.desc,
-                m2_loc.ptr(), 1, 1, desc_m2.desc,
-                0.0,
-                prod_loc.ptr(), 1, 1, desc_prod.desc);
+        ScalapackConnector::pgemm_f('N', 'N', m, n, k, 1.0, m1_loc.ptr(), 1, 1, desc_m1.desc,
+                                    m2_loc.ptr(), 1, 1, desc_m2.desc, 0.0, prod_loc.ptr(), 1, 1,
+                                    desc_prod.desc);
     }
     else
     {
@@ -647,28 +646,31 @@ void invert_scalapack(matrix_m<T> &m_loc, const LIBRPA::Array_Desc &desc_m)
     if (m_loc.is_col_major())
     {
         // NOTE: use local leading dimension desc_m.lld() will lead to invalid pointer error
-        int *ipiv = new int [desc_m.m()];
+        int *ipiv = new int[desc_m.m()];
         // LIBRPA::utils::lib_printf("invert_scalpack desc %s\n", desc_m.info_desc().c_str());
-        ScalapackConnector::pgetrf_f(desc_m.m(), desc_m.n(), m_loc.ptr(), 1, 1, desc_m.desc, ipiv, info);
+        ScalapackConnector::pgetrf_f(desc_m.m(), desc_m.n(), m_loc.ptr(), 1, 1, desc_m.desc, ipiv,
+                                     info);
         // get optimized work size
         int lwork = -1, liwork = -1;
         {
-            T *work = new T [1];
-            int *iwork = new int [1];
-            ScalapackConnector::pgetri_f(desc_m.m(), m_loc.ptr(), 1, 1, desc_m.desc, ipiv, work, lwork, iwork, liwork, info);
+            T *work = new T[1];
+            int *iwork = new int[1];
+            ScalapackConnector::pgetri_f(desc_m.m(), m_loc.ptr(), 1, 1, desc_m.desc, ipiv, work,
+                                         lwork, iwork, liwork, info);
             lwork = int(get_real(work[0]));
             liwork = iwork[0];
             // LIBRPA::utils::lib_printf("lwork %d liwork %d\n", lwork, liwork);
-            delete [] work;
-            delete [] iwork;
+            delete[] work;
+            delete[] iwork;
         }
 
         T *work = new T[lwork];
         int *iwork = new int[liwork];
-        ScalapackConnector::pgetri_f(desc_m.m(), m_loc.ptr(), 1, 1, desc_m.desc, ipiv, work, lwork, iwork, liwork, info);
-        delete [] iwork;
-        delete [] work;
-        delete [] ipiv;
+        ScalapackConnector::pgetri_f(desc_m.m(), m_loc.ptr(), 1, 1, desc_m.desc, ipiv, work, lwork,
+                                     iwork, liwork, info);
+        delete[] iwork;
+        delete[] work;
+        delete[] ipiv;
         // LIBRPA::utils::lib_printf("done free\n");
     }
     else
