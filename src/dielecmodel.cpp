@@ -149,7 +149,8 @@ double diele_func::cal_factor(string name)
     const double eV = 1.60217662e-19;
     double dielectric_unit;
     //! Bohr to A
-    const double primitive_cell_volume = std::abs(latvec.Det());  //* BOHR2ANG * BOHR2ANG * BOHR2ANG;
+    const double primitive_cell_volume =
+        std::abs(latvec.Det());  //* BOHR2ANG * BOHR2ANG * BOHR2ANG;
     // latvec.print();
     if (name == "head")
     {
@@ -211,6 +212,17 @@ void diele_func::cal_wing()
     }
     tranform_mu_to_lambda();
     std::cout << "* Success: calculate wing term.\n";
+
+    if (Params::debug)
+    {
+        df_headwing.test_head();
+        df_headwing.test_wing();
+    }
+    this->wing_mu.clear();
+    this->Coul_vector.clear();
+    this->Coul_value.clear();
+    this->Ctri_mn.clear();
+    this->Ctri_ij.clear();
 };
 
 void diele_func::tranform_mu_to_lambda()
@@ -985,6 +997,10 @@ void diele_func::rewrite_eps(matrix_m<std::complex<double>> &chi0_block, const i
     get_body_inv(chi0_block);
     cal_eps(ifreq);
     chi0_block = this->chi0;
+
+    // this->chi0.clear(); // quote by chi0_block, should not be clear
+    this->body_inv.clear();
+    this->Lind.clear();
     /*if (ifreq == 0)
         std::cout << "* Success: replace average inverse dielectric matrix with head and wing.\n";*/
 };

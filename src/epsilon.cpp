@@ -2596,6 +2596,9 @@ compute_Wc_freq_q_blacs_wing(const Chi0 &chi0, const atpair_k_cplx_mat_t &coulma
 #else
     throw std::logic_error("need compilation with LibRI");
 #endif
+
+    
+
     return Wc_freq_q;
 }
 

@@ -68,8 +68,10 @@ void task_g0w0()
                     for (const auto &J_chi0 : I_Jchi0.second)
                     {
                         const auto &J = J_chi0.first;
-                        sprintf(fn, "chi0fq_ifreq_%d_iq_%d_I_%d_J_%d_id_%d.mtx", ifreq, iq, I, J, mpi_comm_global_h.myid);
-                        print_complex_matrix_mm(J_chi0.second, Params::output_dir + "/" + fn, 1e-15);
+                        sprintf(fn, "chi0fq_ifreq_%d_iq_%d_I_%d_J_%d_id_%d.mtx", ifreq, iq, I, J,
+                                mpi_comm_global_h.myid);
+                        print_complex_matrix_mm(J_chi0.second, Params::output_dir + "/" + fn,
+                                                1e-15);
                     }
                 }
             }
@@ -189,8 +191,10 @@ void task_g0w0()
                     const auto &J = J_qWc.first;
                     for (const auto &q_Wc : J_qWc.second)
                     {
-                        const int iq = std::distance(klist.begin(), std::find(klist.begin(), klist.end(), q_Wc.first));
-                        sprintf(fn, "Wcfq_ifreq_%d_iq_%d_I_%d_J_%d_id_%d.mtx", ifreq, iq, I, J, mpi_comm_global_h.myid);
+                        const int iq = std::distance(
+                            klist.begin(), std::find(klist.begin(), klist.end(), q_Wc.first));
+                        sprintf(fn, "Wcfq_ifreq_%d_iq_%d_I_%d_J_%d_id_%d.mtx", ifreq, iq, I, J,
+                                mpi_comm_global_h.myid);
                         print_matrix_mm_file(q_Wc.second, Params::output_dir + "/" + fn, 1e-15);
                     }
                 }
@@ -296,6 +300,21 @@ void task_g0w0()
                 }
             }
 
+            // output bandgap
+            double bandgap = 0.0;
+            double valence = -1.e10;
+            double conduct = 1.e10;
+            int nocc = 0;
+            auto &wg = meanfield.get_weight()[0];
+            for (int i = 0; i != wg.size; i++)
+            {
+                if (wg.c[i] == 0.)
+                {
+                    nocc = i;
+                    break;
+                }
+            }
+
             // display results
             const std::string banner(124, '-');
             printf("Printing quasi-particle energy [unit: eV]\n\n");
@@ -304,26 +323,43 @@ void task_g0w0()
                 for (int i_kpoint = 0; i_kpoint < meanfield.get_n_kpoints(); i_kpoint++)
                 {
                     const auto &k = kfrac_list[i_kpoint];
-                    printf("spin %2d, k-point %4d: (%.5f, %.5f, %.5f) \n",
-                            i_spin+1, i_kpoint+1, k.x, k.y, k.z);
+                    printf("spin %2d, k-point %4d: (%.5f, %.5f, %.5f) \n", i_spin + 1, i_kpoint + 1,
+                           k.x, k.y, k.z);
                     printf("%124s\n", banner.c_str());
-                    printf("%5s %16s %16s %16s %16s %16s %16s %16s\n", "State", "occ", "e_mf", "v_xc", "v_exx", "ReSigc", "ImSigc", "e_qp");
+                    printf("%5s %16s %16s %16s %16s %16s %16s %16s\n", "State", "occ", "e_mf",
+                           "v_xc", "v_exx", "ReSigc", "ImSigc", "e_qp");
                     printf("%124s\n", banner.c_str());
                     for (int i_state = 0; i_state < meanfield.get_n_bands(); i_state++)
                     {
-                        const auto &occ_state = meanfield.get_weight()[i_spin](i_kpoint, i_state) * meanfield.get_n_kpoints();
-                        const auto &eks_state = meanfield.get_eigenvals()[i_spin](i_kpoint, i_state) * HA2EV;
+                        const auto &occ_state = meanfield.get_weight()[i_spin](i_kpoint, i_state) *
+                                                meanfield.get_n_kpoints();
+                        const auto &eks_state =
+                            meanfield.get_eigenvals()[i_spin](i_kpoint, i_state) * HA2EV;
                         const auto &exx_state = exx.Eexx[i_spin][i_kpoint][i_state] * HA2EV;
                         const auto &vxc_state = vxc[i_spin](i_kpoint, i_state) * HA2EV;
                         const auto &resigc = sigc_all[i_spin][i_kpoint][i_state].real() * HA2EV;
                         const auto &imsigc = sigc_all[i_spin][i_kpoint][i_state].imag() * HA2EV;
                         const auto &eqp = e_qp_all[i_spin][i_kpoint][i_state] * HA2EV;
                         printf("%5d %16.5f %16.5f %16.5f %16.5f %16.5f %16.5f %16.5f\n",
-                               i_state+1, occ_state, eks_state, vxc_state, exx_state, resigc, imsigc, eqp);
+                               i_state + 1, occ_state, eks_state, vxc_state, exx_state, resigc,
+                               imsigc, eqp);
+
+                        // output bandgap
+                        if (i_state == nocc - 1 && eqp > valence)  // HOMO
+                        {
+                            valence = eqp;
+                        }
+                        else if (i_state == nocc && eqp < conduct)  // LUMO
+                        {
+                            conduct = eqp;
+                        }
                     }
                     printf("\n");
                 }
             }
+            bandgap = conduct - valence;
+            lib_printf("Bands of occupation: %4d \n", nocc);
+            lib_printf("Bandgap(eV): %12.7f \n", bandgap);
         }
         Profiler::stop("g0w0_solve_qpe");
     }
