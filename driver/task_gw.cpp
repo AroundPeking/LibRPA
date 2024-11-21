@@ -300,6 +300,21 @@ void task_g0w0()
                 }
             }
 
+            // output bandgap
+            double bandgap = 0.0;
+            double valence = -1.e10;
+            double conduct = 1.e10;
+            int nocc = 0;
+            auto &wg = meanfield.get_weight()[0];
+            for (int i = 0; i != wg.size; i++)
+            {
+                if (wg.c[i] == 0.)
+                {
+                    nocc = i;
+                    break;
+                }
+            }
+
             // display results
             const std::string banner(107, '-');
             printf("Printing quasi-particle energy [unit: eV]\n\n");
@@ -325,10 +340,23 @@ void task_g0w0()
                         const auto &eqp = e_qp_all[i_spin][i_kpoint][i_state] * HA2EV;
                         printf("%5d %16.5f %16.5f %16.5f %16.5f %16.5f %16.5f\n", i_state + 1,
                                eks_state, vxc_state, exx_state, resigc, imsigc, eqp);
+
+                        // output bandgap
+                        if (i_state == nocc - 1 && eqp > valence)  // HOMO
+                        {
+                            valence = eqp;
+                        }
+                        else if (i_state == nocc && eqp < conduct)  // LUMO
+                        {
+                            conduct = eqp;
+                        }
                     }
                     printf("\n");
                 }
             }
+            bandgap = conduct - valence;
+            lib_printf("Bands of occupation: %4d \n", nocc);
+            lib_printf("Bandgap(eV): %12.7f \n", bandgap);
         }
         Profiler::stop("g0w0_solve_qpe");
     }
