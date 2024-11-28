@@ -7,6 +7,10 @@
 using RI::Tensor;
 using RI::Communicate_Tensors_Map_Judge::comm_map2_first;
 #endif
+using LIBRPA::Array_Desc;
+using LIBRPA::envs::blacs_ctxt_global_h;
+using LIBRPA::envs::mpi_comm_global_h;
+using LIBRPA::envs::ofs_myid;
 using LIBRPA::utils::lib_printf;
 
 const int DoubleHavriliakNegami::d_npar = 8;
@@ -547,16 +551,13 @@ void diele_func::get_Xv()
     Vector3_Order<double> q = {0.0, 0.0, 0.0};
     size_t n_singular;
     vec<double> eigenvalues(n_abf);
-    using LIBRPA::Array_Desc;
-    using LIBRPA::envs::blacs_ctxt_global_h;
-    using LIBRPA::envs::mpi_comm_global_h;
 
     mpi_comm_global_h.barrier();
 
     Array_Desc desc_nabf_nabf(blacs_ctxt_global_h);
     desc_nabf_nabf.init_square_blk(n_abf, n_abf, 0, 0);
-    const auto set_IJ_nabf_nabf =
-        LIBRPA::get_necessary_IJ_from_block_2D_sy('U', LIBRPA::atomic_basis_abf, desc_nabf_nabf);
+    const auto set_IJ_nabf_nabf = LIBRPA::utils::get_necessary_IJ_from_block_2D_sy(
+        'U', LIBRPA::atomic_basis_abf, desc_nabf_nabf);
     const auto s0_s1 = get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf);
     auto coul_eigen_block = init_local_mat<double>(desc_nabf_nabf, MAJOR::COL);
     auto coulwc_block = init_local_mat<double>(desc_nabf_nabf, MAJOR::COL);
@@ -639,26 +640,20 @@ void diele_func::get_Xv()
     Vector3_Order<double> q = {0.0, 0.0, 0.0};
     size_t n_singular;
     vec<double> eigenvalues(n_abf);
-    using LIBRPA::Array_Desc;
-    using LIBRPA::envs::blacs_ctxt_global_h;
-    using LIBRPA::envs::mpi_comm_global_h;
 
     mpi_comm_global_h.barrier();
 
     Array_Desc desc_nabf_nabf(blacs_ctxt_global_h);
     desc_nabf_nabf.init_square_blk(n_abf, n_abf, 0, 0);
     const auto set_IJ_nabf_nabf =
-        LIBRPA::get_necessary_IJ_from_block_2D_sy('U', LIBRPA::atomic_basis_abf, desc_nabf_nabf);
-    const auto s0_s1 = get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf);
-    auto coul_eigen_block = init_local_mat<complex<double>>(desc_nabf_nabf, MAJOR::COL);
-    auto coulwc_block = init_local_mat<complex<double>>(desc_nabf_nabf, MAJOR::COL);
-    coulwc_block.zero_out();
-    std::map<int, std::map<std::pair<int, std::array<double, 3>>, RI::Tensor<complex<double>>>>
-        couleps_libri;
-    const auto atpair_local = dispatch_upper_trangular_tasks(
-        natom, blacs_ctxt_global_h.myid, blacs_ctxt_global_h.nprows, blacs_ctxt_global_h.npcols,
-        blacs_ctxt_global_h.myprow, blacs_ctxt_global_h.mypcol);
-    for (const auto &Mu_Nu : atpair_local)
+        LIBRPA::utils::get_necessary_IJ_from_block_2D_sy('U', LIBRPA::atomic_basis_abf,
+desc_nabf_nabf); const auto s0_s1 = get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf); auto
+coul_eigen_block = init_local_mat<complex<double>>(desc_nabf_nabf, MAJOR::COL); auto coulwc_block =
+init_local_mat<complex<double>>(desc_nabf_nabf, MAJOR::COL); coulwc_block.zero_out(); std::map<int,
+std::map<std::pair<int, std::array<double, 3>>, RI::Tensor<complex<double>>>> couleps_libri; const
+auto atpair_local = dispatch_upper_trangular_tasks( natom, blacs_ctxt_global_h.myid,
+blacs_ctxt_global_h.nprows, blacs_ctxt_global_h.npcols, blacs_ctxt_global_h.myprow,
+blacs_ctxt_global_h.mypcol); for (const auto &Mu_Nu : atpair_local)
     {
         const auto Mu = Mu_Nu.first;
         const auto Nu = Mu_Nu.second;
@@ -773,9 +768,6 @@ void diele_func::test_wing()
 
 void diele_func::get_body_inv(matrix_m<std::complex<double>> &chi0_block)
 {
-    using LIBRPA::Array_Desc;
-    using LIBRPA::envs::blacs_ctxt_global_h;
-    using LIBRPA::envs::mpi_comm_global_h;
     mpi_comm_global_h.barrier();
     Array_Desc desc_nabf_nabf(blacs_ctxt_global_h);
     desc_nabf_nabf.init_square_blk(n_nonsingular - 1, n_nonsingular - 1, 0, 0);
@@ -886,9 +878,6 @@ void diele_func::calculate_q_gamma()
 
 void diele_func::cal_eps(const int ifreq)
 {
-    using LIBRPA::Array_Desc;
-    using LIBRPA::envs::blacs_ctxt_global_h;
-    using LIBRPA::envs::mpi_comm_global_h;
     mpi_comm_global_h.barrier();
     Array_Desc desc_nabf_nabf(blacs_ctxt_global_h);
     desc_nabf_nabf.init_square_blk(n_abf, n_abf, 0, 0);

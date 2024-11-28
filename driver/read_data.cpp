@@ -195,7 +195,7 @@ static int handle_KS_file(const string &file_path, MeanField &mf)
         }
         for (int is = 0; is != nspin; is++)
         {
-            set_ao_basis_wfc(is, ik, re.data() + is * n, im.data() + is * n);
+            set_ao_basis_wfc(is, ik, re.data() + is * n, im.data() + is * n, mf);
         }
         // for abacus
         // for (int ib = 0; ib != NBANDS; ib++)

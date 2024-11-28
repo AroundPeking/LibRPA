@@ -5,6 +5,7 @@
 #include "atomic_basis.h"
 #include "complexmatrix.h"
 #include "constants.h"
+#include "envs_blacs.h"
 #include "envs_io.h"
 #include "envs_mpi.h"
 #include "lebedev-quadrature/lebedev_quadrature.hpp"
@@ -15,6 +16,7 @@
 #include "params.h"
 #include "pbc.h"
 #include "ri.h"
+#include "utils_blacs.h"
 #include "utils_io.h"
 #include "vec.h"
 
