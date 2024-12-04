@@ -92,6 +92,7 @@ class diele_func
     void cal_head();
     double cal_factor(string name);
     void test_head();
+    std::vector<double> get_head_vec();
 
     void cal_wing();
     // compute wing in ABF representation
