@@ -364,7 +364,7 @@ void diele_func::init_Cs()
     using RI::Tensor;
     const int n_atom = Cs_data.data_libri.size();
 
-    for (int ik; ik != nk; ik++)
+    for (int ik = 0; ik != nk; ik++)
     {
         for (int I = 0; I != n_atom; I++)
         {
@@ -416,7 +416,7 @@ void diele_func::FT_R2k()
     const int n_atom = Cs_data.data_libri.size();
     // std::cout << "Number of atom: " << n_atom << std::endl;
 
-    for (int ik; ik != nk; ik++)
+    for (int ik = 0; ik != nk; ik++)
     {
         for (int I = 0; I != n_atom; I++)
         {
