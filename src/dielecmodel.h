@@ -8,7 +8,6 @@
 #include "envs_blacs.h"
 #include "envs_io.h"
 #include "envs_mpi.h"
-#include "lebedev-quadrature/lebedev_quadrature.hpp"
 #include "libri_stub.h"
 #include "matrix_m_parallel_utils.h"
 #include "meanfield.h"

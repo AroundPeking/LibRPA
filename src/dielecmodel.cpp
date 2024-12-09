@@ -1,6 +1,8 @@
 #include "dielecmodel.h"
 
 #include <cmath>
+
+#include "lebedev-quadrature/lebedev_quadrature.hpp"
 #ifdef LIBRPA_USE_LIBRI
 #include <RI/comm/mix/Communicate_Tensors_Map_Judge.h>
 #include <RI/global/Tensor.h>
