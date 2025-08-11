@@ -144,7 +144,7 @@ void Exx::build(const Cs_LRI &Cs, const vector<Vector3_Order<int>> &Rlist,
     }
     mpi_comm_global_h.barrier();
 
-    RI::Exx<int, int, 3, Tdata> exx_libri;
+    RI::Exx<int, int, 3, double> exx_libri;
     map<int, std::array<double, 3>> atoms_pos;
     for (int i = 0; i != atom_mu.size(); i++)
         atoms_pos.insert(pair<int, std::array<double, 3>>{i, {0, 0, 0}});
@@ -168,34 +168,14 @@ void Exx::build(const Cs_LRI &Cs, const vector<Vector3_Order<int>> &Rlist,
     Profiler::start("build_real_space_exx_1", "Prepare C libRI object");
     envs::ofs_myid << "Number of Cs keys: " << get_num_keys(Cs.data_libri) << "\n";
     // print_keys(envs::ofs_myid, Cs.data_libri);
-
-    // TODO: template Cs_LRI
-    if constexpr (std::is_same<Tdata, std::complex<double>>::value)
-    {
-        std::map<int, std::map<libri_types<int, int>::TAC, RI::Tensor<Tdata>>> data_libri;
-        for (const auto &I_JR_C : Cs.data_libri)
-        {
-            const auto I = I_JR_C.first;
-            for (const auto &JR_C : I_JR_C.second)
-            {
-                const auto J = JR_C.first.first;
-                const auto R = JR_C.first.second;
-                const auto &C = JR_C.second;
-                auto JR = std::pair<int, std::array<int, 3>>(J, R);
-                data_libri[I][JR] = RI::Global_Func::convert<Tdata>(C);
-            }
-        }
-        exx_libri.set_Cs(data_libri, Params::libri_exx_threshold_C);
-    }
-    else
-        exx_libri.set_Cs(Cs.data_libri, Params::libri_exx_threshold_C);
+    exx_libri.set_Cs(Cs.data_libri, Params::libri_exx_threshold_C);
     Profiler::stop("build_real_space_exx_1");
     envs::ofs_myid << "Finished setup Cs for EXX\n";
     std::flush(envs::ofs_myid);
 
     // initialize Coulomb matrix
     Profiler::start("build_real_space_exx_2", "Prepare V libRI object");
-    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<Tdata>>> V_libri;
+    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>> V_libri;
     Profiler::start("build_real_space_exx_2_1");
     if (LIBRPA::parallel_routing == LIBRPA::ParallelRouting::R_TAU)
     {
@@ -210,20 +190,11 @@ void Exx::build(const Cs_LRI &Cs, const vector<Vector3_Order<int>> &Rlist,
             // debug
             // printf("I J R %zu %zu %d %d %d, max(V) %f\n", I, J, R.x, R.y, R.z, VIJR->max());
             std::array<int, 3> Ra{R.x, R.y, R.z};
-            std::valarray<Tdata> VIJR_va;
-            if constexpr (std::is_same<Tdata, std::complex<double>>::value)
-            {
-                VIJR_va = std::valarray<std::complex<double>>(VIJR->size);
-                for (size_t i = 0; i < VIJR->size; ++i)
-                {
-                    VIJR_va[i] = std::complex<double>(VIJR->c[i], 0.0);
-                }
-            }
-            else
-                VIJR_va = std::valarray<Tdata>(VIJR->c, VIJR->size);
-            auto pv = std::make_shared<std::valarray<Tdata>>();
+            std::valarray<double> VIJR_va;
+            VIJR_va = std::valarray<double>(VIJR->c, VIJR->size);
+            auto pv = std::make_shared<std::valarray<double>>();
             *pv = VIJR_va;
-            V_libri[I][{J, Ra}] = RI::Tensor<Tdata>({size_t(VIJR->nr), size_t(VIJR->nc)}, pv);
+            V_libri[I][{J, Ra}] = RI::Tensor<double>({size_t(VIJR->nr), size_t(VIJR->nc)}, pv);
         }
     }
     else
@@ -239,20 +210,11 @@ void Exx::build(const Cs_LRI &Cs, const vector<Vector3_Order<int>> &Rlist,
                     const auto &R = R_V.first;
                     const auto &V = R_V.second;
                     std::array<int, 3> Ra{R.x, R.y, R.z};
-                    std::valarray<Tdata> VIJR_va;
-                    if constexpr (std::is_same<Tdata, std::complex<double>>::value)
-                    {
-                        VIJR_va = std::valarray<std::complex<double>>(V->size);
-                        for (size_t i = 0; i < V->size; ++i)
-                        {
-                            VIJR_va[i] = std::complex<double>(V->c[i], 0.0);
-                        }
-                    }
-                    else
-                        VIJR_va = std::valarray<Tdata>(V->c, V->size);
-                    auto pv = std::make_shared<std::valarray<Tdata>>();
+                    std::valarray<double> VIJR_va;
+                    VIJR_va = std::valarray<double>(V->c, V->size);
+                    auto pv = std::make_shared<std::valarray<double>>();
                     *pv = VIJR_va;
-                    V_libri[I][{J, Ra}] = RI::Tensor<Tdata>({size_t(V->nr), size_t(V->nc)}, pv);
+                    V_libri[I][{J, Ra}] = RI::Tensor<double>({size_t(V->nr), size_t(V->nc)}, pv);
                 }
             }
         }
@@ -281,8 +243,11 @@ void Exx::build(const Cs_LRI &Cs, const vector<Vector3_Order<int>> &Rlist,
             for (auto is2 = 0; is2 != n_soc; is2++)
             {
                 Profiler::start("build_real_space_exx_3", "Prepare DM libRI object");
-                std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<Tdata>>>
-                    dmat_libri;
+                std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>>
+                    dmat_libri_real;
+                // used only for SOC
+                std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>>
+                    dmat_libri_imag;
                 for (const auto &R : Rlist)
                 {
                     std::array<int, 3> Ra{R.x, R.y, R.z};
@@ -296,21 +261,32 @@ void Exx::build(const Cs_LRI &Cs, const vector<Vector3_Order<int>> &Rlist,
                             const auto dmat_IJR =
                                 this->extract_dmat_cplx_R_IJblock(dmat_cplx, I, J);
                             this->warn_dmat_IJR_nonzero_imag(dmat_IJR, isp, I, J, R);
-                            std::valarray<Tdata> dmat_va;
+                            std::valarray<double> dmat_va_real;
+                            std::valarray<double> dmat_va_imag;  // SOC
+                            dmat_va_real =
+                                std::valarray<double>(dmat_IJR.real().c, dmat_IJR.real().size);
+                            auto pdmat_real = std::make_shared<std::valarray<double>>();
+                            *pdmat_real = dmat_va_real;
+                            dmat_libri_real[I][{J, Ra}] = RI::Tensor<double>(
+                                {size_t(dmat_IJR.real().nr), size_t(dmat_IJR.real().nc)},
+                                pdmat_real);
+                            // SOC
                             if constexpr (std::is_same<Tdata, std::complex<double>>::value)
-                                dmat_va = std::valarray<Tdata>(dmat_IJR.c, dmat_IJR.size);
-                            else
-                                dmat_va = std::valarray<Tdata>(dmat_IJR.real().c, dmat_IJR.size);
-                            auto pdmat = std::make_shared<std::valarray<Tdata>>();
-                            *pdmat = dmat_va;
-                            dmat_libri[I][{J, Ra}] = RI::Tensor<Tdata>(
-                                {size_t(dmat_IJR.nr), size_t(dmat_IJR.nc)}, pdmat);
+                            {
+                                auto pdmat_imag = std::make_shared<std::valarray<double>>();
+                                dmat_va_imag =
+                                    std::valarray<double>(dmat_IJR.imag().c, dmat_IJR.imag().size);
+                                *pdmat_imag = dmat_va_imag;
+                                dmat_libri_imag[I][{J, Ra}] = RI::Tensor<double>(
+                                    {size_t(dmat_IJR.imag().nr), size_t(dmat_IJR.imag().nc)},
+                                    pdmat_imag);
+                            }
                         }
                     }
                 }
-                envs::ofs_myid << "Number of Dmat keys: " << get_num_keys(dmat_libri) << "\n";
+                envs::ofs_myid << "Number of Dmat keys: " << get_num_keys(dmat_libri_real) << "\n";
                 // print_keys(envs::ofs_myid, dmat_libri);
-                exx_libri.set_Ds(dmat_libri, Params::libri_exx_threshold_D);
+                exx_libri.set_Ds(dmat_libri_real, Params::libri_exx_threshold_D);
                 Profiler::stop("build_real_space_exx_3");
                 utils::lib_printf("Task %4d: DM setup for EXX\n", mpi_comm_global_h.myid);
 
@@ -335,15 +311,60 @@ void Exx::build(const Cs_LRI &Cs, const vector<Vector3_Order<int>> &Rlist,
                         const auto &n_J = atomic_basis_wfc.get_atom_nb(J);
                         const auto &Ra = JR_exx.first.second;
                         const auto R = Vector3_Order<int>{Ra[0], Ra[1], Ra[2]};
+                        Matd exx_temp(n_I, n_J, JR_exx.second.ptr(), MAJOR::ROW);
                         if constexpr (std::is_same<Tdata, std::complex<double>>::value)
                         {
-                            Matz exx_temp(n_I, n_J, JR_exx.second.ptr(), MAJOR::ROW);
-                            this->exx_cplx[isp][is1][is2][R][I][J] = exx_temp;
+                            if (this->exx_cplx.count(isp) == 0 ||
+                                this->exx_cplx.at(isp).count(is1) == 0 ||
+                                this->exx_cplx.at(isp).at(is1).count(is2) == 0 ||
+                                this->exx_cplx.at(isp).at(is1).at(is2).count(R) == 0 ||
+                                this->exx_cplx.at(isp).at(is1).at(is2).at(R).count(I) == 0 ||
+                                this->exx_cplx.at(isp).at(is1).at(is2).at(R).at(I).count(J) == 0)
+                            {
+                                this->exx_cplx[isp][is1][is2][R][I][J] = Matz(n_I, n_J, MAJOR::ROW);
+                            }
+
+                            this->exx_cplx[isp][is1][is2][R][I][J] += exx_temp;
                         }
                         else
                         {
-                            Matd exx_temp(n_I, n_J, JR_exx.second.ptr(), MAJOR::ROW);
                             this->exx[isp][is1][is2][R][I][J] = exx_temp;
+                        }
+                    }
+                }
+                // SOC
+                if constexpr (std::is_same<Tdata, std::complex<double>>::value)
+                {
+                    exx_libri.free_Ds();
+                    exx_libri.set_Ds(dmat_libri_imag, Params::libri_exx_threshold_D);
+                    Profiler::stop("build_real_space_exx_3");
+                    utils::lib_printf("Task %4d: DM imag setup for EXX\n", mpi_comm_global_h.myid);
+
+                    Profiler::start("build_real_space_exx_4", "Call libRI Hexx calculation");
+                    exx_libri.cal_Hs();
+                    Profiler::stop("build_real_space_exx_4");
+
+                    utils::lib_printf("Task %4d: cal_Hs imag elapsed time: %f\n",
+                                      mpi_comm_global_h.myid,
+                                      Profiler::get_wall_time_last("build_real_space_exx_4"));
+                    envs::ofs_myid
+                        << "Number of exx_libri.Hs imag keys: " << get_num_keys(exx_libri.Hs)
+                        << "\n";
+                    // print_keys(envs::ofs_myid, exx_libri.Hs);
+                    // ofs_myid << "exx_libri.Hs:\n" << exx_libri.Hs << endl;
+
+                    for (const auto &I_JR_exx : exx_libri.Hs)
+                    {
+                        const auto &I = I_JR_exx.first;
+                        const auto &n_I = atomic_basis_wfc.get_atom_nb(I);
+                        for (const auto &JR_exx : I_JR_exx.second)
+                        {
+                            const auto &J = JR_exx.first.first;
+                            const auto &n_J = atomic_basis_wfc.get_atom_nb(J);
+                            const auto &Ra = JR_exx.first.second;
+                            const auto R = Vector3_Order<int>{Ra[0], Ra[1], Ra[2]};
+                            Matd exx_temp(n_I, n_J, JR_exx.second.ptr(), MAJOR::ROW);
+                            this->exx_cplx[isp][is1][is2][R][I][J] += exx_temp.to_complex() * 1.0i;
                         }
                     }
                 }
@@ -647,16 +668,16 @@ void Exx::build_KS(const std::vector<std::vector<std::vector<ComplexMatrix>>> &w
                 map<Vector3_Order<int>, map<atom_t, map<atom_t, Matz>>> exx_is;
                 if (Params::use_soc)
                 {
-                    if (this->exx_cplx.count(isp) && this->exx_cplx.at(isp).count(isoc1)
-                        && this->exx_cplx.at(isp).at(isoc1).count(isoc2))
+                    if (this->exx_cplx.count(isp) && this->exx_cplx.at(isp).count(isoc1) &&
+                        this->exx_cplx.at(isp).at(isoc1).count(isoc2))
                     {
                         exx_is = this->exx_cplx.at(isp).at(isoc1).at(isoc2);
                     }
                 }
                 else
                 {
-                    if (this->exx.count(isp) && this->exx.at(isp).count(isoc1)
-                        && this->exx.at(isp).at(isoc1).count(isoc2))
+                    if (this->exx.count(isp) && this->exx.at(isp).count(isoc1) &&
+                        this->exx.at(isp).at(isoc1).count(isoc2))
                     {
                         for (const auto &R_IJ_exx : this->exx.at(isp).at(isoc1).at(isoc2))
                         {

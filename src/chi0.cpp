@@ -380,8 +380,8 @@ static void build_gf_Rt_libri_cplx(
     const MeanField &mf, int ispin, int isoc1, int isoc2,
     const vector<Vector3_Order<double>> &klist,
     const std::vector<std::pair<atpair_t, Vector3_Order<int>>> IJRs, const double &tau,
-    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<std::complex<double>>>>
-        &gf_libri)
+    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>> &gf_libri_real,
+    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>> &gf_libri_imag)
 {
     Profiler::start("build_gf_Rt_libri");
 
@@ -467,18 +467,21 @@ static void build_gf_Rt_libri_cplx(
             const auto nI = atom_nw[I];
             const auto nJ = atom_nw[J];
             // 1D representation for row-major 2D array
-            auto ptr = std::make_shared<std::valarray<std::complex<double>>>(nI * nJ);
+            auto ptr_real = std::make_shared<std::valarray<double>>(nI * nJ);
+            auto ptr_imag = std::make_shared<std::valarray<double>>(nI * nJ);
             for (size_t i = 0; i != nI; i++)
             {
                 size_t i_glo = atom_iw_loc2glo(I, i);
                 for (size_t j = 0; j != nJ; j++)
                 {
                     size_t j_glo = atom_iw_loc2glo(J, j);
-                    (*ptr)[i * nJ + j] = gf_global(i_glo, j_glo);
+                    (*ptr_real)[i * nJ + j] = gf_global(i_glo, j_glo).real();
+                    (*ptr_imag)[i * nJ + j] = gf_global(i_glo, j_glo).imag();
                 }
             }
             omp_set_lock(&gf_lock);
-            gf_libri[I][{J, Ra}] = RI::Tensor<std::complex<double>>({nI, nJ}, ptr);
+            gf_libri_real[I][{J, Ra}] = RI::Tensor<double>({nI, nJ}, ptr_real);
+            gf_libri_imag[I][{J, Ra}] = RI::Tensor<double>({nI, nJ}, ptr_imag);
             omp_unset_lock(&gf_lock);
         }
 #pragma omp barrier
@@ -954,7 +957,7 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
 
     std::array<int, 3> period_array{R_period.x, R_period.y, R_period.z};
 
-    RI::RPA<int, int, 3, Tdata> rpa;
+    RI::RPA<int, int, 3, double> rpa;
     Profiler::start("chi0_libri_routing_set_parallel");
     rpa.set_parallel(mpi_comm_global_h.comm, atoms_pos, lat_array, period_array);
     Profiler::stop("chi0_libri_routing_set_parallel");
@@ -975,26 +978,7 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
     //     q.x,q.y,q.z );
     // }
 
-    // TODO: template Cs_LRI
-    if constexpr (std::is_same<Tdata, std::complex<double>>::value)
-    {
-        std::map<int, std::map<libri_types<int, int>::TAC, RI::Tensor<Tdata>>> data_libri;
-        for (const auto &I_JR_C : Cs.data_libri)
-        {
-            const auto I = I_JR_C.first;
-            for (const auto &JR_C : I_JR_C.second)
-            {
-                const auto J = JR_C.first.first;
-                const auto R = JR_C.first.second;
-                const auto &C = JR_C.second;
-                auto JR = std::pair<int, std::array<int, 3>>(J, R);
-                data_libri[I][JR] = RI::Global_Func::convert<Tdata>(C);
-            }
-        }
-        rpa.set_Cs(data_libri, Params::libri_chi0_threshold_C);
-    }
-    else
-        rpa.set_Cs(Cs.data_libri, Params::libri_chi0_threshold_C);
+    rpa.set_Cs(Cs.data_libri, Params::libri_chi0_threshold_C);
 
     // Cs_libri.clear();
     // LIBRPA::utils::release_free_mem();
@@ -1026,10 +1010,14 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
             {
                 for (auto is2 = 0; is2 < this->mf.get_n_soc(); is2++)
                 {
-                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<Tdata>>>
-                        gf_po_libri;
-                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<Tdata>>>
-                        gf_ne_libri;
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>>
+                        gf_po_libri_real;
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>>
+                        gf_po_libri_imag;
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>>
+                        gf_ne_libri_real;
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>>
+                        gf_ne_libri_imag;
 
                     // On-the-fly build of Green's function at specific spin channel and imaginary
                     // time
@@ -1045,18 +1033,20 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
                     }
                     if constexpr (std::is_same<Tdata, std::complex<double>>::value)
                         build_gf_Rt_libri_cplx(this->mf, isp, is1, is2, this->klist,
-                                               this->IJRs_gf_local, tau, gf_po_libri);
+                                               this->IJRs_gf_local, tau, gf_po_libri_real,
+                                               gf_po_libri_imag);
                     else
                         build_gf_Rt_libri(this->mf, isp, is1, is2, this->klist, this->IJRs_gf_local,
-                                          tau, gf_po_libri);
-                    rpa.set_Gs_pos(gf_po_libri, Params::libri_chi0_threshold_G);
+                                          tau, gf_po_libri_real);
+                    rpa.set_Gs_pos(gf_po_libri_real, Params::libri_chi0_threshold_G);
                     if constexpr (std::is_same<Tdata, std::complex<double>>::value)
                         build_gf_Rt_libri_cplx(this->mf, isp, is2, is1, this->klist,
-                                               this->IJRs_gf_local, -tau, gf_ne_libri);
+                                               this->IJRs_gf_local, -tau, gf_ne_libri_real,
+                                               gf_ne_libri_imag);
                     else
                         build_gf_Rt_libri(this->mf, isp, is2, is1, this->klist, this->IJRs_gf_local,
-                                          -tau, gf_ne_libri);
-                    rpa.set_Gs_neg(gf_ne_libri, Params::libri_chi0_threshold_G);
+                                          -tau, gf_ne_libri_real);
+                    rpa.set_Gs_neg(gf_ne_libri_real, Params::libri_chi0_threshold_G);
                     // ofs_myid << "gf_po_libri\n" << gf_po_libri << "\n";
                     // ofs_myid << "gf_ne_libri\n" << gf_ne_libri << "\n";
                     mpi_comm_global_h.barrier();
@@ -1074,7 +1064,7 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
 
                     // collect chi0 on selected atpairs of all R
                     Profiler::start("chi0_libri_routing_collect_Rs", "Collect all R blocks");
-                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<Tdata>>>
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>>
                         tmp_chi0;
                     if (mpi_comm_global_h.nprocs > 1)
                     {
@@ -1101,8 +1091,159 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
                                 chi0s_IJR[I][{J, R}] =
                                     RI::Tensor<Tdata>({chi0.shape[0], chi0.shape[1]});
                             }
-                            chi0s_IJR[I][{J, R}] += chi0;
+                            chi0s_IJR[I][{J, R}] += RI::Global_Func::convert<Tdata>(chi0);
                         }
+                    }
+                    tmp_chi0.clear();
+                    // SOC 3 terms: C(G1+iG2)(G1+iG2)C
+                    if constexpr (std::is_same<Tdata, std::complex<double>>::value)
+                    {
+                        // i C G1 G2 C
+                        rpa.set_Gs_pos(gf_po_libri_real, Params::libri_chi0_threshold_G);
+                        rpa.set_Gs_neg(gf_ne_libri_imag, Params::libri_chi0_threshold_G);
+                        mpi_comm_global_h.barrier();
+                        // std::clock_t cpu_clock_done_init_gf = clock();
+                        ofs_myid << "rpa.cal_chi0s imag1 begin,    tau = " << tau << "\n";
+                        Profiler::start("chi0_libri_routing_cal_chi0s", "Call cal_chi0s");
+                        rpa.cal_chi0s();
+                        Profiler::stop("chi0_libri_routing_cal_chi0s");
+                        ofs_myid << "rpa.cal_chi0s imag1 finished, tau = " << tau << "\n";
+
+                        Profiler::start("chi0_libri_routing_free_gf");
+                        rpa.free_Gs_neg();
+                        rpa.free_Gs_pos();
+                        Profiler::cease("chi0_libri_routing_free_gf");
+
+                        // collect chi0 on selected atpairs of all R
+                        Profiler::start("chi0_libri_routing_collect_Rs", "Collect all R blocks");
+                        if (mpi_comm_global_h.nprocs > 1)
+                        {
+                            // Single MPI task, no need to perform communication
+                            tmp_chi0 = RI::Communicate_Tensors_Map_Judge::comm_map2_first(
+                                mpi_comm_global_h.comm, rpa.chi0s, s0_s1.first, s0_s1.second);
+                            rpa.chi0s.clear();  // release chi0s at this tau
+                        }
+                        else
+                        {
+                            tmp_chi0 = std::move(rpa.chi0s);
+                        }
+                        Profiler::stop("chi0_libri_routing_collect_Rs");
+                        for (const auto &IJRc : tmp_chi0)
+                        {
+                            auto I = IJRc.first;
+                            for (const auto &JRc : IJRc.second)
+                            {
+                                auto J = JRc.first.first;
+                                auto R = JRc.first.second;
+                                auto &chi0 = JRc.second;
+                                if (chi0s_IJR[I][{J, R}].empty())
+                                {
+                                    chi0s_IJR[I][{J, R}] =
+                                        RI::Tensor<Tdata>({chi0.shape[0], chi0.shape[1]});
+                                }
+                                chi0s_IJR[I][{J, R}] +=
+                                    RI::Global_Func::convert<std::complex<double>>(chi0) * 1.0i;
+                            }
+                        }
+                        tmp_chi0.clear();
+                        // i C G2 G1 C
+                        // TODO: relation with i C G1 G2 C?
+                        rpa.set_Gs_pos(gf_po_libri_imag, Params::libri_chi0_threshold_G);
+                        rpa.set_Gs_neg(gf_ne_libri_real, Params::libri_chi0_threshold_G);
+                        mpi_comm_global_h.barrier();
+                        // std::clock_t cpu_clock_done_init_gf = clock();
+                        ofs_myid << "rpa.cal_chi0s imag2 begin,    tau = " << tau << "\n";
+                        Profiler::start("chi0_libri_routing_cal_chi0s", "Call cal_chi0s");
+                        rpa.cal_chi0s();
+                        Profiler::stop("chi0_libri_routing_cal_chi0s");
+                        ofs_myid << "rpa.cal_chi0s imag2 finished, tau = " << tau << "\n";
+
+                        Profiler::start("chi0_libri_routing_free_gf");
+                        rpa.free_Gs_neg();
+                        rpa.free_Gs_pos();
+                        Profiler::cease("chi0_libri_routing_free_gf");
+
+                        // collect chi0 on selected atpairs of all R
+                        Profiler::start("chi0_libri_routing_collect_Rs", "Collect all R blocks");
+                        if (mpi_comm_global_h.nprocs > 1)
+                        {
+                            // Single MPI task, no need to perform communication
+                            tmp_chi0 = RI::Communicate_Tensors_Map_Judge::comm_map2_first(
+                                mpi_comm_global_h.comm, rpa.chi0s, s0_s1.first, s0_s1.second);
+                            rpa.chi0s.clear();  // release chi0s at this tau
+                        }
+                        else
+                        {
+                            tmp_chi0 = std::move(rpa.chi0s);
+                        }
+                        Profiler::stop("chi0_libri_routing_collect_Rs");
+                        for (const auto &IJRc : tmp_chi0)
+                        {
+                            auto I = IJRc.first;
+                            for (const auto &JRc : IJRc.second)
+                            {
+                                auto J = JRc.first.first;
+                                auto R = JRc.first.second;
+                                auto &chi0 = JRc.second;
+                                if (chi0s_IJR[I][{J, R}].empty())
+                                {
+                                    chi0s_IJR[I][{J, R}] =
+                                        RI::Tensor<Tdata>({chi0.shape[0], chi0.shape[1]});
+                                }
+                                chi0s_IJR[I][{J, R}] +=
+                                    RI::Global_Func::convert<std::complex<double>>(chi0) * 1.0i;
+                            }
+                        }
+                        tmp_chi0.clear();
+                        // (-1) C G2 G2 C
+                        rpa.set_Gs_pos(gf_po_libri_imag, Params::libri_chi0_threshold_G);
+                        rpa.set_Gs_neg(gf_ne_libri_imag, Params::libri_chi0_threshold_G);
+                        mpi_comm_global_h.barrier();
+                        // std::clock_t cpu_clock_done_init_gf = clock();
+                        ofs_myid << "rpa.cal_chi0s imag1 begin,    tau = " << tau << "\n";
+                        Profiler::start("chi0_libri_routing_cal_chi0s", "Call cal_chi0s");
+                        rpa.cal_chi0s();
+                        Profiler::stop("chi0_libri_routing_cal_chi0s");
+                        ofs_myid << "rpa.cal_chi0s imag1 finished, tau = " << tau << "\n";
+
+                        Profiler::start("chi0_libri_routing_free_gf");
+                        rpa.free_Gs_neg();
+                        rpa.free_Gs_pos();
+                        Profiler::cease("chi0_libri_routing_free_gf");
+
+                        // collect chi0 on selected atpairs of all R
+                        Profiler::start("chi0_libri_routing_collect_Rs", "Collect all R blocks");
+                        if (mpi_comm_global_h.nprocs > 1)
+                        {
+                            // Single MPI task, no need to perform communication
+                            tmp_chi0 = RI::Communicate_Tensors_Map_Judge::comm_map2_first(
+                                mpi_comm_global_h.comm, rpa.chi0s, s0_s1.first, s0_s1.second);
+                            rpa.chi0s.clear();  // release chi0s at this tau
+                        }
+                        else
+                        {
+                            tmp_chi0 = std::move(rpa.chi0s);
+                        }
+                        Profiler::stop("chi0_libri_routing_collect_Rs");
+                        for (const auto &IJRc : tmp_chi0)
+                        {
+                            auto I = IJRc.first;
+                            for (const auto &JRc : IJRc.second)
+                            {
+                                auto J = JRc.first.first;
+                                auto R = JRc.first.second;
+                                auto &chi0 = JRc.second;
+                                if (chi0s_IJR[I][{J, R}].empty())
+                                {
+                                    chi0s_IJR[I][{J, R}] =
+                                        RI::Tensor<Tdata>({chi0.shape[0], chi0.shape[1]});
+                                }
+                                chi0s_IJR[I][{J, R}] +=
+                                    RI::Global_Func::convert<std::complex<double>>(chi0) *
+                                    (-1.0 + 0.0i);
+                            }
+                        }
+                        tmp_chi0.clear();
                     }
                 }
             }

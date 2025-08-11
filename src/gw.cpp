@@ -351,7 +351,7 @@ void G0W0::build_spacetime(
             Profiler::get_cpu_time_last("g0w0_build_spacetime_ct_ft_wc"));
     }
 
-    RI::GW<int, int, 3, Tdata> gw_libri;
+    RI::GW<int, int, 3, double> gw_libri;
     map<int, std::array<double, 3>> atoms_pos;
     for (int i = 0; i != natom; i++)
         atoms_pos.insert(pair<int, std::array<double, 3>>{i, {0, 0, 0}});
@@ -359,26 +359,7 @@ void G0W0::build_spacetime(
 
     Profiler::start("g0w0_build_spacetime_2", "Setup LibRI G0W0 object and C data");
     gw_libri.set_parallel(mpi_comm_global_h.comm, atoms_pos, lat_array, period_array);
-    // TODO: template Cs_LRI
-    if constexpr (std::is_same<Tdata, std::complex<double>>::value)
-    {
-        std::map<int, std::map<libri_types<int, int>::TAC, RI::Tensor<Tdata>>> data_libri;
-        for (const auto &I_JR_C : LRI_Cs.data_libri)
-        {
-            const auto I = I_JR_C.first;
-            for (const auto &JR_C : I_JR_C.second)
-            {
-                const auto J = JR_C.first.first;
-                const auto R = JR_C.first.second;
-                const auto &C = JR_C.second;
-                auto JR = std::pair<int, std::array<int, 3>>(J, R);
-                data_libri[I][JR] = RI::Global_Func::convert<Tdata>(C);
-            }
-        }
-        gw_libri.set_Cs(data_libri, Params::libri_g0w0_threshold_C);
-    }
-    else
-        gw_libri.set_Cs(LRI_Cs.data_libri, Params::libri_g0w0_threshold_C);
+    gw_libri.set_Cs(LRI_Cs.data_libri, Params::libri_g0w0_threshold_C);
 
     Profiler::stop("g0w0_build_spacetime_2");
     LIBRPA::utils::lib_printf_root("Time for LibRI G0W0 setup (seconds, Wall/CPU): %f %f\n",
@@ -420,7 +401,10 @@ void G0W0::build_spacetime(
         // LIBRPA::utils::lib_printf("task %d itau %d start\n", mpi_comm_global_h.myid, itau);
         // build the Wc LibRI object. Note <JI> has to be converted from <IJ>
         // by W_IJ(R) = W^*_JI(-R)
-        std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<Tdata>>> Wc_libri;
+        std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>>
+            Wc_real_libri;
+        std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<double>>>
+            Wc_imag_libri;
         // in R-tau routing, some process can have zero time point
         // check to avoid out-of-range by at()
         // LIBRPA::utils::lib_printf("task %d Wc_tau_R.count(tau) %zu\n", mpi_comm_global_h.myid,
@@ -440,12 +424,20 @@ void G0W0::build_spacetime(
                         const auto &R = R_Wc.first;
                         // handle the <IJ(R)> block
                         if constexpr (std::is_same<Tdata, std::complex<double>>::value)
-                            Wc_libri[static_cast<int>(I)][{static_cast<int>(J), {R.x, R.y, R.z}}] =
-                                RI::Tensor<std::complex<double>>({nabf_I, nabf_J},
-                                                                 R_Wc.second.sptr());
-                        else
-                            Wc_libri[static_cast<int>(I)][{static_cast<int>(J), {R.x, R.y, R.z}}] =
+                        {
+                            Wc_real_libri[static_cast<int>(I)][{static_cast<int>(J),
+                                                                {R.x, R.y, R.z}}] =
                                 RI::Tensor<double>({nabf_I, nabf_J}, R_Wc.second.get_real().sptr());
+                            Wc_imag_libri[static_cast<int>(I)][{static_cast<int>(J),
+                                                                {R.x, R.y, R.z}}] =
+                                RI::Tensor<double>({nabf_I, nabf_J}, R_Wc.second.get_imag().sptr());
+                        }
+                        else
+                        {
+                            Wc_real_libri[static_cast<int>(I)][{static_cast<int>(J),
+                                                                {R.x, R.y, R.z}}] =
+                                RI::Tensor<double>({nabf_I, nabf_J}, R_Wc.second.get_real().sptr());
+                        }
                         // cout << "I " << I << " J " << J <<  " R " << R << " tau " << tau << endl
                         // ; cout << Wc_libri[I][{J, {R.x, R.y, R.z}}] << endl; handle the <JI(R)>
                         // block
@@ -455,14 +447,19 @@ void G0W0::build_spacetime(
                         if constexpr (std::is_same<Tdata, std::complex<double>>::value)
                         {
                             const auto Wc_IJmR = J_RWc.second.at(minusR).get_transpose(true);
-                            Wc_libri[static_cast<int>(J)][{static_cast<int>(I), {R.x, R.y, R.z}}] =
-                                RI::Tensor<std::complex<double>>({nabf_J, nabf_I}, Wc_IJmR.sptr());
+                            Wc_real_libri[static_cast<int>(J)][{static_cast<int>(I),
+                                                                {R.x, R.y, R.z}}] =
+                                RI::Tensor<double>({nabf_J, nabf_I}, Wc_IJmR.get_real().sptr());
+                            Wc_imag_libri[static_cast<int>(J)][{static_cast<int>(I),
+                                                                {R.x, R.y, R.z}}] =
+                                RI::Tensor<double>({nabf_J, nabf_I}, Wc_IJmR.get_imag().sptr());
                         }
                         else
                         {
                             const auto Wc_IJmR = J_RWc.second.at(minusR).get_real().get_transpose();
-                            Wc_libri[static_cast<int>(J)][{static_cast<int>(I), {R.x, R.y, R.z}}] =
-                                RI::Tensor<double>({nabf_J, nabf_I}, Wc_IJmR.sptr());
+                            Wc_real_libri[static_cast<int>(J)]
+                                         [{static_cast<int>(I), {R.x, R.y, R.z}}] =
+                                             RI::Tensor<double>({nabf_J, nabf_I}, Wc_IJmR.sptr());
                         }
                     }
                 }
@@ -471,12 +468,15 @@ void G0W0::build_spacetime(
             Wc_tau_R[tau].clear();
         }
         size_t n_obj_wc_libri = 0;
-        for (const auto &w : Wc_libri)
+        for (const auto &w : Wc_real_libri)
         {
             n_obj_wc_libri += w.second.size();
         }
-        gw_libri.set_Ws(Wc_libri, Params::libri_g0w0_threshold_Wc);
-        Wc_libri.clear();
+        if constexpr (std::is_same<Tdata, double>::value)
+        {
+            gw_libri.set_Ws(Wc_real_libri, Params::libri_g0w0_threshold_Wc);
+            Wc_real_libri.clear();
+        }
 
         Profiler::stop("g0w0_build_spacetime_3");
         LIBRPA::utils::lib_printf_root(
@@ -490,24 +490,42 @@ void G0W0::build_spacetime(
             {
                 for (int isoc2 = 0; isoc2 != mf.get_n_soc(); isoc2++)
                 {
-                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<Tdata>>>
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<double>>>
                         sigc_posi_tau;
-                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<Tdata>>>
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<double>>>
                         sigc_nega_tau;
+                    // SOC
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<double>>>
+                        sigc_posi_tau_ri;
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<double>>>
+                        sigc_nega_tau_ri;
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<double>>>
+                        sigc_posi_tau_ir;
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<double>>>
+                        sigc_nega_tau_ir;
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<double>>>
+                        sigc_posi_tau_ii;
+                    std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<double>>>
+                        sigc_nega_tau_ii;
 
                     Profiler::start("g0w0_build_spacetime_4", "Compute G(R,t) and G(R,-t)");
                     // NOTE: ``if constexpr`` needs C++-17
                     if constexpr (std::is_same<Tdata, std::complex<double>>::value)
                     {
+                        // SOC 4 terms: C (W1+iW2) C (G1+iG2)
                         auto gf = mf.get_gf_cplx_imagtimes_Rs(ispin, isoc1, isoc2, kfrac_list,
                                                               {tau, -tau},
                                                               {Rs_local.cbegin(), Rs_local.cend()});
                         std::map<double, std::map<int, std::map<std::pair<int, std::array<int, 3>>,
-                                                                RI::Tensor<Tdata>>>>
-                            tau_gf_libri;
+                                                                RI::Tensor<double>>>>
+                            tau_gf_libri_real;
+                        std::map<double, std::map<int, std::map<std::pair<int, std::array<int, 3>>,
+                                                                RI::Tensor<double>>>>
+                            tau_gf_libri_imag;
                         for (auto t : {tau, -tau})
                         {
-                            tau_gf_libri[t] = {};
+                            tau_gf_libri_real[t] = {};
+                            tau_gf_libri_imag[t] = {};
                         }
                         for (const auto &IJR : IJR_local_gf)
                         {
@@ -529,12 +547,18 @@ void G0W0::build_spacetime(
                                                 gf_global(atomic_basis_wfc.get_global_index(I, i),
                                                           atomic_basis_wfc.get_global_index(J, j));
                                         }
-                                    std::shared_ptr<std::valarray<Tdata>> mat_ptr =
-                                        std::make_shared<std::valarray<Tdata>>(gf_IJ_block.c,
-                                                                               gf_IJ_block.size);
-                                    tau_gf_libri[t][static_cast<int>(I)]
-                                                [{static_cast<int>(J), {R.x, R.y, R.z}}] =
-                                                    RI::Tensor<Tdata>({n_I, n_J}, mat_ptr);
+                                    std::shared_ptr<std::valarray<double>> mat_ptr_real =
+                                        std::make_shared<std::valarray<double>>(
+                                            gf_IJ_block.real().c, gf_IJ_block.real().size);
+                                    std::shared_ptr<std::valarray<double>> mat_ptr_imag =
+                                        std::make_shared<std::valarray<double>>(
+                                            gf_IJ_block.imag().c, gf_IJ_block.imag().size);
+                                    tau_gf_libri_real[t][static_cast<int>(I)][{static_cast<int>(J),
+                                                                               {R.x, R.y, R.z}}] =
+                                        RI::Tensor<double>({n_I, n_J}, mat_ptr_real);
+                                    tau_gf_libri_imag[t][static_cast<int>(I)][{static_cast<int>(J),
+                                                                               {R.x, R.y, R.z}}] =
+                                        RI::Tensor<double>({n_I, n_J}, mat_ptr_imag);
                                 }
                             }
                         }
@@ -549,22 +573,30 @@ void G0W0::build_spacetime(
 
                         for (auto t : {tau, -tau})
                         {
-                            const auto &gf_libri = tau_gf_libri.at(t);
+                            // CW1CG1
+                            const auto &gf_libri = tau_gf_libri_real.at(t);
                             size_t n_obj_gf_libri = 0;
                             for (const auto &gf : gf_libri) n_obj_gf_libri += gf.second.size();
 
                             double wtime_g0w0_cal_sigc = omp_get_wtime();
                             gw_libri.set_Gs(gf_libri, Params::libri_g0w0_threshold_G);
+                            gw_libri.set_Ws(Wc_real_libri, Params::libri_g0w0_threshold_Wc);
                             Profiler::start("g0w0_build_spacetime_5", "Call libRI cal_Sigc");
                             gw_libri.cal_Sigmas();
                             Profiler::stop("g0w0_build_spacetime_5");
                             Profiler::start("g0w0_build_spacetime_5_clean");
                             gw_libri.free_Gs();
+                            gw_libri.free_Ws();
                             Profiler::stop("g0w0_build_spacetime_5_clean");
+
+                            // ghj debug
+                            // envs::ofs_myid << "dubug Sigmas rr: "
+                            //                << gw_libri.Sigmas.at(0).at({0, {0, 0, 0}})(0, 0)
+                            //                << std::endl;
 
                             // Check size of data
                             double mem_mb = get_tensor_map_bytes(gw_libri.Sigmas) * 1e-6;
-                            envs::ofs_myid << "Temporary Sigc_tau size for time " << t
+                            envs::ofs_myid << "Temporary Sigc_tau real-real size for time " << t
                                            << " [MB]: " << mem_mb << endl;
 
                             if (t > 0)
@@ -573,9 +605,82 @@ void G0W0::build_spacetime(
                                 sigc_nega_tau = std::move(gw_libri.Sigmas);
                             gw_libri.Sigmas.clear();
 
+                            // CW1CG2
+                            const auto &gf_libri_imag = tau_gf_libri_imag.at(t);
+                            gw_libri.set_Gs(gf_libri_imag, Params::libri_g0w0_threshold_G);
+                            gw_libri.set_Ws(Wc_real_libri, Params::libri_g0w0_threshold_Wc);
+                            Profiler::start("g0w0_build_spacetime_5", "Call libRI cal_Sigc");
+                            gw_libri.cal_Sigmas();
+                            Profiler::stop("g0w0_build_spacetime_5");
+                            Profiler::start("g0w0_build_spacetime_5_clean");
+                            gw_libri.free_Gs();
+                            gw_libri.free_Ws();
+                            Profiler::stop("g0w0_build_spacetime_5_clean");
+
+                            // ghj debug
+                            // envs::ofs_myid << "dubug Sigmas ri: "
+                            //                << gw_libri.Sigmas.at(0).at({0, {0, 0, 0}})(0, 0)
+                            //                << std::endl;
+                            // envs::ofs_myid
+                            //     << "dubug Gs r&i: " << gf_libri.at(0).at({0, {0, 0, 0}})(0, 0)
+                            //     << " " << gf_libri_imag.at(0).at({0, {0, 0, 0}})(0, 0) <<
+                            //     std::endl;
+
+                            if (t > 0)
+                                sigc_posi_tau_ri = std::move(gw_libri.Sigmas);
+                            else
+                                sigc_nega_tau_ri = std::move(gw_libri.Sigmas);
+                            gw_libri.Sigmas.clear();
+
+                            // CW2CG1
+                            gw_libri.set_Gs(gf_libri, Params::libri_g0w0_threshold_G);
+                            gw_libri.set_Ws(Wc_imag_libri, Params::libri_g0w0_threshold_Wc);
+                            Profiler::start("g0w0_build_spacetime_5", "Call libRI cal_Sigc");
+                            gw_libri.cal_Sigmas();
+                            Profiler::stop("g0w0_build_spacetime_5");
+                            Profiler::start("g0w0_build_spacetime_5_clean");
+                            gw_libri.free_Gs();
+                            gw_libri.free_Ws();
+                            Profiler::stop("g0w0_build_spacetime_5_clean");
+
+                            // ghj debug
+                            // envs::ofs_myid << "dubug Sigmas ir: "
+                            //                << gw_libri.Sigmas.at(0).at({0, {0, 0, 0}})(0, 0)
+                            //                << std::endl;
+
+                            if (t > 0)
+                                sigc_posi_tau_ir = std::move(gw_libri.Sigmas);
+                            else
+                                sigc_nega_tau_ir = std::move(gw_libri.Sigmas);
+                            gw_libri.Sigmas.clear();
+
+                            // CW2CG2
+                            gw_libri.set_Gs(gf_libri_imag, Params::libri_g0w0_threshold_G);
+                            gw_libri.set_Ws(Wc_imag_libri, Params::libri_g0w0_threshold_Wc);
+                            Profiler::start("g0w0_build_spacetime_5", "Call libRI cal_Sigc");
+                            gw_libri.cal_Sigmas();
+                            Profiler::stop("g0w0_build_spacetime_5");
+                            Profiler::start("g0w0_build_spacetime_5_clean");
+                            gw_libri.free_Gs();
+                            gw_libri.free_Ws();
+                            Profiler::stop("g0w0_build_spacetime_5_clean");
+
+                            // ghj debug
+                            // envs::ofs_myid << "dubug Sigmas ii: "
+                            //                << gw_libri.Sigmas.at(0).at({0, {0, 0, 0}})(0, 0)
+                            //                << std::endl;
+
+                            if (t > 0)
+                                sigc_posi_tau_ii = std::move(gw_libri.Sigmas);
+                            else
+                                sigc_nega_tau_ii = std::move(gw_libri.Sigmas);
+                            gw_libri.Sigmas.clear();
+
                             wtime_g0w0_cal_sigc = omp_get_wtime() - wtime_g0w0_cal_sigc;
                             LIBRPA::utils::lib_printf(
-                                "Task %4d. libRI G0W0, spin %1d, time grid %12.6f. Wc size %zu, GF "
+                                "Task %4d. libRI 4 G0W0, spin %1d, time grid %12.6f. Wc size "
+                                "%zu, "
+                                "GF "
                                 "size "
                                 "%zu. "
                                 "Wall time %f\n",
@@ -708,9 +813,38 @@ void G0W0::build_spacetime(
                             const auto R = Vector3_Order<int>(Ra[0], Ra[1], Ra[2]);
                             const auto iR = std::distance(
                                 Rlist.cbegin(), std::find(Rlist.cbegin(), Rlist.cend(), R));
+                            const auto sigc_cos = 0.5 * (sigc_posi_block + sigc_nega_block);
+                            const auto sigc_sin = 0.5 * (sigc_posi_block - sigc_nega_block);
+                            Tensor<double> sigc_sin_ri;
+                            Tensor<double> sigc_cos_ri;
+                            Tensor<double> sigc_sin_ir;
+                            Tensor<double> sigc_cos_ir;
+                            Tensor<double> sigc_sin_ii;
+                            Tensor<double> sigc_cos_ii;
+                            // Tensor<complex<double>> sigc_cos_cplx;
+                            // Tensor<complex<double>> sigc_sin_cplx;
 
-                            const auto sigc_cos = Tdata(0.5) * (sigc_posi_block + sigc_nega_block);
-                            const auto sigc_sin = Tdata(0.5) * (sigc_posi_block - sigc_nega_block);
+                            if constexpr (std::is_same<Tdata, std::complex<double>>::value)
+                            {
+                                const auto &sigc_posi_ri_block =
+                                    sigc_posi_tau_ri.at(I).at(JR_sigc_posi.first);
+                                const auto &sigc_nega_ri_block =
+                                    sigc_nega_tau_ri.at(I).at(JR_sigc_posi.first);
+                                const auto &sigc_posi_ir_block =
+                                    sigc_posi_tau_ir.at(I).at(JR_sigc_posi.first);
+                                const auto &sigc_nega_ir_block =
+                                    sigc_nega_tau_ir.at(I).at(JR_sigc_posi.first);
+                                const auto &sigc_posi_ii_block =
+                                    sigc_posi_tau_ii.at(I).at(JR_sigc_posi.first);
+                                const auto &sigc_nega_ii_block =
+                                    sigc_nega_tau_ii.at(I).at(JR_sigc_posi.first);
+                                sigc_cos_ri = 0.5 * (sigc_posi_ri_block + sigc_nega_ri_block);
+                                sigc_sin_ri = 0.5 * (sigc_posi_ri_block - sigc_nega_ri_block);
+                                sigc_cos_ir = 0.5 * (sigc_posi_ir_block + sigc_nega_ir_block);
+                                sigc_sin_ir = 0.5 * (sigc_posi_ir_block - sigc_nega_ir_block);
+                                sigc_cos_ii = 0.5 * (sigc_posi_ii_block + sigc_nega_ii_block);
+                                sigc_sin_ii = 0.5 * (sigc_posi_ii_block - sigc_nega_ii_block);
+                            }
 
                             n_IJR_myid++;
                             if (Params::output_gw_sigc_mat_rt)
@@ -723,12 +857,33 @@ void G0W0::build_spacetime(
                                 dims[3] = n_I;
                                 dims[4] = n_J;
                                 ofs_sigmac_r.write((char *)dims, 5 * sizeof(size_t));
-                                // cos: contribute to the real part
-                                ofs_sigmac_r.write((char *)sigc_cos.ptr(),
-                                                   n_I * n_J * sizeof(double));
-                                // sin: contribute to the imaginary part
-                                ofs_sigmac_r.write((char *)sigc_sin.ptr(),
-                                                   n_I * n_J * sizeof(double));
+                                if constexpr (std::is_same<Tdata, std::complex<double>>::value)
+                                {
+                                    ofs_sigmac_r.write((char *)sigc_cos.ptr(),
+                                                       n_I * n_J * sizeof(double));
+                                    ofs_sigmac_r.write((char *)sigc_cos_ri.ptr(),
+                                                       n_I * n_J * sizeof(double));
+                                    ofs_sigmac_r.write((char *)sigc_cos_ir.ptr(),
+                                                       n_I * n_J * sizeof(double));
+                                    ofs_sigmac_r.write((char *)sigc_cos_ii.ptr(),
+                                                       n_I * n_J * sizeof(double));
+                                    ofs_sigmac_r.write((char *)sigc_sin.ptr(),
+                                                       n_I * n_J * sizeof(double));
+                                    ofs_sigmac_r.write((char *)sigc_sin_ri.ptr(),
+                                                       n_I * n_J * sizeof(double));
+                                    ofs_sigmac_r.write((char *)sigc_sin_ir.ptr(),
+                                                       n_I * n_J * sizeof(double));
+                                    ofs_sigmac_r.write((char *)sigc_sin_ii.ptr(),
+                                                       n_I * n_J * sizeof(double));
+                                }
+                                else
+                                {  // cos: contribute to the real part
+                                    ofs_sigmac_r.write((char *)sigc_cos.ptr(),
+                                                       n_I * n_J * sizeof(double));
+                                    // sin: contribute to the imaginary part
+                                    ofs_sigmac_r.write((char *)sigc_sin.ptr(),
+                                                       n_I * n_J * sizeof(double));
+                                }
                             }
 
                             for (int iomega = 0; iomega != tfg.get_n_grids(); iomega++)
@@ -745,8 +900,18 @@ void G0W0::build_spacetime(
                                     {
                                         for (int j = 0; j != n_J; j++)
                                         {
-                                            sigc_temp(i, j) = sigc_cos(i, j) * t2f_cos +
-                                                              sigc_sin(i, j) * t2f_sin * 1.0i;
+                                            sigc_temp(i, j) =
+                                                RI::Global_Func::convert<std::complex<double>>(
+                                                    sigc_cos(i, j) * t2f_cos -
+                                                    sigc_cos_ii(i, j) * t2f_cos -
+                                                    sigc_sin_ir(i, j) * t2f_sin -
+                                                    sigc_sin_ri(i, j) * t2f_sin) +
+                                                RI::Global_Func::convert<std::complex<double>>(
+                                                    sigc_sin(i, j) * t2f_sin -
+                                                    sigc_sin_ii(i, j) * t2f_sin +
+                                                    sigc_cos_ir(i, j) * t2f_cos +
+                                                    sigc_cos_ri(i, j) * t2f_cos) *
+                                                    1.0i;
                                         }
                                     }
                                     else
