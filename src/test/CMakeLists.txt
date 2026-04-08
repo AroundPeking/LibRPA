@@ -36,6 +36,7 @@ foreach(target
     test_analycont
     test_atoms
     test_atomic_basis
+    test_optics
     test_timefreq 
     test_librpa
     test_matrix

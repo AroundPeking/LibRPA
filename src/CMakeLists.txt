@@ -49,6 +49,7 @@ list(APPEND lib_sources
         matrix.cpp
         matrix3.cpp
         meanfield.cpp
+        optics.cpp
         parallel_mpi.cpp
         params.cpp
         pbc.cpp
