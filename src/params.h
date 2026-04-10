@@ -29,6 +29,27 @@ struct Params
     //! the number of parameters for analytic continuation
     static int n_params_anacon;
 
+    //! Optional absorption-spectrum real-axis upper bound in eV. Non-positive falls back to the
+    //! legacy mesh built from the imaginary-axis range.
+    static double absorption_omega_max_ev;
+
+    //! Optional absorption-spectrum real-axis spacing in eV. Non-positive falls back to the
+    //! legacy point-count-based mesh.
+    static double absorption_domega_ev;
+
+    //! Optional finite eta in eV used when evaluating the analytic continuation on the real axis.
+    static double absorption_eta_ev;
+
+    //! Optional path to an existing absorption_imag_axis.dat file. When set, reuse the virtual-axis
+    //! data instead of rebuilding chi0 and head/wing.
+    static std::string absorption_imag_axis_input;
+
+    //! Analytic continuation method for absorption spectra: "pade", "multipole", or "both".
+    static std::string absorption_continuation_method;
+
+    //! Number of poles used in the scalar multipole continuation of epsilon_M(iw).
+    static int absorption_n_poles;
+
     //! type of parallel routing
     static std::string parallel_routing;
 

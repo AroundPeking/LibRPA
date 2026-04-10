@@ -1,5 +1,8 @@
 #include "params.h"
 
+#include <algorithm>
+#include <cctype>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,6 +21,12 @@ std::string Params::parallel_routing = "auto";
 int Params::nfreq = 0;
 int Params::n_params_anacon = -1;
 int Params::option_dielect_func = 2;
+double Params::absorption_omega_max_ev = -1.0;
+double Params::absorption_domega_ev = -1.0;
+double Params::absorption_eta_ev = 0.0;
+std::string Params::absorption_imag_axis_input = "";
+std::string Params::absorption_continuation_method = "pade";
+int Params::absorption_n_poles = 3;
 
 double Params::gf_R_threshold = 1e-4;
 double Params::cs_threshold = 1e-4;
@@ -67,9 +76,28 @@ int Params::nbands_G = -1;
 
 void Params::check_consistency()
 {
+    std::transform(absorption_continuation_method.begin(), absorption_continuation_method.end(),
+                   absorption_continuation_method.begin(),
+                   [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
     if (n_params_anacon < 0)
     {
         n_params_anacon = nfreq;
+    }
+    if (absorption_eta_ev < 0.0)
+    {
+        throw std::runtime_error("absorption_eta_ev must be non-negative");
+    }
+    if (absorption_n_poles <= 0)
+    {
+        throw std::runtime_error("absorption_n_poles must be positive");
+    }
+    if (absorption_continuation_method != "pade"
+        && absorption_continuation_method != "multipole"
+        && absorption_continuation_method != "both")
+    {
+        throw std::runtime_error(
+            "absorption_continuation_method must be one of: pade, multipole, both");
     }
 }
 
@@ -77,6 +105,9 @@ void Params::print()
 {
     const std::vector<std::pair<std::string, double>> double_params{
         {"gf_R_threshold", gf_R_threshold},
+        {"absorption_omega_max_ev", absorption_omega_max_ev},
+        {"absorption_domega_ev", absorption_domega_ev},
+        {"absorption_eta_ev", absorption_eta_ev},
         {"cs_R_threshold", cs_threshold},
         {"vq_threshold", vq_threshold},
         {"sqrt_coulomb_threshold", sqrt_coulomb_threshold},
@@ -95,6 +126,7 @@ void Params::print()
     const std::vector<std::pair<std::string, int>> int_params{
         {"nfreq", nfreq},
         {"n_params_anacon", n_params_anacon},
+        {"absorption_n_poles", absorption_n_poles},
         {"option_dielect_func", option_dielect_func},
         {"output_Wc_Rf_mat", output_Wc_Rf_mat},
         {"nbands_G", nbands_G},
@@ -105,6 +137,8 @@ void Params::print()
         {"output_dir", output_dir},
         {"output_file", output_file},
         {"tfgrids_type", tfgrids_type},
+        {"absorption_imag_axis_input", absorption_imag_axis_input},
+        {"absorption_continuation_method", absorption_continuation_method},
         {"parallel_routing", parallel_routing},
     };
 

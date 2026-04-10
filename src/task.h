@@ -5,6 +5,7 @@ namespace LIBRPA
 
 enum class task_t {
     RPA,
+    absorption,
     EXX,
     EXX_band,
     G0W0,

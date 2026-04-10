@@ -104,6 +104,7 @@ class diele_func
     double cal_factor(string name);
     void test_head();
     std::vector<double> get_head_vec();
+    const std::vector<matrix_m<std::complex<double>>>& get_head_tensors() const { return head; }
 
     void cal_wing();
     // compute wing in ABF representation
@@ -149,6 +150,15 @@ class diele_func
     // not used now due to performance optimization
     // std::complex<double> compute_chi0_inv_00(const int ifreq);
     // std::complex<double> compute_chi0_inv_ij(const int ifreq, int i, int j);
+    const matrix_m<std::complex<double>>& get_lind_tensor() const { return Lind; }
+    const matrix_m<std::complex<double>>& get_inverse_dielectric_average() const { return chi0; }
+    void clear_eps_workspace()
+    {
+        Lind.clear();
+        body_inv.clear();
+        bw.clear();
+        wb.clear();
+    }
     void rewrite_eps(matrix_m<std::complex<double>> &chi0_block, const int ifreq,
                      Array_Desc &desc_nabf_nabf_opt);
     void assign_chi0(matrix_m<std::complex<double>> &chi0_block, Array_Desc &desc_nabf_nabf_opt);

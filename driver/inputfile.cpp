@@ -159,6 +159,13 @@ void parse_inputfile_to_params(const std::string &fn)
     parser.parse_string("tfgrid_type", Params::tfgrids_type, "minimax", flag);
     parser.parse_string("parallel_routing", Params::parallel_routing, "auto", flag);
     parser.parse_int("nfreq", Params::nfreq, 6, flag);
+    parser.parse_double("absorption_omega_max_ev", Params::absorption_omega_max_ev, -1.0, flag);
+    parser.parse_double("absorption_domega_ev", Params::absorption_domega_ev, -1.0, flag);
+    parser.parse_double("absorption_eta_ev", Params::absorption_eta_ev, 0.0, flag);
+    parser.parse_string("absorption_imag_axis_input", Params::absorption_imag_axis_input, "", flag);
+    parser.parse_string("absorption_continuation_method", Params::absorption_continuation_method,
+                        "pade", flag);
+    parser.parse_int("absorption_n_poles", Params::absorption_n_poles, 3, flag);
     parser.parse_bool("use_scalapack_ecrpa", Params::use_scalapack_ecrpa, false, flag);
     parser.parse_bool("use_scalapack_gw_wc", Params::use_scalapack_gw_wc, false, flag);
     parser.parse_double("cs_threshold", Params::cs_threshold, 1e-6, flag);

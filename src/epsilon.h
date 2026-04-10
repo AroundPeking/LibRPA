@@ -4,6 +4,7 @@
 #include "chi0.h"
 #include "dielecmodel.h"
 #include "matrix_m.h"
+#include "optics.h"
 #include "parallel_mpi.h"
 #include "ri.h"
 struct CorrEnergy
@@ -42,6 +43,10 @@ map<double, atom_mapping<std::map<Vector3_Order<double>, matrix_m<complex<double
 compute_Wc_freq_q_blacs(Chi0 &chi0, const atpair_k_cplx_mat_t &coulmat_eps,
                         atpair_k_cplx_mat_t &coulmat_wc,
                         const vector<std::complex<double>> &epsilon_mac_imagfreq);
+
+LIBRPA::optics::ImagAxisOpticsData compute_absorption_imag_axis_blacs(
+    Chi0& chi0,
+    const atpair_k_cplx_mat_t& coulmat_eps);
 
 //! Fourier transform screened Coulomb in q-space to R-space, but still in frequency domain
 map<double, atom_mapping<std::map<Vector3_Order<int>, matrix_m<complex<double>>>>::pair_t_old>

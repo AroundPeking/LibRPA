@@ -12,6 +12,7 @@ list(APPEND exe_sources
   read_data.cpp
   write_aims.cpp
   inputfile.cpp
+  task_absorption.cpp
   task_rpa.cpp
   task_exx.cpp
   task_exx_band.cpp

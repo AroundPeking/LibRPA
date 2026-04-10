@@ -4073,6 +4073,279 @@ compute_Wc_freq_q_blacs(Chi0 &chi0, const atpair_k_cplx_mat_t &coulmat_eps,
     return Wc_freq_q;
 }
 
+LIBRPA::optics::ImagAxisOpticsData compute_absorption_imag_axis_blacs(
+    Chi0& chi0,
+    const atpair_k_cplx_mat_t& coulmat_eps)
+{
+    const complex<double> CONE{1.0, 0.0};
+    const int n_abf = LIBRPA::atomic_basis_abf.nb_total;
+
+    Array_Desc desc_nabf_nabf(blacs_ctxt_global_h);
+    desc_nabf_nabf.init_square_blk(n_abf, n_abf, 0, 0);
+
+    Array_Desc desc_nabf_nabf_opt(blacs_ctxt_global_h);
+    const int nb_opt = min(128, desc_nabf_nabf.nb());
+    desc_nabf_nabf_opt.init(n_abf, n_abf, nb_opt, nb_opt, 0, 0);
+
+    const auto set_IJ_nabf_nabf = LIBRPA::utils::get_necessary_IJ_from_block_2D_sy(
+        'U', LIBRPA::atomic_basis_abf, desc_nabf_nabf);
+    const auto s0_s1 = get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf);
+    const bool use_abacus_symmetry_dense_chi0_collect =
+        Params::use_abacus_gw_symmetry && LIBRPA::abacus_symmetry_ctx.available
+        && LIBRPA::abacus_symmetry_ctx.has_abf_shell_layout();
+
+    std::vector<int> abf_atom_offsets;
+    {
+        const auto atom_nabf_vec = LIBRPA::atomic_basis_abf.get_atom_nbs();
+        abf_atom_offsets.resize(atom_nabf_vec.size() + 1, 0);
+        for (std::size_t atom = 0; atom < atom_nabf_vec.size(); ++atom)
+        {
+            abf_atom_offsets[atom + 1] =
+                abf_atom_offsets[atom] + static_cast<int>(atom_nabf_vec[atom]);
+        }
+    }
+
+    auto temp_block = init_local_mat<complex<double>>(desc_nabf_nabf, MAJOR::COL);
+    auto chi0_block = init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
+    auto coul_block = init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
+    auto coul_eigen_block = init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
+    auto coul_chi0_block = init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
+
+    const auto atpair_local = dispatch_upper_trangular_tasks(
+        natom, blacs_ctxt_global_h.myid, blacs_ctxt_global_h.nprows, blacs_ctxt_global_h.npcols,
+        blacs_ctxt_global_h.myprow, blacs_ctxt_global_h.mypcol);
+
+    std::vector<Vector3_Order<double>> qpts;
+    for (const auto& q_weight : irk_weight)
+    {
+        qpts.push_back(q_weight.first);
+    }
+
+    const auto gamma_q_iter = std::find_if(qpts.cbegin(), qpts.cend(), [](const auto& q) {
+        return is_gamma_point(q);
+    });
+    if (gamma_q_iter == qpts.cend())
+    {
+        throw std::runtime_error("compute_absorption_imag_axis_blacs failed to locate Gamma q");
+    }
+    const auto gamma_q = *gamma_q_iter;
+    const std::array<double, 3> qa{gamma_q.x, gamma_q.y, gamma_q.z};
+
+    temp_block.zero_out();
+    coul_block.zero_out();
+    {
+        std::map<int,
+                 std::map<std::pair<int, std::array<double, 3>>, RI::Tensor<complex<double>>>>
+            couleps_libri;
+        for (const auto& Mu_Nu : atpair_local)
+        {
+            const auto Mu = Mu_Nu.first;
+            const auto Nu = Mu_Nu.second;
+            if (coulmat_eps.count(Mu) == 0 || coulmat_eps.at(Mu).count(Nu) == 0
+                || coulmat_eps.at(Mu).at(Nu).count(gamma_q) == 0)
+            {
+                continue;
+            }
+            const auto& Vq = coulmat_eps.at(Mu).at(Nu).at(gamma_q);
+            const auto n_mu = LIBRPA::atomic_basis_abf.get_atom_nb(Mu);
+            const auto n_nu = LIBRPA::atomic_basis_abf.get_atom_nb(Nu);
+            std::valarray<complex<double>> Vq_va(Vq->c, Vq->size);
+            auto pvq = std::make_shared<std::valarray<complex<double>>>();
+            *pvq = Vq_va;
+            couleps_libri[Mu][{Nu, qa}] = RI::Tensor<complex<double>>({n_mu, n_nu}, pvq);
+        }
+
+        const auto IJq_coul = RI::Communicate_Tensors_Map_Judge::comm_map2_first(
+            mpi_comm_global_h.comm, couleps_libri, s0_s1.first, s0_s1.second);
+        collect_block_from_ALL_IJ_Tensor(temp_block, desc_nabf_nabf, LIBRPA::atomic_basis_abf,
+                                         qa, true, CONE, IJq_coul, MAJOR::ROW);
+        ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1, desc_nabf_nabf.desc,
+                                      coul_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
+                                      blacs_ctxt_global_h.ictxt);
+    }
+
+    vec<double> eigenvalues(n_abf);
+    size_t n_singular = 0;
+    auto sqrtveig_blacs = power_hemat_blacs_real(coul_block, desc_nabf_nabf_opt, coul_eigen_block,
+                                                 desc_nabf_nabf_opt, n_singular, eigenvalues.c,
+                                                 0.5, Params::sqrt_coulomb_threshold);
+    const size_t n_nonsingular = n_abf - n_singular;
+    if (n_nonsingular == 0)
+    {
+        throw std::runtime_error("Gamma Coulomb square root has no non-singular subspace");
+    }
+
+    df_headwing.wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf_opt);
+
+    std::vector<matrix_m<std::complex<double>>> epsinv_mats;
+    std::vector<matrix_m<std::complex<double>>> epsm_tensors;
+    std::vector<matrix_m<std::complex<double>>> head_tensors;
+    epsinv_mats.reserve(chi0.tfg.get_freq_nodes().size());
+    epsm_tensors.reserve(chi0.tfg.get_freq_nodes().size());
+    head_tensors.reserve(chi0.tfg.get_freq_nodes().size());
+
+    for (const auto& freq : chi0.tfg.get_freq_nodes())
+    {
+        const int ifreq = chi0.tfg.get_freq_index(freq);
+        temp_block.zero_out();
+        chi0_block.zero_out();
+        coul_chi0_block.zero_out();
+
+        std::map<int, std::map<std::pair<int, std::array<double, 3>>, RI::Tensor<complex<double>>>>
+            chi0_libri;
+        ComplexMatrix chi0_dense_local;
+        atom_mapping<ComplexMatrix>::pair_t_old chi0_wq;
+
+        const bool has_local_chi0_q = chi0.get_chi0_q().count(freq) > 0
+                                      && find_matching_abacus_qpoint(chi0.get_chi0_q().at(freq),
+                                                                     gamma_q)
+                                             != chi0.get_chi0_q().at(freq).end();
+        if (use_abacus_symmetry_dense_chi0_collect)
+        {
+            chi0_dense_local.create(n_abf, n_abf, true);
+            const atom_mapping<ComplexMatrix>::pair_t_old empty_blocks;
+            const atom_mapping<ComplexMatrix>::pair_t_old* chi0_blocks_ibz_ptr = &empty_blocks;
+            if (chi0.get_chi0_q().count(freq) > 0)
+            {
+                const auto& chi0_blocks_all_q = chi0.get_chi0_q().at(freq);
+                const auto chi0_q_iter = has_local_chi0_q
+                                             ? find_matching_abacus_qpoint(chi0_blocks_all_q,
+                                                                           gamma_q)
+                                             : chi0_blocks_all_q.end();
+                if (has_local_chi0_q)
+                {
+                    chi0_blocks_ibz_ptr = &chi0_q_iter->second;
+                }
+            }
+            chi0_wq =
+                symmetrize_abacus_chi0_ibz_blocks_if_needed(*chi0_blocks_ibz_ptr, gamma_q);
+        }
+        else if (has_local_chi0_q)
+        {
+            const auto& chi0_blocks_all_q = chi0.get_chi0_q().at(freq);
+            const auto chi0_q_iter = find_matching_abacus_qpoint(chi0_blocks_all_q, gamma_q);
+            chi0_wq = symmetrize_abacus_chi0_ibz_blocks_if_needed(chi0_q_iter->second, gamma_q);
+        }
+
+        if (!chi0_wq.empty())
+        {
+            for (const auto& M_Nchi : chi0_wq)
+            {
+                const auto& M = M_Nchi.first;
+                const auto n_mu = LIBRPA::atomic_basis_abf.get_atom_nb(M);
+                for (const auto& N_chi : M_Nchi.second)
+                {
+                    const auto& N = N_chi.first;
+                    const auto n_nu = LIBRPA::atomic_basis_abf.get_atom_nb(N);
+                    const auto& chi = N_chi.second;
+                    if (chi.nr != n_mu || chi.nc != n_nu)
+                    {
+                        throw std::runtime_error(
+                            "Gamma chi0 block dimension mismatch during absorption build");
+                    }
+
+                    std::valarray<complex<double>> chi_va(chi.c, chi.size);
+                    auto pchi = std::make_shared<std::valarray<complex<double>>>();
+                    *pchi = chi_va;
+                    chi0_libri[M][{N, qa}] = RI::Tensor<complex<double>>({n_mu, n_nu}, pchi);
+
+                    if (use_abacus_symmetry_dense_chi0_collect)
+                    {
+                        const int row_offset = abf_atom_offsets[static_cast<std::size_t>(M)];
+                        const int col_offset = abf_atom_offsets[static_cast<std::size_t>(N)];
+                        for (int row = 0; row < chi.nr; ++row)
+                        {
+                            for (int col = 0; col < chi.nc; ++col)
+                            {
+                                const auto value = chi(row, col);
+                                chi0_dense_local(row_offset + row, col_offset + col) = value;
+                                if (M != N)
+                                {
+                                    chi0_dense_local(col_offset + col, row_offset + row) =
+                                        std::conj(value);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (has_local_chi0_q)
+        {
+            chi0.free_chi0_q(freq, gamma_q);
+        }
+
+        if (use_abacus_symmetry_dense_chi0_collect)
+        {
+            for (int ilo = 0; ilo != desc_nabf_nabf.m_loc(); ++ilo)
+            {
+                const int i_gl = desc_nabf_nabf.indx_l2g_r(ilo);
+                for (int jlo = 0; jlo != desc_nabf_nabf.n_loc(); ++jlo)
+                {
+                    const int j_gl = desc_nabf_nabf.indx_l2g_c(jlo);
+                    temp_block(ilo, jlo) = chi0_dense_local(i_gl, j_gl);
+                }
+            }
+        }
+        else
+        {
+            const auto IJq_chi0 = RI::Communicate_Tensors_Map_Judge::comm_map2_first(
+                mpi_comm_global_h.comm, chi0_libri, s0_s1.first, s0_s1.second);
+            collect_block_from_ALL_IJ_Tensor(temp_block, desc_nabf_nabf, LIBRPA::atomic_basis_abf,
+                                             qa, true, CONE, IJq_chi0, MAJOR::ROW);
+        }
+
+        ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1, desc_nabf_nabf.desc,
+                                      chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
+                                      blacs_ctxt_global_h.ictxt);
+
+        ScalapackConnector::pgemm_f('N', 'N', n_abf, n_nonsingular, n_abf, 1.0, chi0_block.ptr(),
+                                    1, 1, desc_nabf_nabf_opt.desc, sqrtveig_blacs.ptr(), 1, 1,
+                                    desc_nabf_nabf_opt.desc, 0.0, coul_chi0_block.ptr(), 1, 1,
+                                    desc_nabf_nabf_opt.desc);
+        ScalapackConnector::pgemm_f('C', 'N', n_nonsingular, n_nonsingular, n_abf, 1.0,
+                                    sqrtveig_blacs.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
+                                    coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc, 0.0,
+                                    chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc);
+
+        chi0_block *= -1.0;
+        for (std::size_t i = 0; i != n_nonsingular; ++i)
+        {
+            const int ilo = desc_nabf_nabf_opt.indx_g2l_r(static_cast<int>(i));
+            const int jlo = desc_nabf_nabf_opt.indx_g2l_c(static_cast<int>(i));
+            if (ilo >= 0 && jlo >= 0)
+            {
+                chi0_block(ilo, jlo) += 1.0;
+            }
+        }
+
+        auto desc_body = df_headwing.get_body_inv(chi0_block, desc_nabf_nabf_opt);
+        df_headwing.cal_eps(ifreq, desc_nabf_nabf_opt, desc_body);
+
+        std::complex<double> epsinv00 = 0.0;
+        const auto& epsinv_avg = df_headwing.get_inverse_dielectric_average();
+        const int ilo = desc_nabf_nabf_opt.indx_g2l_r(0);
+        const int jlo = desc_nabf_nabf_opt.indx_g2l_c(0);
+        if (ilo >= 0 && jlo >= 0)
+        {
+            epsinv00 = epsinv_avg(ilo, jlo);
+        }
+        MPI_Allreduce(MPI_IN_PLACE, &epsinv00, 1, MPI_DOUBLE_COMPLEX, MPI_SUM,
+                      mpi_comm_global_h.comm);
+
+        matrix_m<std::complex<double>> epsinv00_mat(1, 1, MAJOR::COL);
+        epsinv00_mat(0, 0) = epsinv00;
+        epsinv_mats.push_back(epsinv00_mat);
+        epsm_tensors.push_back(df_headwing.get_lind_tensor().copy());
+        head_tensors.push_back(df_headwing.get_head_tensors().at(ifreq).copy());
+        df_headwing.clear_eps_workspace();
+    }
+
+    return LIBRPA::optics::build_imag_axis_data(chi0.tfg.get_freq_nodes(), epsinv_mats,
+                                                epsm_tensors, head_tensors);
+}
+
 map<double, atom_mapping<std::map<Vector3_Order<int>, matrix_m<complex<double>>>>::pair_t_old>
 FT_Wc_freq_q(
     const map<double,

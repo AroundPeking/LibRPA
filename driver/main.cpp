@@ -18,6 +18,7 @@
 #include "read_data.h"
 #include "stl_io_helper.h"
 #include "task.h"
+#include "task_absorption.h"
 #include "task_exx.h"
 #include "task_exx_band.h"
 #include "task_gw.h"
@@ -56,10 +57,16 @@ static bool task_requires_pyatb_headwing(const LIBRPA::task_t task)
         case LIBRPA::task_t::QSGW:
         case LIBRPA::task_t::QSGW_band:
         case LIBRPA::task_t::Wc_Rf:
+        case LIBRPA::task_t::absorption:
             return true;
         default:
             return false;
     }
+}
+
+static bool task_reuses_absorption_imag_axis(const LIBRPA::task_t task)
+{
+    return task == LIBRPA::task_t::absorption && !Params::absorption_imag_axis_input.empty();
 }
 
 static bool validate_pyatb_headwing_inputs(const LIBRPA::task_t task)
@@ -72,6 +79,10 @@ static bool validate_pyatb_headwing_inputs(const LIBRPA::task_t task)
         return true;
     }
     if (Params::option_dielect_func != 3 && Params::option_dielect_func != 4)
+    {
+        return true;
+    }
+    if (task_reuses_absorption_imag_axis(task))
     {
         return true;
     }
@@ -208,6 +219,8 @@ int main(int argc, char **argv)
     transform(task_lower.begin(), task_lower.end(), task_lower.begin(), ::tolower);
     if (task_lower == "rpa")
         task = task_t::RPA;
+    else if (task_lower == "absorption")
+        task = task_t::absorption;
     else if (task_lower == "g0w0")
         task = task_t::G0W0;
     else if (task_lower == "g0w0_band")
@@ -254,6 +267,21 @@ int main(int argc, char **argv)
     {
         finalize(false);
         return EXIT_FAILURE;
+    }
+
+    if (task_reuses_absorption_imag_axis(task))
+    {
+        if (mpi_comm_global_h.is_root())
+        {
+            lib_printf("task=absorption reusing saved imaginary-axis data from %s\n",
+                       Params::absorption_imag_axis_input.c_str());
+            lib_printf("Skipping mean-field, eigenvector, Cs, and Coulomb reads.\n");
+        }
+
+        std::map<Vector3_Order<double>, ComplexMatrix> sinvS;
+        task_absorption(sinvS);
+        finalize(true);
+        return EXIT_SUCCESS;
     }
 
     Profiler::start("driver_band_out", "Driver Read Meanfield band");
@@ -571,6 +599,10 @@ int main(int argc, char **argv)
     if (task == task_t::RPA)
     {
         task_rpa(sinvS);
+    }
+    else if (task == task_t::absorption)
+    {
+        task_absorption(sinvS);
     }
     else if (task == task_t::Wc_Rf)
     {
