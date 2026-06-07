@@ -166,6 +166,7 @@ std::string format_runtime_options(const librpa::Options &opts) noexcept
             normal_pair(option_dielect_func),
             normal_pair(rpa_headwing_body_start),
             normal_pair(qpe_solver_n_iter_max),
+            normal_pair(libri_chi0_collect_s0_chunk),
         };
 
     const std::vector<std::pair<std::string, std::string>> str_params
@@ -205,6 +206,9 @@ std::string format_runtime_options(const librpa::Options &opts) noexcept
     for (const auto &[k, v] : str_params) ss << k << " = " << v << endl;
 
     for (const auto &[k, v] : int_params) ss << k << " = " << v << endl;
+
+    ss << "libri_chi0_collect_max_bytes = "
+       << opts.libri_chi0_collect_max_bytes << endl;
 
     for (const auto &[k, v] : double_params) ss << k << " = " << v << endl;
 
