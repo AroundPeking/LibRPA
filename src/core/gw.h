@@ -107,11 +107,12 @@ public:
         const BlacsCtxtHandler *blacs_ctxt_h = nullptr,
         const ArrayDesc *desc_wfc_in = nullptr);
 
-    void build_sigc_matrix_KS_kgrid();
+    void build_sigc_matrix_KS_kgrid(const Atoms &geometry = Atoms());
     void build_sigc_matrix_KS_band(const std::map<int, std::map<int, std::map<int, ComplexMatrix>>> &wfc_band,
                                    const std::vector<Vector3_Order<double>> &kfrac_band,
                                    const Atoms &geometry);
-    void build_sigc_matrix_KS_kgrid_blacs(const BlacsCtxtHandler &blacs_ctxt_h);
+    void build_sigc_matrix_KS_kgrid_blacs(const BlacsCtxtHandler &blacs_ctxt_h,
+                                          const Atoms &geometry = Atoms());
     void build_sigc_matrix_KS_band_blacs(const std::map<int, std::map<int, std::map<int, ComplexMatrix>>> &wfc_band,
                                          const std::vector<Vector3_Order<double>> &kfrac_band,
                                          const Atoms &geometry, const BlacsCtxtHandler &blacs_ctxt_h);
