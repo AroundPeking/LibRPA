@@ -54,6 +54,7 @@ foreach(target
     test_qpe_solver
     test_rpa_headwing
     test_timefreq
+    test_velocity_rotation
     )
   config_test(${target} 1)
 endforeach()

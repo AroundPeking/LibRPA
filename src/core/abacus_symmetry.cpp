@@ -3296,6 +3296,228 @@ ComplexMatrix rotate_abacus_kspace_matrix(const AbacusSymmetryContext& ctx,
     return rotated_matrix;
 }
 
+ComplexMatrix build_abacus_ao_bloch_rotation_matrix_full(
+    const AbacusSymmetryContext& ctx,
+    const AbacusKStarMember& member,
+    const std::map<atom_t, size_t>& atom_nw,
+    const Vector3_Order<double>& k_ibz,
+    const std::map<atom_t, std::array<double, 3>>& coord_frac,
+    bool use_time_reversal,
+    const Vector3_Order<double>* k_bz_target)
+{
+    // -------------------------------------------------------------------------
+    // Assemble the per-atom AO Bloch rotation blocks M_I into the full
+    // (n_aos, n_aos) matrix M^S, reusing the exact same construction that
+    // rotate_abacus_kspace_matrix applies internally:
+    //   - per-atom shell rotation from symrot_k.txt
+    //   - return-lattice Bloch phase correction exp[i (k_ibz - k_bz) . O]
+    //   - optional target gauge phase
+    //
+    // Row convention: the assembled M^S acts as
+    //     D_bz = M^S,T * D_ibz * conj(M^S)         (space group, non-TRS)
+    //     D_bz = M^S,dagger * conj(D_ibz) * M^S     (TRS)
+    // and rotates a row-convention eigenvector C (n_bands, n_aos) as
+    //     C_bz = C_ibz * conj(M^S)
+    // -------------------------------------------------------------------------
+    if (!ctx.has_ao_shell_layout())
+        throw std::runtime_error("AO shell layout is required before building the full AO Bloch rotation");
+
+    const auto offsets = build_atom_offsets(atom_nw);
+    const int nao_total = offsets.back();
+
+    // Atom permutation (same validation as rotate_abacus_kspace_matrix).
+    std::vector<const AbacusKAtomRotation*> rotations_by_from(atom_nw.size(), nullptr);
+    std::vector<bool> visited_to(atom_nw.size(), false);
+    for (const auto& atom_rotation : member.atom_rotations)
+    {
+        if (atom_rotation.atom_from < 0 || atom_rotation.atom_from >= static_cast<int>(atom_nw.size())
+            || atom_rotation.atom_to < 0 || atom_rotation.atom_to >= static_cast<int>(atom_nw.size()))
+            throw std::runtime_error("ABACUS k-space atom mapping is out of range");
+        rotations_by_from[static_cast<std::size_t>(atom_rotation.atom_from)] = &atom_rotation;
+        visited_to[static_cast<std::size_t>(atom_rotation.atom_to)] = true;
+    }
+    for (std::size_t atom = 0; atom < atom_nw.size(); ++atom)
+    {
+        if (rotations_by_from[atom] == nullptr)
+            throw std::runtime_error("ABACUS k-space atom rotations do not cover every atom");
+        if (!visited_to[atom])
+            throw std::runtime_error("ABACUS k-space atom mapping is not a full permutation");
+    }
+
+    const int nsym_space = static_cast<int>(ctx.rspace_operations.size());
+    const int spatial_isym = use_time_reversal ? member.isym - nsym_space : member.isym;
+    if (spatial_isym < 0 || spatial_isym >= nsym_space)
+        throw std::runtime_error("ABACUS AO k-space rotation uses an invalid symmetry index");
+
+    const Vector3_Order<double> delta_k{k_ibz.x - member.k_bz.x,
+                                        k_ibz.y - member.k_bz.y,
+                                        k_ibz.z - member.k_bz.z};
+
+    // Per-atom blocks with return-lattice phase correction.
+    std::vector<ComplexMatrix> atom_M_blocks(atom_nw.size());
+    for (std::size_t atom = 0; atom < atom_nw.size(); ++atom)
+    {
+        const auto* atom_rotation = rotations_by_from[atom];
+        atom_M_blocks[atom] = build_abacus_ao_rotation_matrix(ctx,
+                                                               atom_rotation->atom_type,
+                                                               atom_rotation->shell_rotations);
+        const auto return_lattice =
+            build_abacus_kspace_return_lattice(ctx, *atom_rotation, coord_frac, spatial_isym);
+        const double phase_arg =
+            TWO_PI * (delta_k.x * static_cast<double>(return_lattice.x)
+                      + delta_k.y * static_cast<double>(return_lattice.y)
+                      + delta_k.z * static_cast<double>(return_lattice.z));
+        atom_M_blocks[atom] *= std::complex<double>(std::cos(phase_arg), std::sin(phase_arg));
+    }
+
+    // Optional target gauge phase per atom.
+    const bool apply_target_gauge = (k_bz_target != nullptr);
+    std::vector<std::complex<double>> atom_target_phases(atom_nw.size(), {1.0, 0.0});
+    if (apply_target_gauge)
+    {
+        const auto k_shift = build_abacus_equivalent_kpoint_shift(member.k_bz, *k_bz_target);
+        for (std::size_t atom = 0; atom < atom_nw.size(); ++atom)
+        {
+            atom_target_phases[atom] = build_abacus_reciprocal_gauge_phase(
+                k_shift, static_cast<atom_t>(atom), coord_frac);
+        }
+    }
+
+    // Assemble into the full (n_aos, n_aos) matrix M^S.
+    // The block for atom I is M_I = M[S(I), I] and lives at the AO offset of
+    // the *destination* atom I (i.e. atom_from). The optional target gauge
+    // multiplies the block by the same per-atom phase applied in
+    // rotate_abacus_kspace_matrix.
+    ComplexMatrix M_full(nao_total, nao_total);
+    for (std::size_t atom_i = 0; atom_i < atom_nw.size(); ++atom_i)
+    {
+        const auto off_i = offsets[atom_i];
+        const auto n_i = static_cast<int>(atom_nw.at(static_cast<atom_t>(atom_i)));
+        ComplexMatrix block = atom_M_blocks[atom_i];
+        if (apply_target_gauge)
+            block *= atom_target_phases[atom_i];
+        for (int r = 0; r < n_i; ++r)
+            for (int c = 0; c < n_i; ++c)
+                M_full(off_i + r, off_i + c) = block(r, c);
+    }
+
+    return M_full;
+}
+
+std::array<ComplexMatrix, 3> rotate_headwing_velocity(
+    const AbacusSymmetryContext& ctx,
+    const AbacusKStarMember& member,
+    const std::array<ComplexMatrix, 3>& v_band_ibz,
+    const ComplexMatrix& C_ibz,
+    const std::map<atom_t, size_t>& atom_nw,
+    const Vector3_Order<double>& k_ibz,
+    const std::map<atom_t, std::array<double, 3>>& coord_frac,
+    bool use_time_reversal,
+    const Vector3_Order<double>* k_bz_target)
+{
+    // -------------------------------------------------------------------------
+    // Rotate the three Cartesian components of the band-basis velocity matrix
+    // from k_ibz to k_bz = member.k_bz.
+    //
+    // Algorithm:
+    //   (1) Build AO-basis velocity at k_ibz for each alpha:
+    //         v_{alpha,AO}(k_ibz) = C_ibz^T * v_alpha^band(k_ibz) * conj(C_ibz)
+    //       where C_ibz is the row-convention eigenvector (n_bands, n_aos).
+    //   (2) Rotate each AO-basis component to k_bz using the existing
+    //       rotate_abacus_kspace_matrix (handles AO Bloch rotation, return-lattice
+    //       phase, TRS conjugation, target gauge).
+    //   (3) Apply the Cartesian rotation R_S to the alpha index:
+    //         v_{alpha',AO}(k_bz) = sum_alpha sign * R_S(alpha',alpha) * v_{alpha,AO}(k_bz)
+    //       sign = +1 for space-group operations, -1 for time reversal
+    //       (velocity is an odd-parity vector operator: TRS = inversion x K-cnj).
+    //   (4) Build the BZ eigenvector C_bz = C_ibz * conj(M^S) and transform
+    //       the rotated AO velocity back to band basis:
+    //         v_{alpha'}^band(k_bz) = conj(C_bz)^T * v_{alpha',AO}(k_bz) * C_bz
+    //
+    // The Cartesian R_S comes from ctx.rspace_operations[spatial_isym].rotation,
+    // where spatial_isym is the space-group index (member.isym mod nsym_space).
+    // -------------------------------------------------------------------------
+    const int n_bands = C_ibz.nr;
+    const int n_aos = C_ibz.nc;
+    if (n_bands <= 0 || n_aos <= 0)
+        throw std::runtime_error("rotate_headwing_velocity: empty eigenvector matrix C_ibz");
+
+    for (int alpha = 0; alpha < 3; ++alpha)
+    {
+        if (v_band_ibz[alpha].nr != n_bands || v_band_ibz[alpha].nc != n_bands)
+            throw std::runtime_error("rotate_headwing_velocity: band velocity shape mismatch with C_ibz");
+    }
+
+    // (1) AO-basis velocity at k_ibz, per alpha.
+    //     C_ibz is (n_bands, n_aos); C_ibz^T is (n_aos, n_bands);
+    //     conj(C_ibz) is (n_bands, n_aos).
+    //     v_AO = C_ibz^T * v_band * conj(C_ibz)  -> (n_aos, n_aos).
+    const ComplexMatrix C_ibz_T = transpose(C_ibz, false);
+    const ComplexMatrix C_ibz_conj = conj(C_ibz);
+    std::array<ComplexMatrix, 3> v_ao_ibz;
+    for (int alpha = 0; alpha < 3; ++alpha)
+        v_ao_ibz[alpha] = C_ibz_T * v_band_ibz[alpha] * C_ibz_conj;
+
+    // (2) Rotate each AO component to k_bz.
+    std::array<ComplexMatrix, 3> v_ao_bz_raw;
+    for (int alpha = 0; alpha < 3; ++alpha)
+        v_ao_bz_raw[alpha] = rotate_abacus_kspace_matrix(
+            ctx, member, v_ao_ibz[alpha], atom_nw, k_ibz, coord_frac,
+            use_time_reversal, k_bz_target);
+
+    // (3) Cartesian rotation R_S. Fetch the real-space rotation matrix.
+    const int nsym_space = static_cast<int>(ctx.rspace_operations.size());
+    const int spatial_isym = use_time_reversal ? member.isym - nsym_space : member.isym;
+    if (spatial_isym < 0 || spatial_isym >= nsym_space)
+        throw std::runtime_error("rotate_headwing_velocity: invalid symmetry index for Cartesian rotation");
+    const auto& rot = ctx.rspace_operations[spatial_isym].rotation; // 3x3, row-major [a'][a]
+
+    // Velocity transforms as a vector: under S = {R|t}, v -> R v (contravariant).
+    // For time-reversal-augmented members the effective Cartesian sign is -1
+    // (TRS = inversion composed with complex conjugation, and velocity is odd
+    // under inversion). Note the AO Bloch rotation step (2) already applied the
+    // complex conjugation for TRS members.
+    const double trs_sign = use_time_reversal ? -1.0 : 1.0;
+
+    // Assemble n_aos x n_aos zero matrices of the right shape.
+    std::array<ComplexMatrix, 3> v_ao_bz;
+    for (int a = 0; a < 3; ++a)
+        v_ao_bz[a].create(n_aos, n_aos);
+    for (int a_out = 0; a_out < 3; ++a_out)
+    {
+        // v_{a_out, AO}(k_bz) = sum_{a_in} trs_sign * R[a_out][a_in] * v_{a_in, AO}(k_bz raw)
+        for (int a_in = 0; a_in < 3; ++a_in)
+        {
+            const double coeff = trs_sign * rot[a_out][a_in];
+            if (std::abs(coeff) < 1e-15)
+                continue;
+            v_ao_bz[a_out] += coeff * v_ao_bz_raw[a_in];
+        }
+    }
+
+    // (4) Build BZ eigenvector C_bz = C_ibz * conj(M^S).
+    //     M^S is the full (n_aos, n_aos) AO Bloch rotation; conj(M^S) is (n_aos, n_aos);
+    //     C_ibz (n_bands, n_aos) * conj(M^S) (n_aos, n_aos) -> C_bz (n_bands, n_aos).
+    const ComplexMatrix M_full = build_abacus_ao_bloch_rotation_matrix_full(
+        ctx, member, atom_nw, k_ibz, coord_frac, use_time_reversal, k_bz_target);
+    const ComplexMatrix M_full_conj = conj(M_full);
+    const ComplexMatrix C_bz = C_ibz * M_full_conj; // (n_bands, n_aos)
+
+    // Transform back to band basis:
+    //   v^nm(k_bz) = sum_{mu,nu} conj(C_bz(n,mu)) * v_AO(mu,nu) * C_bz(m,nu)
+    // In matrix form with C_bz stored as (n_bands, n_aos):
+    //   v_band = conj(C_bz) * v_AO * transpose(C_bz, false)
+    // conj(C_bz) is (n_bands, n_aos); v_AO is (n_aos, n_aos);
+    // transpose(C_bz, false) is (n_aos, n_bands) -> result (n_bands, n_bands).
+    const ComplexMatrix C_bz_conj = conj(C_bz);
+    const ComplexMatrix C_bz_T = transpose(C_bz, false);
+    std::array<ComplexMatrix, 3> v_band_bz;
+    for (int a = 0; a < 3; ++a)
+        v_band_bz[a] = C_bz_conj * v_ao_bz[a] * C_bz_T;
+
+    return v_band_bz;
+}
+
 void build_abacus_rspace_sector_stars(const AbacusSymmetryContext& ctx,
                                       const std::map<atom_t, std::array<double, 3>>& coord_frac,
                                       const Vector3_Order<int>& period,

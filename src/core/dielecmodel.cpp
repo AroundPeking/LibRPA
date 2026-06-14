@@ -214,9 +214,42 @@ void diele_func::cal_head()
 
     profiler.start("cal_head");
 
+    const bool can_sym =
+        use_symmetry
+        && librpa_int::can_restore_abacus_kstar_meanfield(meanfield_df, kfrac_band, atom_nw, coord_frac);
+
+    if (can_sym)
+        cal_head_symmetric();
+    else
+        cal_head_full_bz();
+
+    // Common post-processing: apply dielectric unit and spin prefactor, add the
+    // 1 contribution on the diagonal. Identical for both paths.
+    const double dielectric_unit = cal_factor("head");
+    for (int alpha = 0; alpha != 3; alpha++)
+    {
+        for (int beta = 0; beta != 3; beta++)
+        {
+            for (size_t iomega = 0; iomega != this->omega.size(); iomega++)
+            {
+                this->head.at(iomega)(alpha, beta) *=
+                    dielectric_unit * headwing_spin_prefactor(n_spin, use_soc);
+                if (alpha == beta)
+                {
+                    this->head.at(iomega)(alpha, beta) += std::complex<double>(1.0, 0.0);
+                }
+            }
+        }
+    }
+    global::ofs_myid << "* Success: calculate head term." << std::endl;
+    profiler.start("cal_head");
+};
+
+void diele_func::cal_head_full_bz()
+{
+    // Historical full-BZ summation. The k-grid must already cover the full BZ.
+    // wg is indexed as wg(ik, ib) so that k-dependent occupations are honored.
     std::complex<double> tmp;
-    int nocc = 0;
-    double dielectric_unit = cal_factor("head");
 
     for (int ispin = 0; ispin != n_spin; ispin++)
     {
@@ -261,24 +294,95 @@ void diele_func::cal_head()
             }
         }
     }
-    for (int alpha = 0; alpha != 3; alpha++)
+}
+
+void diele_func::cal_head_symmetric()
+{
+    // Symmetry-aware head: sum over the full BZ by looping IBZ k-points and, for
+    // each, every member of the k-star. The BZ velocity for every member is
+    // reconstructed from the IBZ velocity via rotate_headwing_velocity; the
+    // eigenvalues are symmetry-invariant so the IBZ gap is reused directly.
+    const auto& ctx = LIBRPA::abacus_symmetry_ctx;
+    const int nsym_space = static_cast<int>(ctx.rspace_operations.size());
+
+    // Build the per-member BZ k-point targets so the rotated quantities land on
+    // the same grid keys that the rest of the code expects (mirrors the
+    // get_abacus_restored_gf_cplx_imagtimes_Rs convention).
+    const auto member_targets = librpa_int::build_abacus_kstar_member_kfrac_targets(pbc_);
+
+    for (int ispin = 0; ispin != n_spin; ispin++)
     {
-        for (int beta = 0; beta != 3; beta++)
+        auto &wg = this->meanfield_df.get_weight()[ispin];
+        auto &eigenvalues = this->meanfield_df.get_eigenvals()[ispin];
+        const auto &velocity = this->velocity_[ispin];
+
+        for (int ik_ibz = 0; ik_ibz != nk; ik_ibz++)
         {
-            for (size_t iomega = 0; iomega != this->omega.size(); iomega++)
+            const auto& k_ibz = kfrac_band[ik_ibz];
+            const auto& star = LIBRPA::find_abacus_kstar_for_ibz_kpoint(ctx, k_ibz);
+            if (star.members.empty())
+                throw std::runtime_error("cal_head_symmetric: empty k-star");
+
+            // IBZ eigenvectors C (n_bands, n_aos). For the non-SOC case ispinor = 0.
+            const int ispinor_bra = 0;
+            const auto* C_ibz_ptr = meanfield_df.find_wfc(ispin, ispinor_bra, ik_ibz);
+            if (C_ibz_ptr == nullptr)
+                throw std::runtime_error("cal_head_symmetric: missing IBZ eigenvectors");
+
+            // IBZ velocity, band basis, per Cartesian component.
+            std::array<ComplexMatrix, 3> v_band_ibz{
+                velocity[ik_ibz][0], velocity[ik_ibz][1], velocity[ik_ibz][2]};
+
+            for (std::size_t imember = 0; imember != star.members.size(); ++imember)
             {
-                this->head.at(iomega)(alpha, beta) *=
-                    dielectric_unit * headwing_spin_prefactor(n_spin, use_soc);
-                if (alpha == beta)
+                const auto& member = star.members[imember];
+                const bool use_time_reversal = member.isym >= nsym_space;
+                const auto& k_bz = member_targets.empty()
+                    ? member.k_bz
+                    : member_targets[ik_ibz][imember];
+
+                // Reconstruct the BZ band-basis velocity for all three Cartesian
+                // components in one call.
+                const auto v_band_bz = LIBRPA::rotate_headwing_velocity(
+                    ctx, member, v_band_ibz, *C_ibz_ptr, atom_nw, k_ibz, coord_frac,
+                    use_time_reversal, &k_bz);
+
+                // Sum over band pairs. Eigenvalues are symmetry-invariant, so the
+                // IBZ gap Delta_cv applies to every star member unchanged.
+                for (int iocc = 0; iocc != n_states; iocc++)
                 {
-                    this->head.at(iomega)(alpha, beta) += std::complex<double>(1.0, 0.0);
+                    for (int iunocc = 0; iunocc != n_states; iunocc++)
+                    {
+                        if (iocc >= iunocc) continue;
+                        const double factor = headwing_transition_weight(
+                            wg(ik_ibz, iocc), wg(ik_ibz, iunocc), n_spin, use_soc);
+                        if (factor <= 1.e-8) continue;
+
+                        const double egap =
+                            eigenvalues(ik_ibz, iunocc) - eigenvalues(ik_ibz, iocc);
+
+                        for (int alpha = 0; alpha != 3; ++alpha)
+                        {
+                            for (int beta = 0; beta != 3; ++beta)
+                            {
+                                for (size_t iomega = 0; iomega != this->omega.size(); iomega++)
+                                {
+                                    const double omega_ev = this->omega[iomega];
+                                    const std::complex<double> tmp =
+                                        2.0 * factor
+                                        * v_band_bz[alpha](iunocc, iocc)
+                                        * v_band_bz[beta](iocc, iunocc)
+                                        / (egap * egap + omega_ev * omega_ev) / egap;
+                                    this->head.at(iomega)(alpha, beta) -= tmp;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-    global::ofs_myid << "* Success: calculate head term." << std::endl;
-    profiler.start("cal_head");
-};
+}
 
 double diele_func::cal_factor(std::string name)
 {

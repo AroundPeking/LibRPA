@@ -8,6 +8,7 @@
 #include "meanfield.h"
 #include "pbc.h"
 #include "ri.h"
+#include "abacus_symmetry.h"
 
 namespace librpa_int {
 
@@ -104,6 +105,14 @@ public:
     bool use_soc = false;
     bool debug = false;
 
+    // Symmetry-aware head/wing switches. When use_symmetry is true and the
+    // global abacus_symmetry_ctx can restore the BZ from the IBZ k-grid, cal_head
+    // (and later cal_wing) sum over k-star members instead of the bare IBZ grid.
+    // Set by read_headwing_input after constructing the diele_func.
+    bool use_symmetry = false;
+    std::map<atom_t, size_t> atom_nw;
+    std::map<atom_t, std::array<double, 3>> coord_frac;
+
 public:
     diele_func(const MeanField &mf, const headwing_velocity_t &velocity,
                const std::vector<Vector3_Order<double>> &kfrac,
@@ -131,6 +140,16 @@ public:
     void init_wing(double coulomb_eigen_threshold, const atpair_k_cplx_mat_t &Vq);
 
     void cal_head();
+
+private:
+    // Full-BZ head summation (the historical path, now also used as the fallback
+    // when symmetry restoration is unavailable). Expects wg indexed as wg(ik, ib).
+    void cal_head_full_bz();
+    // Symmetry-aware head: IBZ outer loop + k-star member inner loop. Uses
+    // rotate_headwing_velocity to reconstruct the BZ velocity for every member.
+    void cal_head_symmetric();
+
+public:
     double cal_factor(std::string name);
     void test_head();
     std::vector<double> get_head_vec();

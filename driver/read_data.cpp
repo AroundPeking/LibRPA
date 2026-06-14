@@ -1090,6 +1090,16 @@ void read_headwing_input(const string &dir_path, bool need_wing)
     pds->p_headwing->use_2d_dielectric = driver::get_bool(driver::opts.use_2d_dielectric);
     pds->p_headwing->use_soc = mf.get_n_spinor() > 1;
     pds->p_headwing->debug = driver::opts.output_level >= LIBRPA_VERBOSE_DEBUG;
+    // Symmetry-aware head/wing wiring: enable the IBZ->BZ k-star unfolding path
+    // when ABACUS sidecars are loaded. cal_head then sums over k-star members
+    // reconstructed from the IBZ velocity via rotate_headwing_velocity.
+    if (use_loaded_abacus_symmetry_sidecars())
+    {
+        pds->p_headwing->use_symmetry = true;
+        for (atom_t atom = 0; atom != static_cast<atom_t>(pds->basis_wfc.n_atoms); ++atom)
+            pds->p_headwing->atom_nw[atom] = pds->basis_wfc.get_atom_nb(atom);
+        pds->p_headwing->coord_frac = LIBRPA::abacus_symmetry_ctx.input_coord_frac;
+    }
     pds->p_headwing->init(driver::opts.sqrt_coulomb_threshold, pds->vq);
     pds->p_headwing->cal_head();
     pds->epsmacs_imagfreq = pds->p_headwing->get_head_vec();

@@ -258,6 +258,58 @@ ComplexMatrix rotate_abacus_kspace_matrix(const AbacusSymmetryContext& ctx,
                                           bool use_time_reversal = false,
                                           const Vector3_Order<double>* k_bz_target = nullptr);
 
+/*!
+ * @brief Build the full AO Bloch rotation matrix M^S (n_aos x n_aos) for one k-star member.
+ *
+ * Assembles the per-atom AO rotation blocks M_I (with the same Bloch return-lattice
+ * phase correction and optional target-gauge phase used by rotate_abacus_kspace_matrix)
+ * into the full (n_aos, n_aos) matrix M^S acting in row convention as
+ *
+ *     D_bz = M^S,T * D_ibz * conj(M^S)   (space group)
+ *
+ * This is the AO counterpart needed to rotate non-square objects such as the
+ * KS eigenvector matrix C (n_bands, n_aos): C_bz = C_ibz * conj(M^S).
+ */
+ComplexMatrix build_abacus_ao_bloch_rotation_matrix_full(
+    const AbacusSymmetryContext& ctx,
+    const AbacusKStarMember& member,
+    const std::map<atom_t, size_t>& atom_nw,
+    const Vector3_Order<double>& k_ibz,
+    const std::map<atom_t, std::array<double, 3>>& coord_frac,
+    bool use_time_reversal = false,
+    const Vector3_Order<double>* k_bz_target = nullptr);
+
+/*!
+ * @brief Rotate the three Cartesian components of the band-basis velocity matrix
+ *        v_alpha[alpha](n, m) from k_ibz to k_bz = member.k_bz.
+ *
+ * Implements the head/wing velocity transformation:
+ *
+ *   v_alpha^band(k_bz) = conj(C_bz)^T * v_{alpha,AO}(k_bz) * C_bz
+ *
+ * where
+ *   v_{alpha,AO}(k_bz) = sum_beta R_S(alpha,beta) * rotate_abacus_kspace_matrix(v_{beta,AO}(k_ibz))
+ *   C_bz               = C_ibz * conj(M^S)        (row convention: C is (n_bands, n_aos))
+ *
+ * The input velocity is band-basis (n_states, n_states) per Cartesian component,
+ * matching the PyATB output read by read_headwing_input. The IBZ eigenvectors
+ * C_ibz (n_states, n_aos) come from MeanField::find_wfc.
+ *
+ * Returns three ComplexMatrices (one per alpha'), the band-basis velocity at k_bz.
+ * Under time reversal the Cartesian rotation is negated, matching the velocity
+ * being an odd-parity vector operator.
+ */
+std::array<ComplexMatrix, 3> rotate_headwing_velocity(
+    const AbacusSymmetryContext& ctx,
+    const AbacusKStarMember& member,
+    const std::array<ComplexMatrix, 3>& v_band_ibz,
+    const ComplexMatrix& C_ibz,
+    const std::map<atom_t, size_t>& atom_nw,
+    const Vector3_Order<double>& k_ibz,
+    const std::map<atom_t, std::array<double, 3>>& coord_frac,
+    bool use_time_reversal = false,
+    const Vector3_Order<double>* k_bz_target = nullptr);
+
 void build_abacus_rspace_sector_stars(
     const AbacusSymmetryContext& ctx,
     const std::map<atom_t, std::array<double, 3>>& coord_frac,
