@@ -349,12 +349,15 @@ void diele_func::cal_head_symmetric()
             MPI_Allreduce(&have_local, &owner_have, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
             if (owner_have == 0)
                 throw std::runtime_error("cal_head_symmetric: no rank owns the IBZ eigenvectors");
-            // Determine the owner rank via scan.
-            int my_rank = 0;
-            MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-            int prefix = 0;
-            MPI_Scan(&have_local, &prefix, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-            const int owner_rank = prefix - 1;  // first rank that has it
+            // All ranks must agree on the Bcast root. When multiple ranks own
+            // the wfc (pyatb path: full copy on every rank), use rank 0.
+            int owner_rank = 0;
+            if (owner_have == 1)
+            {
+                int prefix = 0;
+                MPI_Scan(&have_local, &prefix, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+                owner_rank = prefix - 1;
+            }
             if (C_ibz_ptr != nullptr)
                 C_ibz_local = *C_ibz_ptr;
             int dims[2] = {C_ibz_local.nr, C_ibz_local.nc};
@@ -714,9 +717,13 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
                 MPI_Allreduce(&have, &have_sum, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
                 if (have_sum == 0)
                     throw std::runtime_error("cal_wing_symmetric: no rank owns an IBZ eigenvector");
-                int prefix = 0;
-                MPI_Scan(&have, &prefix, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-                const int owner = prefix - 1;
+                int owner = 0;
+                if (have_sum == 1)
+                {
+                    int prefix = 0;
+                    MPI_Scan(&have, &prefix, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+                    owner = prefix - 1;
+                }
                 if (C_ptr != nullptr) C_local = *C_ptr;
                 int dims[2] = {C_local.nr, C_local.nc};
                 MPI_Bcast(dims, 2, MPI_INT, owner, MPI_COMM_WORLD);
