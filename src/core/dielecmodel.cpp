@@ -233,8 +233,12 @@ void diele_func::cal_head()
                     {
                         double egap =
                             (eigenvalues(ik, iocc) - eigenvalues(ik, iunocc));  // * HA2EV;
+                        // NOTE: wg is matrix(n_kpoints, n_states); index with (ik, ib) not flat
+                        // buffer, otherwise the k-dependence of the occupation is silently
+                        // dropped. For an insulator all rows are equal so this is a numerical
+                        // no-op, but it is required for correctness on metals / IBZ input.
                         const double factor = headwing_transition_weight(
-                            wg.c[iocc], wg.c[iunocc], n_spin, use_soc);
+                            wg(ik, iocc), wg(ik, iunocc), n_spin, use_soc);
                         if (factor > 1.e-8)
                         {
                             for (int alpha = 0; alpha != 3; alpha++)
@@ -566,13 +570,16 @@ std::complex<double> diele_func::compute_wing(const int alpha, const int iomega,
                 double factor2;
                 if (use_soc)
                 {
-                    factor1 = wg.c[iocc] * (1.0 - wg.c[iunocc] * nk);
-                    factor2 = wg.c[iunocc] * (1.0 - wg.c[iocc] * nk);
+                    // NOTE: wg is matrix(n_kpoints, n_states); use wg(ik, ib) so the
+                    // k-dependence of the occupation is honored. The factor `* nk` recovers
+                    // the occupation count (wg was divided by n_kpoints at read time).
+                    factor1 = wg(ik, iocc) * (1.0 - wg(ik, iunocc) * nk);
+                    factor2 = wg(ik, iunocc) * (1.0 - wg(ik, iocc) * nk);
                 }
                 else
                 {
-                    factor1 = wg.c[iocc] / 2 * n_spin * (1.0 - wg.c[iunocc] / 2 * n_spin * nk);
-                    factor2 = wg.c[iunocc] / 2 * n_spin * (1.0 - wg.c[iocc] / 2 * n_spin * nk);
+                    factor1 = wg(ik, iocc) / 2 * n_spin * (1.0 - wg(ik, iunocc) / 2 * n_spin * nk);
+                    factor2 = wg(ik, iunocc) / 2 * n_spin * (1.0 - wg(ik, iocc) / 2 * n_spin * nk);
                 }
                 if (factor1 > 1.e-8)
                 {
