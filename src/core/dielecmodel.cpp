@@ -469,6 +469,19 @@ matrix_m<std::complex<double>> diele_func::get_rpa_chi0v_wing(const int ifreq) c
 void diele_func::cal_wing(const Cs_LRI &Cs_data, double coulomb_eigen_threshold,
                           const atpair_k_cplx_mat_t &Vq)
 {
+    const bool can_sym =
+        use_symmetry
+        && librpa_int::can_restore_abacus_kstar_meanfield(meanfield_df, kfrac_band, atom_nw, coord_frac);
+
+    if (can_sym)
+        cal_wing_symmetric(Cs_data, coulomb_eigen_threshold, Vq);
+    else
+        cal_wing_full_bz(Cs_data, coulomb_eigen_threshold, Vq);
+}
+
+void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_threshold,
+                                  const atpair_k_cplx_mat_t &Vq)
+{
     using global::profiler;
 
     profiler.start("cal_wing_mu");
@@ -540,6 +553,155 @@ void diele_func::cal_wing(const Cs_LRI &Cs_data, double coulomb_eigen_threshold,
     release_free_mem();
     profiler.stop("cal_wing_mu");
 };
+
+void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_threshold,
+                                    const atpair_k_cplx_mat_t &Vq)
+{
+    // -------------------------------------------------------------------------
+    // Symmetry-aware wing. The wing path (cal_wing_full_bz -> transform_Cs2mnk
+    // -> compute_wing) reads velocity, eigenvectors, eigenvalues, occupation
+    // and kfrac_band directly off the diele_func members and indexes them by a
+    // single `ik` running over the full BZ.
+    //
+    // Rather than reimplementing the distributed transform_Cs2mnk path, we
+    // expand the IBZ mean-field, velocity and kfrac_list to the full BZ in
+    // place, invoke cal_wing_full_bz unchanged, then restore every member to
+    // its original IBZ state. The expansion uses the same primitives as
+    // cal_head_symmetric: rotate_headwing_velocity for the Cartesian velocity,
+    // and C_bz = C_ibz * conj(M^S) for the eigenvectors.
+    // -------------------------------------------------------------------------
+    using global::profiler;
+    const auto& ctx = LIBRPA::abacus_symmetry_ctx;
+    const int nsym_space = static_cast<int>(ctx.rspace_operations.size());
+    const auto member_targets = librpa_int::build_abacus_kstar_member_kfrac_targets(pbc_);
+
+    const int n_kpoints_ibz = nk;
+    const int n_bands = n_states;
+    const int n_aos = n_basis;
+
+    // Step 1: build the full-BZ kfrac_list and the per-k mapping back to IBZ.
+    std::vector<Vector3_Order<double>> kfrac_bz;
+    std::vector<int> ik_bz_to_ibz;
+    std::vector<LIBRPA::AbacusKStarMember> members_bz;
+    kfrac_bz.reserve(ctx.count_kstar_members());
+    ik_bz_to_ibz.reserve(ctx.count_kstar_members());
+    members_bz.reserve(ctx.count_kstar_members());
+
+    for (int ik_ibz = 0; ik_ibz != n_kpoints_ibz; ++ik_ibz)
+    {
+        const auto& k_ibz = kfrac_band[ik_ibz];
+        const auto& star = LIBRPA::find_abacus_kstar_for_ibz_kpoint(ctx, k_ibz);
+        for (std::size_t im = 0; im != star.members.size(); ++im)
+        {
+            const auto& member = star.members[im];
+            const auto& k_bz = member_targets.empty()
+                ? member.k_bz
+                : member_targets[ik_ibz][im];
+            kfrac_bz.push_back(k_bz);
+            ik_bz_to_ibz.push_back(ik_ibz);
+            members_bz.push_back(member);
+        }
+    }
+    const int n_kpoints_bz = static_cast<int>(kfrac_bz.size());
+
+    // Step 2: save the original IBZ state of every member we are about to
+    // replace, so we can restore it exactly on exit. velocity_ is a const-ref
+    // bound at construction; we deep-copy its contents now and write them back
+    // via const_cast at the end.
+    auto& mf = meanfield_df;
+    const int n_spinor = mf.get_n_spinor();
+    const headwing_velocity_t velocity_ibz = velocity_;             // deep copy
+    const std::vector<Vector3_Order<double>> kfrac_band_orig = kfrac_band;
+    const int nk_orig = nk;
+    const std::map<int, std::map<int, std::map<int, ComplexMatrix>>> wfc_orig = mf.get_eigenvectors();
+    const std::vector<matrix> eskb_orig = mf.get_eigenvals();
+    const std::vector<matrix> wg_orig = mf.get_weight();
+
+    // Step 3: expand the public mean-field containers (eigenvectors map,
+    // eigenvals and weight vectors) to the full BZ. MeanField::resize is
+    // private, so we manipulate the public accessors directly. Each matrix in
+    // eigenvals/wg keeps its column count (n_bands); only the row count (n_k)
+    // grows.
+    mf.get_eigenvectors().clear();
+    mf.get_eigenvals().assign(n_spin, matrix(n_kpoints_bz, n_bands));
+    mf.get_weight().assign(n_spin, matrix(n_kpoints_bz, n_bands));
+    for (int ispin = 0; ispin != n_spin; ++ispin)
+    {
+        for (int ispinor = 0; ispinor != n_spinor; ++ispinor)
+        {
+            for (int ik_bz = 0; ik_bz != n_kpoints_bz; ++ik_bz)
+            {
+                const int ik_ibz = ik_bz_to_ibz[ik_bz];
+                const auto& member = members_bz[ik_bz];
+                const auto& k_ibz = kfrac_band_orig[ik_ibz];
+                const bool use_time_reversal = member.isym >= nsym_space;
+
+                // Eigenvectors: rotate IBZ wfc to BZ via C_bz = C_ibz * conj(M^S).
+                const auto& C_ibz = wfc_orig.at(ispin).at(ispinor).at(ik_ibz);
+                const auto M_full = LIBRPA::build_abacus_ao_bloch_rotation_matrix_full(
+                    ctx, member, atom_nw, k_ibz, coord_frac, use_time_reversal, &kfrac_bz[ik_bz]);
+                const ComplexMatrix M_full_conj = conj(M_full);
+                mf.get_eigenvectors()[ispin][ispinor][ik_bz] = C_ibz * M_full_conj;
+            }
+        }
+        // Eigenvalues and occupations are symmetry-invariant: copy the IBZ row.
+        for (int ik_bz = 0; ik_bz != n_kpoints_bz; ++ik_bz)
+        {
+            const int ik_ibz = ik_bz_to_ibz[ik_bz];
+            for (int ib = 0; ib != n_bands; ++ib)
+            {
+                mf.get_eigenvals()[ispin](ik_bz, ib) = eskb_orig[ispin](ik_ibz, ib);
+                mf.get_weight()[ispin](ik_bz, ib) = wg_orig[ispin](ik_ibz, ib);
+            }
+        }
+    }
+
+    // Step 4: expand the velocity to the full BZ. velocity_ is a const-ref, so
+    // rebind its backing storage in place via const_cast (the bound object is a
+    // non-const headwing_velocity_t owned by Dataset).
+    auto& velocity_mut = const_cast<headwing_velocity_t&>(velocity_);
+    initialize_headwing_velocity(velocity_mut, n_spin, n_kpoints_bz, n_bands);
+    for (int ispin = 0; ispin != n_spin; ++ispin)
+    {
+        for (int ik_bz = 0; ik_bz != n_kpoints_bz; ++ik_bz)
+        {
+            const int ik_ibz = ik_bz_to_ibz[ik_bz];
+            const auto& member = members_bz[ik_bz];
+            const auto& k_ibz = kfrac_band_orig[ik_ibz];
+            const bool use_time_reversal = member.isym >= nsym_space;
+            const auto& C_ibz = wfc_orig.at(ispin).at(0).at(ik_ibz);
+
+            std::array<ComplexMatrix, 3> v_band_ibz{
+                velocity_ibz[ispin][ik_ibz][0],
+                velocity_ibz[ispin][ik_ibz][1],
+                velocity_ibz[ispin][ik_ibz][2]};
+            auto v_band_bz = LIBRPA::rotate_headwing_velocity(
+                ctx, member, v_band_ibz, C_ibz, atom_nw, k_ibz, coord_frac,
+                use_time_reversal, &kfrac_bz[ik_bz]);
+            for (int a = 0; a < 3; ++a)
+                velocity_mut[ispin][ik_bz][a] = v_band_bz[a];
+        }
+    }
+
+    // Step 5: switch kfrac_band and nk to the full-BZ grid, then run the
+    // unmodified full-BZ wing path.
+    kfrac_band = kfrac_bz;
+    nk = n_kpoints_bz;
+
+    cal_wing_full_bz(Cs_data, coulomb_eigen_threshold, Vq);
+
+    // Step 6: restore the original IBZ state.
+    kfrac_band = kfrac_band_orig;
+    nk = nk_orig;
+    mf.get_eigenvals() = eskb_orig;
+    mf.get_weight() = wg_orig;
+    mf.get_eigenvectors().clear();
+    for (const auto& sp : wfc_orig)
+        for (const auto& so : sp.second)
+            for (const auto& kp : so.second)
+                mf.get_eigenvectors()[sp.first][so.first][kp.first] = kp.second;
+    velocity_mut = velocity_ibz;
+}
 
 std::pair<ArrayDesc, matrix_m<complex<double>>> diele_func::transform_Cs2mnk(
     const int ik, const int mu,

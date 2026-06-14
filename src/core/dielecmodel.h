@@ -156,6 +156,18 @@ public:
     bool has_wing() const { return !wing.empty(); }
 
     void cal_wing(const Cs_LRI &Cs_data, double coulomb_eigen_threshold, const atpair_k_cplx_mat_t &Vq);  // atpair_k_cplx_mat_t &Vq, Cs_LRI &Cs_data
+
+private:
+    // Symmetry-aware wing: expands the IBZ mean-field (eigenvectors, kfrac_list)
+    // and head/wing velocity to the full BZ via k-star unfolding, then runs the
+    // standard full-BZ wing summation on the expanded data. The original IBZ
+    // mean-field is restored on exit.
+    void cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_threshold, const atpair_k_cplx_mat_t &Vq);
+    // The historical full-BZ wing summation, also used as the fallback when
+    // symmetry restoration is unavailable.
+    void cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_threshold, const atpair_k_cplx_mat_t &Vq);
+
+public:
     // tranform Cs_ij(R) to Cs_ij(k)
     // void FT_R2k(const librpa_int::Cs_LRI &Cs_data);
     // void Cs_ij2mn();
