@@ -324,10 +324,33 @@ void diele_func::cal_head_symmetric()
                 throw std::runtime_error("cal_head_symmetric: empty k-star");
 
             // IBZ eigenvectors C (n_bands, n_aos). For the non-SOC case ispinor = 0.
+            // Under k-parallel eigenvector distribution (use_kpara_scf_eigvec),
+            // each k is owned by one rank; broadcast it from the owner to all
+            // ranks so the symmetry rotation can run identically everywhere.
             const int ispinor_bra = 0;
-            const auto* C_ibz_ptr = meanfield_df.find_wfc(ispin, ispinor_bra, ik_ibz);
+            ComplexMatrix C_ibz_local;
+            const ComplexMatrix* C_ibz_ptr = meanfield_df.find_wfc(ispin, ispinor_bra, ik_ibz);
+            const int have_local = (C_ibz_ptr != nullptr) ? 1 : 0;
+            int owner_have = 0;
+            MPI_Allreduce(&have_local, &owner_have, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+            if (owner_have == 0)
+                throw std::runtime_error("cal_head_symmetric: no rank owns the IBZ eigenvectors");
+            // Determine the owner rank via scan.
+            int my_rank = 0;
+            MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+            int prefix = 0;
+            MPI_Scan(&have_local, &prefix, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+            const int owner_rank = prefix - 1;  // first rank that has it
+            if (C_ibz_ptr != nullptr)
+                C_ibz_local = *C_ibz_ptr;
+            int dims[2] = {C_ibz_local.nr, C_ibz_local.nc};
+            MPI_Bcast(dims, 2, MPI_INT, owner_rank, MPI_COMM_WORLD);
             if (C_ibz_ptr == nullptr)
-                throw std::runtime_error("cal_head_symmetric: missing IBZ eigenvectors");
+                C_ibz_local.create(dims[0], dims[1]);
+            if (C_ibz_local.nr > 0 && C_ibz_local.nc > 0)
+                MPI_Bcast(C_ibz_local.c, C_ibz_local.nr * C_ibz_local.nc,
+                          MPI_CXX_DOUBLE_COMPLEX, owner_rank, MPI_COMM_WORLD);
+            C_ibz_ptr = &C_ibz_local;
 
             // IBZ velocity, band basis, per Cartesian component.
             std::array<ComplexMatrix, 3> v_band_ibz{
