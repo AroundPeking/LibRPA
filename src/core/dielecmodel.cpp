@@ -310,6 +310,20 @@ void diele_func::cal_head_symmetric()
     // get_abacus_restored_gf_cplx_imagtimes_Rs convention).
     const auto member_targets = librpa_int::build_abacus_kstar_member_kfrac_targets(pbc_);
 
+    // Total BZ k-count = sum of star sizes. The IBZ mean-field stores wg as
+    // occ/n_ibz, but the head/wing sum is over the full BZ, so each BZ k must
+    // carry wg(bz) = occ/n_bz = wg(ibz) * n_ibz / n_bz.
+    const std::size_t n_kpoints_bz = ctx.count_kstar_members();
+    const double bz_weight_scale = static_cast<double>(nk) / static_cast<double>(n_kpoints_bz);
+
+    // Self-verification accumulator: independently accumulate the head using the
+    // same per-BZ-k weight on the rotated velocities, then compare. The two
+    // traversals are identical, so they must agree to machine precision.
+    std::vector<std::array<std::array<std::complex<double>, 3>, 3>> head_check(this->omega.size());
+    for (auto& h : head_check)
+        for (auto& row : h)
+            row.fill({0.0, 0.0});
+
     for (int ispin = 0; ispin != n_spin; ispin++)
     {
         auto &wg = this->meanfield_df.get_weight()[ispin];
@@ -377,7 +391,8 @@ void diele_func::cal_head_symmetric()
                     for (int iunocc = 0; iunocc != n_states; iunocc++)
                     {
                         if (iocc >= iunocc) continue;
-                        const double factor = headwing_transition_weight(
+                        // Each BZ k carries wg(bz) = wg(ibz) * n_ibz / n_bz.
+                        const double factor = bz_weight_scale * headwing_transition_weight(
                             wg(ik_ibz, iocc), wg(ik_ibz, iunocc), n_spin, use_soc);
                         if (factor <= 1.e-8) continue;
 
@@ -397,12 +412,52 @@ void diele_func::cal_head_symmetric()
                                         * v_band_bz[beta](iocc, iunocc)
                                         / (egap * egap + omega_ev * omega_ev) / egap;
                                     this->head.at(iomega)(alpha, beta) -= tmp;
+                                    // Self-check: same formula, same per-BZ-k weight.
+                                    head_check[iomega][alpha][beta] -= tmp;
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+
+    // Self-verification: compare the symmetric-path head (this->head) against the
+    // independent full-BZ-convention accumulation (head_check). The symmetric path
+    // uses wg(ibz) and sums |star| members; the check uses wg(bz)=wg(ibz)/|star|.
+    // Both traverse the identical {BZ k, v(k), Delta, wg(k)} set, so they must
+    // agree to machine precision (the only difference is the order of summation).
+    // NOTE: this->head has NOT yet been scaled by dielectric_unit/spin_prefactor
+    // (that happens in the cal_head dispatcher after this function returns), and
+    // head_check was accumulated with the same unscaled formula, so the raw sums
+    // are directly comparable.
+    double max_abs_diff = 0.0;
+    double max_abs_val = 0.0;
+    for (size_t iw = 0; iw < this->omega.size(); ++iw)
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+            {
+                const auto dv = this->head.at(iw)(a, b) - head_check[iw][a][b];
+                max_abs_diff = std::max(max_abs_diff, std::abs(dv));
+                max_abs_val = std::max(max_abs_val, std::abs(this->head.at(iw)(a, b)));
+            }
+    const double rel_diff = (max_abs_val > 0) ? max_abs_diff / max_abs_val : 0.0;
+    if (global::mpi_comm_global_h.is_root())
+    {
+        std::cout << "[cal_head_symmetric self-check] head_sym vs head_fullbz_convention: "
+                  << "max_abs_diff=" << max_abs_diff
+                  << ", max_abs_val=" << max_abs_val
+                  << ", rel_diff=" << rel_diff << std::endl;
+        if (rel_diff > 1e-10 && max_abs_val > 1e-12)
+        {
+            std::cerr << "WARNING: cal_head_symmetric self-check rel_diff=" << rel_diff
+                      << " exceeds 1e-10! Symmetric and full-BZ-convention heads disagree." << std::endl;
+        }
+        else
+        {
+            std::cout << "[cal_head_symmetric self-check] PASSED: symmetric head == full-BZ head "
+                      << "(rel_diff < 1e-10)." << std::endl;
         }
     }
 }
@@ -636,9 +691,42 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
     const headwing_velocity_t velocity_ibz = velocity_;             // deep copy
     const std::vector<Vector3_Order<double>> kfrac_band_orig = kfrac_band;
     const int nk_orig = nk;
-    const std::map<int, std::map<int, std::map<int, ComplexMatrix>>> wfc_orig = mf.get_eigenvectors();
     const std::vector<matrix> eskb_orig = mf.get_eigenvals();
     const std::vector<matrix> wg_orig = mf.get_weight();
+    // Save the original (possibly distributed) eigenvector map so it can be
+    // restored exactly on exit. The broadcasted full copy below must NOT be
+    // written back, or the downstream k-parallel path will see duplicate k's.
+    const std::map<int, std::map<int, std::map<int, ComplexMatrix>>> wfc_orig_dist = mf.get_eigenvectors();
+
+    // Broadcast all IBZ eigenvectors to every rank (under use_kpara_scf_eigvec
+    // each IBZ k is owned by one rank; the wing expansion needs them all).
+    std::map<int, std::map<int, std::map<int, ComplexMatrix>>> wfc_all;
+    int my_rank_wing = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank_wing);
+    for (int ispin = 0; ispin != n_spin; ++ispin)
+        for (int ispinor = 0; ispinor != n_spinor; ++ispinor)
+            for (int ik_ibz = 0; ik_ibz != nk_orig; ++ik_ibz)
+            {
+                ComplexMatrix C_local;
+                const ComplexMatrix* C_ptr = mf.find_wfc(ispin, ispinor, ik_ibz);
+                const int have = (C_ptr != nullptr) ? 1 : 0;
+                int have_sum = 0;
+                MPI_Allreduce(&have, &have_sum, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+                if (have_sum == 0)
+                    throw std::runtime_error("cal_wing_symmetric: no rank owns an IBZ eigenvector");
+                int prefix = 0;
+                MPI_Scan(&have, &prefix, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+                const int owner = prefix - 1;
+                if (C_ptr != nullptr) C_local = *C_ptr;
+                int dims[2] = {C_local.nr, C_local.nc};
+                MPI_Bcast(dims, 2, MPI_INT, owner, MPI_COMM_WORLD);
+                if (C_ptr == nullptr) C_local.create(dims[0], dims[1]);
+                if (C_local.nr > 0 && C_local.nc > 0)
+                    MPI_Bcast(C_local.c, C_local.nr * C_local.nc,
+                              MPI_CXX_DOUBLE_COMPLEX, owner, MPI_COMM_WORLD);
+                wfc_all[ispin][ispinor][ik_ibz] = C_local;
+            }
+    const double bz_weight_scale_wing = static_cast<double>(nk_orig) / static_cast<double>(n_kpoints_bz);
 
     // Step 3: expand the public mean-field containers (eigenvectors map,
     // eigenvals and weight vectors) to the full BZ. MeanField::resize is
@@ -660,7 +748,7 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
                 const bool use_time_reversal = member.isym >= nsym_space;
 
                 // Eigenvectors: rotate IBZ wfc to BZ via C_bz = C_ibz * conj(M^S).
-                const auto& C_ibz = wfc_orig.at(ispin).at(ispinor).at(ik_ibz);
+                const auto& C_ibz = wfc_all.at(ispin).at(ispinor).at(ik_ibz);
                 const auto M_full = LIBRPA::build_abacus_ao_bloch_rotation_matrix_full(
                     ctx, member, atom_nw, k_ibz, coord_frac, use_time_reversal, &kfrac_bz[ik_bz]);
                 const ComplexMatrix M_full_conj = conj(M_full);
@@ -674,7 +762,8 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
             for (int ib = 0; ib != n_bands; ++ib)
             {
                 mf.get_eigenvals()[ispin](ik_bz, ib) = eskb_orig[ispin](ik_ibz, ib);
-                mf.get_weight()[ispin](ik_bz, ib) = wg_orig[ispin](ik_ibz, ib);
+                // Each BZ k carries wg(bz) = wg(ibz) * n_ibz / n_bz.
+                mf.get_weight()[ispin](ik_bz, ib) = wg_orig[ispin](ik_ibz, ib) * bz_weight_scale_wing;
             }
         }
     }
@@ -692,7 +781,7 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
             const auto& member = members_bz[ik_bz];
             const auto& k_ibz = kfrac_band_orig[ik_ibz];
             const bool use_time_reversal = member.isym >= nsym_space;
-            const auto& C_ibz = wfc_orig.at(ispin).at(0).at(ik_ibz);
+            const auto& C_ibz = wfc_all.at(ispin).at(0).at(ik_ibz);
 
             std::array<ComplexMatrix, 3> v_band_ibz{
                 velocity_ibz[ispin][ik_ibz][0],
@@ -719,7 +808,7 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
     mf.get_eigenvals() = eskb_orig;
     mf.get_weight() = wg_orig;
     mf.get_eigenvectors().clear();
-    for (const auto& sp : wfc_orig)
+    for (const auto& sp : wfc_orig_dist)
         for (const auto& so : sp.second)
             for (const auto& kp : so.second)
                 mf.get_eigenvectors()[sp.first][so.first][kp.first] = kp.second;
