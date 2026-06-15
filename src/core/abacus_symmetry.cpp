@@ -3485,7 +3485,10 @@ std::array<ComplexMatrix, 3> rotate_headwing_velocity(
         v_ao_bz[a].create(n_aos, n_aos);
     for (int a_out = 0; a_out < 3; ++a_out)
     {
-        // v_{a_out, AO}(k_bz) = sum_{a_in} trs_sign * R[a_out][a_in] * v_{a_in, AO}(k_bz raw)
+        // velocity transforms as v'(k_bz) = R · v(k_ibz).
+        // symrot_k.txt convention: k_full * S = k_ibz + G, i.e. k_ibz = S^T · k_bz
+        // (column-vector form). So dk_ibz/dk_bz = S^T, and
+        // dH/dk_bz = (dk_ibz/dk_bz)^T · dH/dk_ibz = S · v(k_ibz).
         for (int a_in = 0; a_in < 3; ++a_in)
         {
             const double coeff = trs_sign * rot[a_out][a_in];
