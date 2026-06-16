@@ -1060,22 +1060,32 @@ void read_headwing_input(const string &dir_path, bool need_wing)
         }
     }
 
-    if (static_cast<int>(kfrac_headwing.size()) != mf.get_n_kpoints())
+    // When PyATB velocity has more k-points than the SCF meanfield (e.g. full-BZ
+    // velocity on a 8k grid with 3k IBZ meanfield), skip the consistency check
+    // and let head/wing use the PyATB k-grid directly. This enables "Route B"
+    // where velocity is pre-computed at all BZ k-points and no rotation is needed.
+    const bool hw_kgrid_matches_mf =
+        static_cast<int>(kfrac_headwing.size()) == mf.get_n_kpoints();
+
+    if (static_cast<int>(kfrac_headwing.size()) < mf.get_n_kpoints())
     {
-        throw std::runtime_error("Head/wing k-point count is inconsistent with meanfield");
+        throw std::runtime_error("Head/wing k-point count is less than meanfield");
     }
-    if (static_cast<int>(pds->pbc.kfrac_list.size()) != mf.get_n_kpoints())
+    if (hw_kgrid_matches_mf)
     {
-        throw std::runtime_error("SCF k-point list is inconsistent with meanfield");
-    }
-    for (int ik = 0; ik != mf.get_n_kpoints(); ++ik)
-    {
-        if (!nearly_same_kpoint(kfrac_headwing[ik], pds->pbc.kfrac_list[ik]))
+        if (static_cast<int>(pds->pbc.kfrac_list.size()) != mf.get_n_kpoints())
         {
-            std::ostringstream oss;
-            oss << "Head/wing k-point " << ik
-                << " is inconsistent with the SCF meanfield k grid";
-            throw std::runtime_error(oss.str());
+            throw std::runtime_error("SCF k-point list is inconsistent with meanfield");
+        }
+        for (int ik = 0; ik != mf.get_n_kpoints(); ++ik)
+        {
+            if (!nearly_same_kpoint(kfrac_headwing[ik], pds->pbc.kfrac_list[ik]))
+            {
+                std::ostringstream oss;
+                oss << "Head/wing k-point " << ik
+                    << " is inconsistent with the SCF meanfield k grid";
+                throw std::runtime_error(oss.str());
+            }
         }
     }
 
@@ -1084,7 +1094,7 @@ void read_headwing_input(const string &dir_path, bool need_wing)
     if (!headwing_basis_aux.initialized())
         throw std::runtime_error("Head/wing auxiliary basis is not initialized");
     pds->p_headwing = std::make_unique<diele_func>(
-        mf, headwing_velocity, pds->pbc.kfrac_list, pds->basis_wfc,
+        mf, headwing_velocity, kfrac_headwing, pds->basis_wfc,
         headwing_basis_aux, freqs,
         n_basis, n_states, n_spin, headwing_basis_aux.nb_total, pds->pbc, pds->comm_h, pds->blacs_h);
     pds->p_headwing->use_2d_dielectric = driver::get_bool(driver::opts.use_2d_dielectric);
