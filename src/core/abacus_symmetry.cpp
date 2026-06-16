@@ -3448,12 +3448,35 @@ std::array<ComplexMatrix, 3> rotate_headwing_velocity(
             throw std::runtime_error("rotate_headwing_velocity: band velocity shape mismatch with C_ibz");
     }
 
+    // Orthonormalize C_ibz rows (modified Gram-Schmidt). The PyATB eigenvector
+    // file may not be strictly orthonormal; without this the band<->AO round-trip
+    // amplifies the velocity and the head explodes.
+    ComplexMatrix C_ortho = C_ibz;
+    for (int i = 0; i < n_bands; ++i)
+    {
+        for (int j = 0; j < i; ++j)
+        {
+            std::complex<double> dot{0, 0};
+            for (int mu = 0; mu < n_aos; ++mu)
+                dot += std::conj(C_ortho(j, mu)) * C_ortho(i, mu);
+            for (int mu = 0; mu < n_aos; ++mu)
+                C_ortho(i, mu) -= dot * C_ortho(j, mu);
+        }
+        double norm = 0.0;
+        for (int mu = 0; mu < n_aos; ++mu)
+            norm += std::norm(C_ortho(i, mu));
+        norm = std::sqrt(norm);
+        if (norm > 1e-12)
+            for (int mu = 0; mu < n_aos; ++mu)
+                C_ortho(i, mu) /= norm;
+    }
+
     // (1) AO-basis velocity at k_ibz, per alpha.
     //     C_ibz is (n_bands, n_aos); C_ibz^T is (n_aos, n_bands);
     //     conj(C_ibz) is (n_bands, n_aos).
     //     v_AO = C_ibz^T * v_band * conj(C_ibz)  -> (n_aos, n_aos).
-    const ComplexMatrix C_ibz_T = transpose(C_ibz, false);
-    const ComplexMatrix C_ibz_conj = conj(C_ibz);
+    const ComplexMatrix C_ibz_T = transpose(C_ortho, false);
+    const ComplexMatrix C_ibz_conj = conj(C_ortho);
     std::array<ComplexMatrix, 3> v_ao_ibz;
     for (int alpha = 0; alpha < 3; ++alpha)
         v_ao_ibz[alpha] = C_ibz_T * v_band_ibz[alpha] * C_ibz_conj;
@@ -3497,14 +3520,21 @@ std::array<ComplexMatrix, 3> rotate_headwing_velocity(
             v_ao_bz[a_out] += coeff * v_ao_bz_raw[a_in];
         }
     }
+    }
 
     // (4) Build BZ eigenvector C_bz = C_ibz * conj(M^S).
     //     M^S is the full (n_aos, n_aos) AO Bloch rotation; conj(M^S) is (n_aos, n_aos);
     //     C_ibz (n_bands, n_aos) * conj(M^S) (n_aos, n_aos) -> C_bz (n_bands, n_aos).
     const ComplexMatrix M_full = build_abacus_ao_bloch_rotation_matrix_full(
         ctx, member, atom_nw, k_ibz, coord_frac, use_time_reversal, k_bz_target);
+    }
+
     const ComplexMatrix M_full_conj = conj(M_full);
-    const ComplexMatrix C_bz = C_ibz * M_full_conj; // (n_bands, n_aos)
+    // C_bz = C_ibz * M^{S,dagger} (NOT conj(M^S)).
+    // M^S is unitary so M^{-1} = M† = transpose(conj(M)).
+    // Using conj(M) without transpose gives a non-unitary C_bz and amplifies velocity.
+    const ComplexMatrix M_full_dag = transpose(M_full, true); // conjugate transpose
+    const ComplexMatrix C_bz = C_ortho * M_full_dag; // (n_bands, n_aos)
 
     // Transform back to band basis:
     //   v^nm(k_bz) = sum_{mu,nu} conj(C_bz(n,mu)) * v_AO(mu,nu) * C_bz(m,nu)
