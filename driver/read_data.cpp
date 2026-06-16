@@ -1120,6 +1120,109 @@ void read_headwing_input(const string &dir_path, bool need_wing)
             pds->p_headwing->atom_nw[atom] = pds->basis_wfc.get_atom_nb(atom);
         pds->p_headwing->coord_frac = LIBRPA::abacus_symmetry_ctx.input_coord_frac;
     }
+    // Route B: PyATB pre-computed the velocity at every BZ k-point (nk > scf_nk),
+    // but PyATB only ships KS_eigenvector files for the IBZ k-points. The head
+    // sum (cal_head_full_bz) only needs velocity + eigenvalues + occupations, so
+    // it runs unchanged. The wing sum (cal_wing_full_bz -> transform_Cs2mnk),
+    // however, reads meanfield eigenvectors at every BZ k. We therefore expand
+    // the SCF IBZ eigenvectors to the full BZ here via the same AO-Bloch rotation
+    // C_bz = C_ibz * conj(M^S) used by cal_wing_symmetric, writing the result
+    // into p_headwing->meanfield_df so the downstream full-BZ wing path sees a
+    // complete eigenvector set.
+    if (use_loaded_abacus_symmetry_sidecars() && !hw_kgrid_matches_mf && restore_mf.active)
+    {
+        const auto& ctx = LIBRPA::abacus_symmetry_ctx;
+        const int nsym_space = static_cast<int>(ctx.rspace_operations.size());
+        std::map<atom_t, size_t> atom_nw_map;
+        for (atom_t atom = 0; atom != static_cast<atom_t>(pds->basis_wfc.n_atoms); ++atom)
+            atom_nw_map[atom] = pds->basis_wfc.get_atom_nb(atom);
+        const auto coord_frac = ctx.input_coord_frac;
+        const int n_spinor = mf.get_n_spinor();
+
+        // SCF IBZ k-points (captured before the PyATB overwrite) and their
+        // eigenvectors, taken from the saved original mean-field.
+        const auto& scf_kfrac = pds->pbc.kfrac_list;
+
+        // Broadcast every IBZ eigenvector to all ranks. Under use_kpara_scf_eigvec
+        // each IBZ k is owned by a single rank, but the symmetry rotation below
+        // runs identically on every rank, so every rank needs the full IBZ set.
+        std::map<int, std::map<int, std::map<int, ComplexMatrix>>> wfc_ibz_all;
+        for (int ispin = 0; ispin != n_spin; ++ispin)
+            for (int ispinor = 0; ispinor != n_spinor; ++ispinor)
+                for (int ik_ibz = 0; ik_ibz != scf_nk; ++ik_ibz)
+                {
+                    ComplexMatrix C_local;
+                    const ComplexMatrix* C_ptr = restore_mf.original.find_wfc(ispin, ispinor, ik_ibz);
+                    const int have = (C_ptr != nullptr && C_ptr->nr > 0) ? 1 : 0;
+                    int have_sum = 0;
+                    MPI_Allreduce(&have, &have_sum, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+                    int owner = 0;
+                    if (have_sum == 1)
+                    {
+                        int prefix = 0;
+                        MPI_Scan(&have, &prefix, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+                        owner = prefix - 1;
+                    }
+                    if (C_ptr != nullptr) C_local = *C_ptr;
+                    int dims[2] = {C_local.nr, C_local.nc};
+                    MPI_Bcast(dims, 2, MPI_INT, owner, MPI_COMM_WORLD);
+                    if (C_ptr == nullptr) C_local.create(dims[0], dims[1]);
+                    if (C_local.nr > 0 && C_local.nc > 0)
+                        MPI_Bcast(C_local.c, C_local.nr * C_local.nc,
+                                  MPI_CXX_DOUBLE_COMPLEX, owner, MPI_COMM_WORLD);
+                    wfc_ibz_all[ispin][ispinor][ik_ibz] = C_local;
+                }
+
+        auto& hw_mf = pds->p_headwing->get_meanfield_df();
+        int n_filled = 0;
+        int n_rotated = 0;
+        for (int ik_bz = 0; ik_bz != static_cast<int>(kfrac_headwing.size()); ++ik_bz)
+        {
+            const auto& k_bz = kfrac_headwing[ik_bz];
+            // Skip k-points that already have a valid eigenvector (PyATB shipped them).
+            bool already_have = false;
+            for (int ispin = 0; ispin != n_spin && !already_have; ++ispin)
+                for (int ispinor = 0; ispinor != n_spinor && !already_have; ++ispinor)
+                    if (const auto* C = hw_mf.find_wfc(ispin, ispinor, ik_bz); C && C->nr > 0)
+                        already_have = true;
+            if (already_have) { ++n_filled; continue; }
+
+            // Find which IBZ k-point and star member this BZ k corresponds to.
+            bool found = false;
+            for (int ik_ibz = 0; ik_ibz != scf_nk && !found; ++ik_ibz)
+            {
+                const auto& k_ibz = scf_kfrac[ik_ibz];
+                const auto& star = LIBRPA::find_abacus_kstar_for_ibz_kpoint(ctx, k_ibz);
+                for (std::size_t im = 0; im != star.members.size(); ++im)
+                {
+                    const auto& member = star.members[im];
+                    if (fabs(member.k_bz.x - k_bz.x) > 1e-5 ||
+                        fabs(member.k_bz.y - k_bz.y) > 1e-5 ||
+                        fabs(member.k_bz.z - k_bz.z) > 1e-5) continue;
+                    const bool use_time_reversal = member.isym >= nsym_space;
+                    const auto M_full = LIBRPA::build_abacus_ao_bloch_rotation_matrix_full(
+                        ctx, member, atom_nw_map, k_ibz, coord_frac, use_time_reversal, &k_bz);
+                    const ComplexMatrix M_full_conj = librpa_int::conj(M_full);
+                    for (int ispin = 0; ispin != n_spin; ++ispin)
+                        for (int ispinor = 0; ispinor != n_spinor; ++ispinor)
+                        {
+                            const auto& C_ibz = wfc_ibz_all[ispin][ispinor][ik_ibz];
+                            if (C_ibz.nr == 0) continue;
+                            hw_mf.get_eigenvectors()[ispin][ispinor][ik_bz] = C_ibz * M_full_conj;
+                        }
+                    found = true;
+                    ++n_rotated;
+                    break;
+                }
+            }
+            if (!found && mpi_comm_global_h.is_root())
+                std::cerr << "WARNING: Route B eigenvector expansion found no IBZ/star match for BZ k "
+                          << ik_bz << " (" << k_bz.x << "," << k_bz.y << "," << k_bz.z << ")" << std::endl;
+        }
+        if (mpi_comm_global_h.is_root())
+            std::cout << "Route B: expanded IBZ eigenvectors to BZ (already_filled=" << n_filled
+                      << ", rotated=" << n_rotated << " of " << kfrac_headwing.size() << " BZ k-points)" << std::endl;
+    }
     pds->p_headwing->init(driver::opts.sqrt_coulomb_threshold, pds->vq);
     pds->p_headwing->cal_head();
     pds->epsmacs_imagfreq = pds->p_headwing->get_head_vec();

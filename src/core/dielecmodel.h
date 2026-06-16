@@ -113,6 +113,11 @@ public:
     std::map<atom_t, size_t> atom_nw;
     std::map<atom_t, std::array<double, 3>> coord_frac;
 
+    // Public access to the (otherwise private) head/wing mean-field copy, so the
+    // driver can expand IBZ eigenvectors to the full BZ for Route B before the
+    // wing sum runs. The reference is mutable on purpose.
+    MeanField& get_meanfield_df() { return meanfield_df; }
+
 public:
     diele_func(const MeanField &mf, const headwing_velocity_t &velocity,
                const std::vector<Vector3_Order<double>> &kfrac,
