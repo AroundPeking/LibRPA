@@ -968,6 +968,12 @@ void read_headwing_input(const string &dir_path, bool need_wing)
     auto &mf = pds->mf;
     auto &headwing_velocity = pds->headwing_velocity;
     headwing_velocity.clear();
+    // Capture the SCF mean-field k-count BEFORE any PyATB overwrite. The
+    // consistency check below must compare the PyATB velocity coverage against
+    // the actual SCF grid, not against the already-overwritten PyATB copy that
+    // `mf` will hold once read_scf_occ_eigenvalues(band_out, ...) runs.
+    const int scf_nk = mf.get_n_kpoints();
+    const std::size_t scf_nkfrac = pds->pbc.kfrac_list.size();
     struct MfRestore
     {
         MeanField &mf;
@@ -1064,20 +1070,22 @@ void read_headwing_input(const string &dir_path, bool need_wing)
     // velocity on a 8k grid with 3k IBZ meanfield), skip the consistency check
     // and let head/wing use the PyATB k-grid directly. This enables "Route B"
     // where velocity is pre-computed at all BZ k-points and no rotation is needed.
+    // NOTE: compare against scf_nk (captured before PyATB overwrote mf), not
+    // against mf.get_n_kpoints() which now reports the PyATB k-count.
     const bool hw_kgrid_matches_mf =
-        static_cast<int>(kfrac_headwing.size()) == mf.get_n_kpoints();
+        static_cast<int>(kfrac_headwing.size()) == scf_nk;
 
-    if (static_cast<int>(kfrac_headwing.size()) < mf.get_n_kpoints())
+    if (static_cast<int>(kfrac_headwing.size()) < scf_nk)
     {
         throw std::runtime_error("Head/wing k-point count is less than meanfield");
     }
     if (hw_kgrid_matches_mf)
     {
-        if (static_cast<int>(pds->pbc.kfrac_list.size()) != mf.get_n_kpoints())
+        if (scf_nkfrac != static_cast<std::size_t>(scf_nk))
         {
             throw std::runtime_error("SCF k-point list is inconsistent with meanfield");
         }
-        for (int ik = 0; ik != mf.get_n_kpoints(); ++ik)
+        for (int ik = 0; ik != scf_nk; ++ik)
         {
             if (!nearly_same_kpoint(kfrac_headwing[ik], pds->pbc.kfrac_list[ik]))
             {
@@ -1101,9 +1109,11 @@ void read_headwing_input(const string &dir_path, bool need_wing)
     pds->p_headwing->use_soc = mf.get_n_spinor() > 1;
     pds->p_headwing->debug = driver::opts.output_level >= LIBRPA_VERBOSE_DEBUG;
     // Symmetry-aware head/wing wiring: enable the IBZ->BZ k-star unfolding path
-    // when ABACUS sidecars are loaded. cal_head then sums over k-star members
-    // reconstructed from the IBZ velocity via rotate_headwing_velocity.
-    if (use_loaded_abacus_symmetry_sidecars())
+    // when ABACUS sidecars are loaded AND the velocity is on the IBZ grid (same
+    // k-count as the SCF meanfield). When the velocity is pre-computed at every
+    // BZ k-point (Route B, hw_kgrid_matches_mf == false), no rotation is needed
+    // and the standard full-BZ summation in cal_head_full_bz is exact.
+    if (use_loaded_abacus_symmetry_sidecars() && hw_kgrid_matches_mf)
     {
         pds->p_headwing->use_symmetry = true;
         for (atom_t atom = 0; atom != static_cast<atom_t>(pds->basis_wfc.n_atoms); ++atom)
