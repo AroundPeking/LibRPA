@@ -3404,6 +3404,11 @@ ComplexMatrix build_abacus_ao_bloch_rotation_matrix_full(
     return M_full;
 }
 
+extern "C" void zheev_(const char*, const char*, const int*, std::complex<double>*, const int*, double*, std::complex<double>*, const int*, double*, int*);
+static inline void zheev_wrapper(const char* jobz, const char* uplo, int n, std::complex<double>* a, int lda, double* w, std::complex<double>* work, int lwork, double* rwork, int& info) {
+    zheev_(jobz, uplo, &n, a, &lda, w, work, &lwork, rwork, &info);
+}
+
 std::array<ComplexMatrix, 3> rotate_headwing_velocity(
     const AbacusSymmetryContext& ctx,
     const AbacusKStarMember& member,
@@ -3421,7 +3426,7 @@ std::array<ComplexMatrix, 3> rotate_headwing_velocity(
     //
     // Algorithm:
     //   (1) Build AO-basis velocity at k_ibz for each alpha:
-    //         v_{alpha,AO}(k_ibz) = C_ibz^T * v_alpha^band(k_ibz) * conj(C_ibz)
+    //         v_{alpha,AO}(k_ibz) = C_ibz^T * v_alpha^band(k_ibz) * conj(C_ortho)
     //       where C_ibz is the row-convention eigenvector (n_bands, n_aos).
     //   (2) Rotate each AO-basis component to k_bz using the existing
     //       rotate_abacus_kspace_matrix (handles AO Bloch rotation, return-lattice
@@ -3448,33 +3453,26 @@ std::array<ComplexMatrix, 3> rotate_headwing_velocity(
             throw std::runtime_error("rotate_headwing_velocity: band velocity shape mismatch with C_ibz");
     }
 
-    // Orthonormalize C_ibz rows (modified Gram-Schmidt). The PyATB eigenvector
-    // file may not be strictly orthonormal; without this the band<->AO round-trip
-    // amplifies the velocity and the head explodes.
+    // Gram-Schmidt orthonormalization of C_ibz rows (nband, nao).
+    // The LCAO eigenvector is in a non-orthogonal AO basis (C·C† != I).
+    // GS gives an orthonormal approximation that preserves the dominant structure.
     ComplexMatrix C_ortho = C_ibz;
-    for (int i = 0; i < n_bands; ++i)
-    {
-        for (int j = 0; j < i; ++j)
-        {
-            std::complex<double> dot{0, 0};
-            for (int mu = 0; mu < n_aos; ++mu)
-                dot += std::conj(C_ortho(j, mu)) * C_ortho(i, mu);
-            for (int mu = 0; mu < n_aos; ++mu)
-                C_ortho(i, mu) -= dot * C_ortho(j, mu);
+    for (int i = 0; i < n_bands; ++i) {
+        for (int j = 0; j < i; ++j) {
+            std::complex<double> dot{0,0};
+            for (int mu = 0; mu < n_aos; ++mu) dot += std::conj(C_ortho(j,mu)) * C_ortho(i,mu);
+            for (int mu = 0; mu < n_aos; ++mu) C_ortho(i,mu) -= dot * C_ortho(j,mu);
         }
-        double norm = 0.0;
-        for (int mu = 0; mu < n_aos; ++mu)
-            norm += std::norm(C_ortho(i, mu));
-        norm = std::sqrt(norm);
-        if (norm > 1e-12)
-            for (int mu = 0; mu < n_aos; ++mu)
-                C_ortho(i, mu) /= norm;
+        double nrm = 0.0;
+        for (int mu = 0; mu < n_aos; ++mu) nrm += std::norm(C_ortho(i,mu));
+        nrm = std::sqrt(nrm);
+        if (nrm > 1e-12) for (int mu = 0; mu < n_aos; ++mu) C_ortho(i,mu) /= nrm;
     }
 
     // (1) AO-basis velocity at k_ibz, per alpha.
     //     C_ibz is (n_bands, n_aos); C_ibz^T is (n_aos, n_bands);
-    //     conj(C_ibz) is (n_bands, n_aos).
-    //     v_AO = C_ibz^T * v_band * conj(C_ibz)  -> (n_aos, n_aos).
+    //     conj(C_ortho) is (n_bands, n_aos).
+    //     v_AO = C_ibz^T * v_band * conj(C_ortho)  -> (n_aos, n_aos).
     const ComplexMatrix C_ibz_T = transpose(C_ortho, false);
     const ComplexMatrix C_ibz_conj = conj(C_ortho);
     std::array<ComplexMatrix, 3> v_ao_ibz;
@@ -3493,7 +3491,8 @@ std::array<ComplexMatrix, 3> rotate_headwing_velocity(
     const int spatial_isym = use_time_reversal ? member.isym - nsym_space : member.isym;
     if (spatial_isym < 0 || spatial_isym >= nsym_space)
         throw std::runtime_error("rotate_headwing_velocity: invalid symmetry index for Cartesian rotation");
-    const auto& rot = ctx.rspace_operations[spatial_isym].rotation; // 3x3, row-major [a'][a]
+    // Use l=1 shell rotation (Cartesian orthogonal) instead of fractional gmatrix.
+    ComplexMatrix rot_cm = ctx.rspace_operations[spatial_isym].shell_rotations.at(1);
 
     // Velocity transforms as a vector: under S = {R|t}, v -> R v (contravariant).
     // For time-reversal-augmented members the effective Cartesian sign is -1
@@ -3514,12 +3513,11 @@ std::array<ComplexMatrix, 3> rotate_headwing_velocity(
         // dH/dk_bz = (dk_ibz/dk_bz)^T · dH/dk_ibz = S · v(k_ibz).
         for (int a_in = 0; a_in < 3; ++a_in)
         {
-            const double coeff = trs_sign * rot[a_out][a_in];
-            if (std::abs(coeff) < 1e-15)
+            const std::complex<double> coeff_c = trs_sign * rot_cm(a_out, a_in);
+            if (std::abs(coeff_c) < 1e-15)
                 continue;
-            v_ao_bz[a_out] += coeff * v_ao_bz_raw[a_in];
+            v_ao_bz[a_out] += coeff_c * v_ao_bz_raw[a_in];
         }
-    }
     }
 
     // (4) Build BZ eigenvector C_bz = C_ibz * conj(M^S).
@@ -3527,7 +3525,6 @@ std::array<ComplexMatrix, 3> rotate_headwing_velocity(
     //     C_ibz (n_bands, n_aos) * conj(M^S) (n_aos, n_aos) -> C_bz (n_bands, n_aos).
     const ComplexMatrix M_full = build_abacus_ao_bloch_rotation_matrix_full(
         ctx, member, atom_nw, k_ibz, coord_frac, use_time_reversal, k_bz_target);
-    }
 
     const ComplexMatrix M_full_conj = conj(M_full);
     // C_bz = C_ibz * M^{S,dagger} (NOT conj(M^S)).
