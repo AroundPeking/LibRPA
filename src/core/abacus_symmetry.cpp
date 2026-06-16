@@ -3453,97 +3453,50 @@ std::array<ComplexMatrix, 3> rotate_headwing_velocity(
             throw std::runtime_error("rotate_headwing_velocity: band velocity shape mismatch with C_ibz");
     }
 
-    // Gram-Schmidt orthonormalization of C_ibz rows (nband, nao).
-    // The LCAO eigenvector is in a non-orthogonal AO basis (C·C† != I).
-    // GS gives an orthonormal approximation that preserves the dominant structure.
-    ComplexMatrix C_ortho = C_ibz;
-    for (int i = 0; i < n_bands; ++i) {
-        for (int j = 0; j < i; ++j) {
-            std::complex<double> dot{0,0};
-            for (int mu = 0; mu < n_aos; ++mu) dot += std::conj(C_ortho(j,mu)) * C_ortho(i,mu);
-            for (int mu = 0; mu < n_aos; ++mu) C_ortho(i,mu) -= dot * C_ortho(j,mu);
+    // Build M^S (AO Bloch rotation, unitary) and use U = M† as the band-basis unitary.
+    // v_band(k_bz) = M · v_band(k_ibz) · M†  (band-basis symmetric transform)
+    // This completely avoids band<->AO round-trip in non-orthogonal LCAO basis.
+    const ComplexMatrix M_full = build_abacus_ao_bloch_rotation_matrix_full(
+        ctx, member, atom_nw, k_ibz, coord_frac, use_time_reversal, k_bz_target);
+    const ComplexMatrix M_dag = transpose(M_full, true); // M† = M^{-1} (M is unitary)
+    const ComplexMatrix M_conj = conj(M_full);           // for TRS conjugation
+
+    // Step 1: band-basis symmetric transform: v_temp = M · v_ibz · M†
+    // Under TRS, also conjugate: v_temp = M · conj(v_ibz) · M†
+    std::array<ComplexMatrix, 3> v_band_rot;
+    for (int alpha = 0; alpha < 3; ++alpha)
+    {
+        if (use_time_reversal)
+        {
+            ComplexMatrix v_conj(n_bands, n_bands);
+            for (int i = 0; i < n_bands; ++i)
+                for (int j = 0; j < n_bands; ++j)
+                    v_conj(i, j) = std::conj(v_band_ibz[alpha](i, j));
+            v_band_rot[alpha] = M_full * v_conj * M_dag;
         }
-        double nrm = 0.0;
-        for (int mu = 0; mu < n_aos; ++mu) nrm += std::norm(C_ortho(i,mu));
-        nrm = std::sqrt(nrm);
-        if (nrm > 1e-12) for (int mu = 0; mu < n_aos; ++mu) C_ortho(i,mu) /= nrm;
+        else
+            v_band_rot[alpha] = M_full * v_band_ibz[alpha] * M_dag;
     }
 
-    // (1) AO-basis velocity at k_ibz, per alpha.
-    //     C_ibz is (n_bands, n_aos); C_ibz^T is (n_aos, n_bands);
-    //     conj(C_ortho) is (n_bands, n_aos).
-    //     v_AO = C_ibz^T * v_band * conj(C_ortho)  -> (n_aos, n_aos).
-    const ComplexMatrix C_ibz_T = transpose(C_ortho, false);
-    const ComplexMatrix C_ibz_conj = conj(C_ortho);
-    std::array<ComplexMatrix, 3> v_ao_ibz;
-    for (int alpha = 0; alpha < 3; ++alpha)
-        v_ao_ibz[alpha] = C_ibz_T * v_band_ibz[alpha] * C_ibz_conj;
-
-    // (2) Rotate each AO component to k_bz.
-    std::array<ComplexMatrix, 3> v_ao_bz_raw;
-    for (int alpha = 0; alpha < 3; ++alpha)
-        v_ao_bz_raw[alpha] = rotate_abacus_kspace_matrix(
-            ctx, member, v_ao_ibz[alpha], atom_nw, k_ibz, coord_frac,
-            use_time_reversal, k_bz_target);
-
-    // (3) Cartesian rotation R_S. Fetch the real-space rotation matrix.
+    // Step 2: Cartesian rotation using l=1 shell rotation (orthogonal in Cartesian space)
     const int nsym_space = static_cast<int>(ctx.rspace_operations.size());
     const int spatial_isym = use_time_reversal ? member.isym - nsym_space : member.isym;
     if (spatial_isym < 0 || spatial_isym >= nsym_space)
-        throw std::runtime_error("rotate_headwing_velocity: invalid symmetry index for Cartesian rotation");
-    // Use l=1 shell rotation (Cartesian orthogonal) instead of fractional gmatrix.
-    ComplexMatrix rot_cm = ctx.rspace_operations[spatial_isym].shell_rotations.at(1);
-
-    // Velocity transforms as a vector: under S = {R|t}, v -> R v (contravariant).
-    // For time-reversal-augmented members the effective Cartesian sign is -1
-    // (TRS = inversion composed with complex conjugation, and velocity is odd
-    // under inversion). Note the AO Bloch rotation step (2) already applied the
-    // complex conjugation for TRS members.
+        throw std::runtime_error("rotate_headwing_velocity: invalid symmetry index");
+    ComplexMatrix rot_cm = ctx.rspace_operations.at(spatial_isym).shell_rotations.at(1);
     const double trs_sign = use_time_reversal ? -1.0 : 1.0;
 
-    // Assemble n_aos x n_aos zero matrices of the right shape.
-    std::array<ComplexMatrix, 3> v_ao_bz;
+    std::array<ComplexMatrix, 3> v_band_bz;
     for (int a = 0; a < 3; ++a)
-        v_ao_bz[a].create(n_aos, n_aos);
+        v_band_bz[a].create(n_bands, n_bands);
     for (int a_out = 0; a_out < 3; ++a_out)
-    {
-        // velocity transforms as v'(k_bz) = R · v(k_ibz).
-        // symrot_k.txt convention: k_full * S = k_ibz + G, i.e. k_ibz = S^T · k_bz
-        // (column-vector form). So dk_ibz/dk_bz = S^T, and
-        // dH/dk_bz = (dk_ibz/dk_bz)^T · dH/dk_ibz = S · v(k_ibz).
         for (int a_in = 0; a_in < 3; ++a_in)
         {
             const std::complex<double> coeff_c = trs_sign * rot_cm(a_out, a_in);
             if (std::abs(coeff_c) < 1e-15)
                 continue;
-            v_ao_bz[a_out] += coeff_c * v_ao_bz_raw[a_in];
+            v_band_bz[a_out] += coeff_c * v_band_rot[a_in];
         }
-    }
-
-    // (4) Build BZ eigenvector C_bz = C_ibz * conj(M^S).
-    //     M^S is the full (n_aos, n_aos) AO Bloch rotation; conj(M^S) is (n_aos, n_aos);
-    //     C_ibz (n_bands, n_aos) * conj(M^S) (n_aos, n_aos) -> C_bz (n_bands, n_aos).
-    const ComplexMatrix M_full = build_abacus_ao_bloch_rotation_matrix_full(
-        ctx, member, atom_nw, k_ibz, coord_frac, use_time_reversal, k_bz_target);
-
-    const ComplexMatrix M_full_conj = conj(M_full);
-    // C_bz = C_ibz * M^{S,dagger} (NOT conj(M^S)).
-    // M^S is unitary so M^{-1} = M† = transpose(conj(M)).
-    // Using conj(M) without transpose gives a non-unitary C_bz and amplifies velocity.
-    const ComplexMatrix M_full_dag = transpose(M_full, true); // conjugate transpose
-    const ComplexMatrix C_bz = C_ortho * M_full_dag; // (n_bands, n_aos)
-
-    // Transform back to band basis:
-    //   v^nm(k_bz) = sum_{mu,nu} conj(C_bz(n,mu)) * v_AO(mu,nu) * C_bz(m,nu)
-    // In matrix form with C_bz stored as (n_bands, n_aos):
-    //   v_band = conj(C_bz) * v_AO * transpose(C_bz, false)
-    // conj(C_bz) is (n_bands, n_aos); v_AO is (n_aos, n_aos);
-    // transpose(C_bz, false) is (n_aos, n_bands) -> result (n_bands, n_bands).
-    const ComplexMatrix C_bz_conj = conj(C_bz);
-    const ComplexMatrix C_bz_T = transpose(C_bz, false);
-    std::array<ComplexMatrix, 3> v_band_bz;
-    for (int a = 0; a < 3; ++a)
-        v_band_bz[a] = C_bz_conj * v_ao_bz[a] * C_bz_T;
 
     return v_band_bz;
 }
