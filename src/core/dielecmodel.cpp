@@ -400,7 +400,7 @@ void diele_func::cal_head_symmetric()
                         if (factor <= 1.e-8) continue;
 
                         const double egap =
-                            eigenvalues(ik_ibz, iunocc) - eigenvalues(ik_ibz, iocc);
+                            (eigenvalues(ik_ibz, iocc) - eigenvalues(ik_ibz, iunocc));
 
                         for (int alpha = 0; alpha != 3; ++alpha)
                         {
