@@ -3453,29 +3453,17 @@ std::array<ComplexMatrix, 3> rotate_headwing_velocity(
             throw std::runtime_error("rotate_headwing_velocity: band velocity shape mismatch with C_ibz");
     }
 
-    // Build M^S (AO Bloch rotation, unitary) and use U = M† as the band-basis unitary.
-    // v_band(k_bz) = M · v_band(k_ibz) · M†  (band-basis symmetric transform)
-    // This completely avoids band<->AO round-trip in non-orthogonal LCAO basis.
-    const ComplexMatrix M_full = build_abacus_ao_bloch_rotation_matrix_full(
-        ctx, member, atom_nw, k_ibz, coord_frac, use_time_reversal, k_bz_target);
-    const ComplexMatrix M_dag = transpose(M_full, true); // M† = M^{-1} (M is unitary)
-    const ComplexMatrix M_conj = conj(M_full);           // for TRS conjugation
-
-    // Step 1: band-basis symmetric transform: v_temp = M · v_ibz · M†
-    // Under TRS, also conjugate: v_temp = M · conj(v_ibz) · M†
+    // Skip band-basis transform (head is unitarily invariant: Tr[v†v]).
+    // Only Cartesian rotation matters for head tensor structure.
+    // TRS conjugation is still needed.
     std::array<ComplexMatrix, 3> v_band_rot;
     for (int alpha = 0; alpha < 3; ++alpha)
     {
+        v_band_rot[alpha] = v_band_ibz[alpha];
         if (use_time_reversal)
-        {
-            ComplexMatrix v_conj(n_bands, n_bands);
             for (int i = 0; i < n_bands; ++i)
                 for (int j = 0; j < n_bands; ++j)
-                    v_conj(i, j) = std::conj(v_band_ibz[alpha](i, j));
-            v_band_rot[alpha] = M_full * v_conj * M_dag;
-        }
-        else
-            v_band_rot[alpha] = M_full * v_band_ibz[alpha] * M_dag;
+                    v_band_rot[alpha](i, j) = std::conj(v_band_ibz[alpha](i, j));
     }
 
     // Step 2: Cartesian rotation using l=1 shell rotation (orthogonal in Cartesian space)
