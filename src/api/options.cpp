@@ -81,6 +81,9 @@ void librpa_init_options(LibrpaOptions *opts)
     opts->option_dielect_func = 0;
     opts->use_2d_dielectric = LIBRPA_SWITCH_OFF;
     opts->rpa_headwing_body_start = 0;
+    opts->rpa_headwing_mode[0] = '\0';
+    std::strncpy(opts->rpa_headwing_mode, "qavg", LIBRPA_MAX_STRLEN);
+    opts->rpa_headwing_mode[LIBRPA_MAX_STRLEN - 1] = '\0';
     opts->sqrt_coulomb_threshold = 0.0e0;
     opts->load_sigc_from_file = LIBRPA_SWITCH_OFF;
 

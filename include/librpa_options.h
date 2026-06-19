@@ -211,6 +211,10 @@ typedef struct
     //! Zero uses channel 1 in the current analytic 3D/2D head/wing path.
     int rpa_headwing_body_start;
 
+    //! RPA Gamma correction mode: "qavg" keeps the current head/wing q-average,
+    //! "head_only" replaces only the analytic head before the ordinary trace-log.
+    char rpa_headwing_mode[LIBRPA_MAX_STRLEN];
+
     //! Flag of loading correlation self-energy matrix (real-space, imaginary frequency) from file
     LibrpaSwitch load_sigc_from_file;
 

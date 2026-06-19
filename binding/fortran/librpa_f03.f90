@@ -182,6 +182,7 @@ module librpa_f03
       integer(c_int) :: option_dielect_func
       integer(c_int) :: use_2d_dielectric
       integer(c_int) :: rpa_headwing_body_start
+      character(kind=c_char, len=1) :: rpa_headwing_mode(LIBRPA_MAX_STRLEN)
       integer(c_int) :: load_sigc_from_file
       real(c_double) :: sqrt_coulomb_threshold
       real(c_double) :: libri_chi0_threshold_C
@@ -301,6 +302,8 @@ module librpa_f03
       logical :: use_2d_dielectric
       !> First regular Coulomb-eigenbasis channel used by RPA head/wing correction.
       integer :: rpa_headwing_body_start
+      !> RPA Gamma correction mode: "qavg" or "head_only".
+      character(len=LIBRPA_MAX_STRLEN) :: rpa_headwing_mode
       !> Experimental: load correlation self-energy matrix from file where supported.
       logical :: load_sigc_from_file
       !> Threshold for eigenvalues when taking the square root of Coulomb matrices.
@@ -1018,6 +1021,7 @@ contains
       call sync_opt(opts%option_dielect_func,     opts%opts_c%option_dielect_func,     direction)
       call sync_opt(opts%use_2d_dielectric,       opts%opts_c%use_2d_dielectric,       direction)
       call sync_opt(opts%rpa_headwing_body_start, opts%opts_c%rpa_headwing_body_start, direction)
+      call sync_opt(opts%rpa_headwing_mode,       opts%opts_c%rpa_headwing_mode,       direction)
       call sync_opt(opts%load_sigc_from_file,     opts%opts_c%load_sigc_from_file,     direction)
       call sync_opt(opts%use_scalapack_gw_wc,     opts%opts_c%use_scalapack_gw_wc,     direction)
       call sync_opt(opts%use_cholesky_gw_wc,      opts%opts_c%use_cholesky_gw_wc,      direction)

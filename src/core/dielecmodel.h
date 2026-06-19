@@ -1,5 +1,6 @@
 #pragma once
 #include <functional>
+#include <string>
 #include <vector>
 #include "atomic_basis.h"
 #include "../math/matrix3.h"
@@ -32,6 +33,7 @@ struct RpaHeadwingSettings
     bool use_2d_dielectric = false;
     bool use_soc = false;
     int rpa_headwing_body_start = 0;
+    std::string rpa_headwing_mode = "qavg";
     double sqrt_coulomb_threshold = 0.0;
 };
 
@@ -262,5 +264,8 @@ void replace_rpa_response_headwing(matrix_m<std::complex<double>> &response_bloc
                                    const matrix_m<std::complex<double>> &head,
                                    const matrix_m<std::complex<double>> &wing,
                                    const ArrayDesc &desc_response);
+void replace_rpa_response_head_only(matrix_m<std::complex<double>> &response_block,
+                                    const matrix_m<std::complex<double>> &head,
+                                    const ArrayDesc &desc_response);
 
 }

@@ -116,6 +116,56 @@ void test_replace_rpa_response_headwing_replaces_only_singular_channels(
     }
 }
 
+void test_replace_rpa_response_head_only_keeps_numeric_wings(
+    const BlacsCtxtHandler &blacs_h)
+{
+    ArrayDesc desc(blacs_h);
+    desc.init_square_blk(4, 4, 0, 0);
+
+    auto response = init_local_mat<std::complex<double>>(desc, MAJOR::COL);
+    matrix_m<std::complex<double>> original(4, 4, MAJOR::COL);
+    for (int i = 0; i != 4; ++i)
+    {
+        const int ilo = desc.indx_g2l_r(i);
+        for (int j = 0; j != 4; ++j)
+        {
+            const auto value = std::complex<double>(0.1 * (i + 1) + 0.01 * (j + 1),
+                                                    0.001 * (i - j));
+            original(i, j) = value;
+            if (ilo < 0) continue;
+            const int jlo = desc.indx_g2l_c(j);
+            if (jlo < 0) continue;
+            response(ilo, jlo) = value;
+        }
+    }
+
+    const matrix_m<std::complex<double>> chi0v_head(
+        std::vector<std::vector<std::complex<double>>>{
+            {std::complex<double>{0.21, 0.0}, std::complex<double>{0.01, 0.02},
+             std::complex<double>{-0.03, 0.04}},
+            {std::complex<double>{0.05, -0.01}, std::complex<double>{0.24, 0.0},
+             std::complex<double>{0.07, 0.03}},
+            {std::complex<double>{-0.02, -0.04}, std::complex<double>{0.08, -0.03},
+             std::complex<double>{0.27, 0.0}}},
+        MAJOR::COL);
+
+    librpa_int::replace_rpa_response_head_only(response, chi0v_head, desc);
+
+    const auto expected_head = (chi0v_head(0, 0) + chi0v_head(1, 1) + chi0v_head(2, 2)) / 3.0;
+    for (int i = 0; i != 4; ++i)
+    {
+        const int ilo = desc.indx_g2l_r(i);
+        if (ilo < 0) continue;
+        for (int j = 0; j != 4; ++j)
+        {
+            const int jlo = desc.indx_g2l_c(j);
+            if (jlo < 0) continue;
+            const auto expected = (i == 0 && j == 0) ? expected_head : original(i, j);
+            assert_complex_close(response(ilo, jlo), expected, 1e-12);
+        }
+    }
+}
+
 void test_rpa_trace_log_average_uses_directional_head_and_wing()
 {
     const matrix_m<std::complex<double>> head(
@@ -244,6 +294,7 @@ int main(int argc, char *argv[])
         blacs_h.set_square_grid();
 
         test_replace_rpa_response_headwing_replaces_only_singular_channels(blacs_h);
+        test_replace_rpa_response_head_only_keeps_numeric_wings(blacs_h);
         test_rpa_trace_log_average_uses_directional_head_and_wing();
         test_rpa_headwing_regular_body_start_channel();
         test_headwing_spin_weights();

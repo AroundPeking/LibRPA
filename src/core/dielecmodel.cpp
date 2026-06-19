@@ -2162,6 +2162,34 @@ void replace_rpa_response_headwing(matrix_m<std::complex<double>> &response_bloc
     }
 }
 
+void replace_rpa_response_head_only(matrix_m<std::complex<double>> &response_block,
+                                    const matrix_m<std::complex<double>> &head,
+                                    const ArrayDesc &desc_response)
+{
+    if (head.nr() != 3 || head.nc() != 3)
+    {
+        throw std::logic_error("RPA head-only replacement expects a 3x3 chi0*v head");
+    }
+    if (desc_response.m() < 1 || desc_response.n() < 1)
+    {
+        throw std::logic_error("RPA head-only replacement expects a non-empty response matrix");
+    }
+
+    std::complex<double> head_average = 0.0;
+    for (int alpha = 0; alpha != 3; ++alpha)
+    {
+        head_average += head(alpha, alpha);
+    }
+    head_average /= 3.0;
+
+    const int ilo_head = desc_response.indx_g2l_r(0);
+    const int jlo_head = desc_response.indx_g2l_c(0);
+    if (ilo_head >= 0 && jlo_head >= 0)
+    {
+        response_block(ilo_head, jlo_head) = head_average;
+    }
+}
+
 void diele_func::rewrite_eps(matrix_m<std::complex<double>> &chi0_block, const int ifreq,
                              ArrayDesc &desc_nabf_nabf_opt)
 {

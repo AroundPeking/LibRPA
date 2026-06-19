@@ -1156,7 +1156,8 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 coul_block, desc_nabf_nabf, coul_eigen_block, desc_nabf_nabf,
                 n_singular, coul_eigenvalues.c, 0.5,
                 headwing_settings.sqrt_coulomb_threshold);
-            df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf);
+            if (headwing_settings.rpa_headwing_mode == "qavg")
+                df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf);
             n_nonsingular_headwing = n_abf - as_int(n_singular);
             desc_headwing_response.init_square_blk(n_nonsingular_headwing, n_nonsingular_headwing, 0, 0);
             headwing_response_block =
@@ -1241,6 +1242,11 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
             }
 
             double pi_begin = omp_get_wtime();
+            const bool average_gamma_headwing =
+                replace_gamma_headwing && headwing_settings.option_dielect_func == 3 &&
+                headwing_settings.rpa_headwing_mode == "qavg";
+            const bool head_only_gamma =
+                replace_gamma_headwing && headwing_settings.rpa_headwing_mode == "head_only";
             if (replace_gamma_headwing)
             {
                 headwing_response_block.zero_out();
@@ -1249,10 +1255,33 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                     desc_nabf_nabf.desc, sqrtveig_blacs.ptr(), 1, 1, desc_nabf_nabf.desc, C_ZERO,
                     coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc);
                 ScalapackConnector::pgemm_f(
-                    'C', 'N', n_nonsingular_headwing, n_nonsingular_headwing, n_abf, -C_ONE,
+                    'C', 'N', n_nonsingular_headwing, n_nonsingular_headwing, n_abf,
+                    average_gamma_headwing ? -C_ONE : C_ONE,
                     sqrtveig_blacs.ptr(), 1, 1,
                     desc_nabf_nabf.desc, coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc,
                     C_ZERO, headwing_response_block.ptr(), 1, 1, desc_headwing_response.desc);
+                if (head_only_gamma)
+                {
+                    replace_rpa_response_head_only(headwing_response_block,
+                                                   df_headwing->get_rpa_chi0v_head(ifreq),
+                                                   desc_headwing_response);
+                    ScalapackConnector::pgemm_f(
+                        'N', 'N', n_abf, n_nonsingular_headwing, n_nonsingular_headwing, C_ONE,
+                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf.desc,
+                        headwing_response_block.ptr(), 1, 1, desc_headwing_response.desc,
+                        C_ZERO, coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc);
+                    ScalapackConnector::pgemm_f(
+                        'N', 'C', n_abf, n_abf, n_nonsingular_headwing, C_ONE,
+                        coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc,
+                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf.desc, C_ZERO,
+                        chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc);
+                    copy(chi0_block, coul_chi0_block);
+                }
+                else if (!average_gamma_headwing)
+                {
+                    throw std::logic_error("Unsupported RPA headwing mode: "
+                                           + headwing_settings.rpa_headwing_mode);
+                }
             }
             else
             {
@@ -1266,7 +1295,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
             double pi_end = omp_get_wtime();
 
             complex<double> rpa_for_omega_q = 0.0;
-            if (replace_gamma_headwing)
+            if (average_gamma_headwing)
             {
                 for (int i = 0; i != n_nonsingular_headwing; i++)
                 {

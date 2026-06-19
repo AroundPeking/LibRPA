@@ -150,6 +150,7 @@ The driver maps the unset value to `minimax` for backward compatibility.
 | `option_dielect_func`    | Option for dielectric function on the imaginary axis                         | int    | 0 (0=direct, 1=spline, 2=model fit, 3=analytic head+wing, 4=analytic head) |              |
 | `use_2d_dielectric`      | Use the 2D dielectric-function branch where supported                        | bool   | `false`                               | Experimental |
 | `rpa_headwing_body_start` | First regular Coulomb-eigenbasis channel used by RPA head/wing correction; 0 uses channel 1 | int | 0 | Experimental |
+| `rpa_headwing_mode`      | RPA Gamma correction mode: `qavg` uses head+wing q-average, `head_only` replaces only the analytic head before ordinary trace-log | string | `qavg` | Experimental |
 | `load_sigc_from_file`    | Load correlation self-energy matrix from file where supported                | bool   | `false`                               | Experimental |
 | `sqrt_coulomb_threshold` | Threshold for eigenvalues when taking the square root of Coulomb matrices    | double | 0.0                                   |              |
 | `option_qpe_solver`      | QP equation solver: 0=fixed-point self-consistent, 1=quasi-Newton self-consistent, 2=perturbative | int | 0 |              |

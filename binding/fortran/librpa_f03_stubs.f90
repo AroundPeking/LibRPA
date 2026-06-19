@@ -201,6 +201,8 @@ module librpa_f03
       logical :: use_2d_dielectric
       !> First regular Coulomb-eigenbasis channel used by RPA head/wing correction.
       integer :: rpa_headwing_body_start
+      !> RPA Gamma correction mode: "qavg" or "head_only".
+      character(len=LIBRPA_MAX_STRLEN) :: rpa_headwing_mode
       !> Experimental: load correlation self-energy matrix from file where supported.
       logical :: load_sigc_from_file
       !> Threshold for eigenvalues when taking the square root of Coulomb matrices.
