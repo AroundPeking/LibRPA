@@ -1453,22 +1453,13 @@ void diele_func::construct_rpa_trace_log_schur(
     const auto chi0v_head = get_rpa_chi0v_head(ifreq);
     const auto chi0v_wing = get_rpa_chi0v_wing(ifreq);
     const int n_body = desc_body.m();
-    if (n_body <= 0 || wing_row_offset < 0 || wing_row_offset + n_body > chi0v_wing.nr())
-    {
-        std::ostringstream oss;
-        oss << "RPA chi0*v Schur wing/body mismatch: n_body=" << n_body
-            << ", wing_row_offset=" << wing_row_offset << ", wing_rows=" << chi0v_wing.nr();
-        throw std::logic_error(oss.str());
-    }
 
     this->Lind.resize(3, 3, MAJOR::COL);
     this->bw.resize(n_body, 3, MAJOR::COL);
     this->wb.resize(3, n_body, MAJOR::COL);
 
-    ArrayDesc desc_wing(blacs_h);
-    desc_wing.init_square_blk(chi0v_wing.nr(), 3, 0, 0);
-    ArrayDesc desc_wing_opt(blacs_h);
-    desc_wing_opt.init(chi0v_wing.nr(), 3, desc_body.mb(), desc_wing.nb(), 0, 0);
+    const auto desc_wing_opt = make_rpa_chi0v_wing_desc(
+        desc_body, wing_row_offset, chi0v_wing.nr(), chi0v_wing.nc());
 
     ArrayDesc desc_lam_3(blacs_h);
     desc_lam_3.init_square_blk(n_body, 3, 0, 0);
@@ -2057,6 +2048,32 @@ double rpa_headwing_reciprocal_cell_volume(const PeriodicBoundaryData &pbc,
         return std::abs(pbc.G.e11 * pbc.G.e22 - pbc.G.e12 * pbc.G.e21);
     }
     return std::abs(pbc.G.Det());
+}
+
+ArrayDesc make_rpa_chi0v_wing_desc(const ArrayDesc &desc_body, const int wing_row_offset,
+                                    const int wing_rows_loc, const int wing_cols_loc)
+{
+    const int n_body = desc_body.m();
+    const int wing_rows = wing_row_offset + n_body;
+    if (n_body <= 0 || wing_row_offset < 0)
+    {
+        std::ostringstream oss;
+        oss << "RPA chi0*v Schur wing/body mismatch: n_body=" << n_body
+            << ", wing_row_offset=" << wing_row_offset;
+        throw std::logic_error(oss.str());
+    }
+
+    ArrayDesc desc_wing(desc_body.ictxt());
+    desc_wing.init(wing_rows, 3, desc_body.mb(), 1, 0, 0);
+    if (wing_rows_loc != desc_wing.m_loc() || wing_cols_loc != desc_wing.n_loc())
+    {
+        std::ostringstream oss;
+        oss << "RPA chi0*v Schur wing local descriptor mismatch: global_wing_rows="
+            << wing_rows << ", local_wing=" << wing_rows_loc << "x" << wing_cols_loc
+            << ", expected_local_wing=" << desc_wing.m_loc() << "x" << desc_wing.n_loc();
+        throw std::logic_error(oss.str());
+    }
+    return desc_wing;
 }
 
 std::complex<double> compute_rpa_chi0v_headwing_trace_log_average(

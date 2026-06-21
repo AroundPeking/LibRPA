@@ -272,6 +272,29 @@ void test_rpa_headwing_gamma_cell_volume_uses_reciprocal_lattice()
     require_double_close(vol_2d, expected_2d, 1e-14);
 }
 
+void test_rpa_chi0v_wing_desc_uses_global_rows(const BlacsCtxtHandler &blacs_h)
+{
+    ArrayDesc desc_body(blacs_h);
+    desc_body.init_square_blk(10, 10, 0, 0);
+
+    ArrayDesc desc_full_wing(blacs_h);
+    desc_full_wing.init(11, 3, desc_body.mb(), 1, 0, 0);
+
+    const auto desc_wing = librpa_int::make_rpa_chi0v_wing_desc(
+        desc_body, 1, desc_full_wing.m_loc(), desc_full_wing.n_loc());
+
+    if (desc_body.nprows() > 1)
+    {
+        assert(desc_full_wing.m_loc() < desc_full_wing.m());
+    }
+    assert(desc_wing.m() == 11);
+    assert(desc_wing.n() == 3);
+    assert(desc_wing.mb() == desc_body.mb());
+    assert(desc_wing.nb() == 1);
+    assert(desc_wing.m_loc() == desc_full_wing.m_loc());
+    assert(desc_wing.n_loc() == desc_full_wing.n_loc());
+}
+
 void test_headwing_spin_weights()
 {
     assert(std::abs(librpa_int::headwing_transition_weight(1.0, 0.25, 2, false) - 0.75) <
@@ -327,6 +350,7 @@ int main(int argc, char *argv[])
         test_rpa_trace_log_average_uses_directional_head_and_wing();
         test_rpa_headwing_regular_body_start_channel();
         test_rpa_headwing_gamma_cell_volume_uses_reciprocal_lattice();
+        test_rpa_chi0v_wing_desc_uses_global_rows(blacs_h);
         test_headwing_spin_weights();
         test_headwing_velocity_initialization();
     }
