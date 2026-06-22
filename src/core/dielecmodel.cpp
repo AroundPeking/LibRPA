@@ -194,7 +194,6 @@ void diele_func::init(double coulomb_eigen_threshold, const librpa_int::atpair_k
         }
     }
     int n_omega = this->omega.size();
-    get_Xv_cpl(coulomb_eigen_threshold, Vq);
 
     this->head.clear();
     this->head.resize(n_omega);
@@ -208,18 +207,14 @@ void diele_func::init_wing(double coulomb_eigen_threshold, const atpair_k_cplx_m
 {
     int n_omega = this->omega.size();
     this->n_abf = atomic_basis_abf_.nb_total;
-    get_Xv_cpl(coulomb_eigen_threshold, Vq);
     this->wing_mu.clear();
     this->wing_mu.resize(n_omega);
     this->wing.clear();
-    this->wing.resize(n_omega);
+    this->n_nonsingular = n_abf;
     this->Lind.resize(3, 3, MAJOR::COL);
-    this->bw.resize(n_nonsingular - 1, 3, MAJOR::COL);
-    this->wb.resize(3, n_nonsingular - 1, MAJOR::COL);
     for (int iomega = 0; iomega != n_omega; iomega++)
     {
         wing_mu[iomega].resize(n_abf, 3, MAJOR::COL);
-        wing[iomega].resize(n_nonsingular - 1, 3, MAJOR::COL);
     }
     get_Leb_points();
     if (use_2d_dielectric)
@@ -1076,11 +1071,15 @@ std::complex<double> diele_func::compute_wing(const int alpha, const int iomega,
 };
 
 void diele_func::wing_mu_to_lambda(matrix_m<std::complex<double>> &sqrtveig_blacs,
-                                   ArrayDesc &desc_nabf_nabf_opt)
+                                   ArrayDesc &desc_nabf_nabf_opt,
+                                   const std::size_t n_nonsingular_in)
 {
     using global::profiler;
 
     profiler.start("cal_wing");
+    this->n_nonsingular = n_nonsingular_in;
+    if (this->n_nonsingular < 2)
+        throw std::logic_error("Head/wing Coulomb subspace has no regular channels");
     int n_lambda = this->n_nonsingular - 1;
     ArrayDesc desc_wing_mu(blacs_h);
     desc_wing_mu.init_square_blk(n_abf, 3, 0, 0);
@@ -1092,6 +1091,8 @@ void diele_func::wing_mu_to_lambda(matrix_m<std::complex<double>> &sqrtveig_blac
     ArrayDesc desc_wing_opt(blacs_h);
     desc_wing_opt.init(n_nonsingular - 1, 3, desc_body.mb(), desc_wing.nb(), 0, 0);
     const int n_omegas = this->omega.size();
+    this->wing.clear();
+    this->wing.resize(n_omegas);
 
     for (int iomega = 0; iomega != n_omegas; iomega++)
     {

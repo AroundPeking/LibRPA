@@ -13,10 +13,17 @@
 #include "../utils/constants.h"
 
 using librpa_int::ArrayDesc;
+using librpa_int::AtomicBasis;
 using librpa_int::BlacsCtxtHandler;
 using librpa_int::C_ONE;
 using librpa_int::MAJOR;
+using librpa_int::MeanField;
 using librpa_int::Params;
+using librpa_int::PeriodicBoundaryData;
+using librpa_int::Vector3_Order;
+using librpa_int::atpair_k_cplx_mat_t;
+using librpa_int::diele_func;
+using librpa_int::headwing_velocity_t;
 using librpa_int::init_local_mat;
 using librpa_int::matrix_m;
 
@@ -360,6 +367,38 @@ void test_accumulate_wing_mu_for_pair_matches_original_formula()
     }
 }
 
+void test_head_initialization_does_not_require_coulomb_diagonalization(
+    const BlacsCtxtHandler &blacs_h)
+{
+    MeanField mf(1, 1, 2, 1);
+    mf.get_eigenvals()[0](0, 0) = -0.5;
+    mf.get_eigenvals()[0](0, 1) = 0.5;
+    mf.get_weight()[0](0, 0) = 2.0;
+    mf.get_weight()[0](0, 1) = 0.0;
+
+    headwing_velocity_t velocity;
+    librpa_int::initialize_headwing_velocity(velocity, 1, 1, 2);
+    for (int alpha = 0; alpha != 3; ++alpha)
+    {
+        velocity[0][0][alpha](1, 0) = std::complex<double>{0.1 * (alpha + 1), 0.0};
+        velocity[0][0][alpha](0, 1) = std::complex<double>{0.1 * (alpha + 1), 0.0};
+    }
+
+    AtomicBasis basis_wfc({1});
+    AtomicBasis basis_abf({1});
+    PeriodicBoundaryData pbc;
+    const std::vector<Vector3_Order<double>> kfrac{{0.0, 0.0, 0.0}};
+    const std::vector<double> omega{0.5};
+    const atpair_k_cplx_mat_t empty_vq;
+
+    diele_func df(mf, velocity, kfrac, basis_wfc, basis_abf, omega, 1, 2, 1, 1, pbc,
+                  librpa_int::global::mpi_comm_global_h, blacs_h);
+
+    df.init(0.0, empty_vq);
+    df.cal_head();
+    assert(df.get_head_vec().size() == 1);
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -383,6 +422,7 @@ int main(int argc, char *argv[])
         test_headwing_spin_weights();
         test_headwing_velocity_initialization();
         test_accumulate_wing_mu_for_pair_matches_original_formula();
+        test_head_initialization_does_not_require_coulomb_diagonalization(blacs_h);
     }
 
     librpa_int::global::finalize_global_io();

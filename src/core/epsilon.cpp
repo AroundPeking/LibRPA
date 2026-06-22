@@ -1156,9 +1156,10 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 coul_block, desc_nabf_nabf, coul_eigen_block, desc_nabf_nabf,
                 n_singular, coul_eigenvalues.c, 0.5,
                 headwing_settings.sqrt_coulomb_threshold);
-            if (headwing_settings.rpa_headwing_mode == "qavg")
-                df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf);
             n_nonsingular_headwing = n_abf - as_int(n_singular);
+            if (headwing_settings.rpa_headwing_mode == "qavg")
+                df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf,
+                                               n_nonsingular_headwing);
             desc_headwing_response.init_square_blk(n_nonsingular_headwing, n_nonsingular_headwing, 0, 0);
             headwing_response_block =
                 init_local_mat<std::complex<double>>(desc_headwing_response, MAJOR::COL);
@@ -2890,7 +2891,8 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             {
                 if (df_headwing == nullptr)
                     throw LIBRPA_RUNTIME_ERROR("Head/wing dielectric function is not initialized");
-                df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf_opt);
+                df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf_opt,
+                                               n_abf - n_singular);
             }
         }
         else
