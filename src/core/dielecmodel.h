@@ -1,4 +1,6 @@
 #pragma once
+#include <array>
+#include <complex>
 #include <functional>
 #include <string>
 #include <vector>
@@ -46,6 +48,11 @@ void initialize_headwing_velocity(headwing_velocity_t &velocity, int n_spins, in
 double headwing_transition_weight(double occupied_weight, double unoccupied_weight, int n_spin,
                                   bool spin_orbit_coupled);
 double headwing_spin_prefactor(int n_spin, bool spin_orbit_coupled);
+void accumulate_wing_mu_for_pair(const std::vector<double> &omega,
+                                 const std::array<std::complex<double>, 3> &velocity_unocc_occ,
+                                 const std::complex<double> &c_mn, double egap,
+                                 double factor1, double factor2,
+                                 std::complex<double> *wing_mu_for_mu);
 
 // All calculation in unit: Bohr and Ha.
 class diele_func

@@ -331,6 +331,35 @@ void test_headwing_velocity_initialization()
     }
 }
 
+void test_accumulate_wing_mu_for_pair_matches_original_formula()
+{
+    const std::vector<double> omega{0.5, 1.25};
+    const std::array<std::complex<double>, 3> velocity{
+        std::complex<double>{0.2, -0.1},
+        std::complex<double>{-0.3, 0.4},
+        std::complex<double>{0.15, 0.05}};
+    const std::complex<double> c_mn{0.7, -0.2};
+    const double egap = 1.8;
+    const double factor1 = 0.6;
+    const double factor2 = 0.125;
+
+    std::array<std::complex<double>, 6> accumulated{};
+    librpa_int::accumulate_wing_mu_for_pair(
+        omega, velocity, c_mn, egap, factor1, factor2, accumulated.data());
+
+    for (std::size_t iomega = 0; iomega != omega.size(); ++iomega)
+    {
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            const auto denom = omega[iomega] * omega[iomega] + egap * egap;
+            const auto expected =
+                factor1 * std::conj(c_mn * velocity[alpha]) / denom
+                + factor2 * c_mn * velocity[alpha] / denom;
+            assert_complex_close(accumulated[iomega * 3 + alpha], expected, 1e-12);
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -353,6 +382,7 @@ int main(int argc, char *argv[])
         test_rpa_chi0v_wing_desc_uses_global_rows(blacs_h);
         test_headwing_spin_weights();
         test_headwing_velocity_initialization();
+        test_accumulate_wing_mu_for_pair_matches_original_formula();
     }
 
     librpa_int::global::finalize_global_io();

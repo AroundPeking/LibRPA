@@ -81,6 +81,36 @@ double headwing_spin_prefactor(const int n_spin, const bool spin_orbit_coupled)
     return 2.0 / static_cast<double>(n_spin);
 }
 
+void accumulate_wing_mu_for_pair(
+    const std::vector<double> &omega,
+    const std::array<std::complex<double>, 3> &velocity_unocc_occ,
+    const std::complex<double> &c_mn, const double egap, const double factor1,
+    const double factor2, std::complex<double> *wing_mu_for_mu)
+{
+    if (factor1 <= 1.e-8 && factor2 <= 1.e-8)
+    {
+        return;
+    }
+
+    for (std::size_t iomega = 0; iomega != omega.size(); ++iomega)
+    {
+        const double omega_ev = omega[iomega];
+        const double denom = omega_ev * omega_ev + egap * egap;
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            auto &wing = wing_mu_for_mu[iomega * 3 + as_size(alpha)];
+            if (factor1 > 1.e-8)
+            {
+                wing += factor1 * std::conj(c_mn * velocity_unocc_occ[alpha]) / denom;
+            }
+            if (factor2 > 1.e-8)
+            {
+                wing += factor2 * c_mn * velocity_unocc_occ[alpha] / denom;
+            }
+        }
+    }
+}
+
 void initialize_headwing_velocity(headwing_velocity_t &velocity, const int n_spins,
                                   const int n_kpoints, const int n_states)
 {
@@ -592,16 +622,52 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
             auto &desc_nband_nband = desc_C_mnk.first;
             auto &C_mnk = desc_C_mnk.second;
             // profiler.start("compute_wing");
-            for (std::size_t iomega = 0; iomega != this->omega.size(); iomega++)
+            for (int isp = 0; isp != n_spin; isp++)
             {
-                for (int alpha = 0; alpha != 3; alpha++)
+                const bool use_soc_wing = meanfield_df.get_n_spinor() > 1;
+                const auto &eigenvalues = this->meanfield_df.get_eigenvals();
+                const auto &wg = this->meanfield_df.get_weight()[isp];
+                const auto &velocity = this->velocity_[isp][ik];
+                auto *wing_mu_for_mu =
+                    local_wing_mu.data() + as_size(mu) * this->omega.size() * 3;
+
+                for (int iocc = 0; iocc != n_states; iocc++)
                 {
-                    for (int isp = 0; isp != n_spin; isp++)
+                    const int loc_m = desc_nband_nband.indx_g2l_r(iocc);
+                    if (loc_m < 0) continue;
+
+                    for (int iunocc = iocc + 1; iunocc != n_states; iunocc++)
                     {
-                        std::complex<double> tmp =
-                            compute_wing(alpha, iomega, mu, ik, isp, desc_nband_nband, C_mnk);
-                        const std::size_t index = as_size(mu) * this->omega.size() * 3 + iomega * 3 + as_size(alpha);
-                        local_wing_mu[index] += tmp;
+                        const int loc_n = desc_nband_nband.indx_g2l_c(iunocc);
+                        if (loc_n < 0) continue;
+
+                        const double egap =
+                            eigenvalues[isp](ik, iunocc) - eigenvalues[isp](ik, iocc);
+                        double factor1 = 0.0;
+                        double factor2 = 0.0;
+                        if (use_soc_wing)
+                        {
+                            factor1 = wg(ik, iocc) * (1.0 - wg(ik, iunocc) * nk);
+                            factor2 = wg(ik, iunocc) * (1.0 - wg(ik, iocc) * nk);
+                        }
+                        else
+                        {
+                            factor1 =
+                                wg(ik, iocc) / 2 * n_spin
+                                * (1.0 - wg(ik, iunocc) / 2 * n_spin * nk);
+                            factor2 =
+                                wg(ik, iunocc) / 2 * n_spin
+                                * (1.0 - wg(ik, iocc) / 2 * n_spin * nk);
+                        }
+                        if (factor1 <= 1.e-8 && factor2 <= 1.e-8) continue;
+
+                        const auto c_mn = C_mnk(loc_m, loc_n);
+                        const std::array<std::complex<double>, 3> velocity_unocc_occ{
+                            velocity[0](iunocc, iocc),
+                            velocity[1](iunocc, iocc),
+                            velocity[2](iunocc, iocc)};
+                        accumulate_wing_mu_for_pair(this->omega, velocity_unocc_occ, c_mn, egap,
+                                                    factor1, factor2, wing_mu_for_mu);
                     }
                 }
             }
