@@ -1256,8 +1256,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                     coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc);
                 ScalapackConnector::pgemm_f(
                     'C', 'N', n_nonsingular_headwing, n_nonsingular_headwing, n_abf,
-                    average_gamma_headwing ? -C_ONE : C_ONE,
-                    sqrtveig_blacs.ptr(), 1, 1,
+                    C_ONE, sqrtveig_blacs.ptr(), 1, 1,
                     desc_nabf_nabf.desc, coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc,
                     C_ZERO, headwing_response_block.ptr(), 1, 1, desc_headwing_response.desc);
                 if (head_only_gamma)
@@ -1297,14 +1296,6 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
             complex<double> rpa_for_omega_q = 0.0;
             if (average_gamma_headwing)
             {
-                for (int i = 0; i != n_nonsingular_headwing; i++)
-                {
-                    const int ilo = desc_headwing_response.indx_g2l_r(i);
-                    if (ilo < 0) continue;
-                    const int jlo = desc_headwing_response.indx_g2l_c(i);
-                    if (jlo < 0) continue;
-                    headwing_response_block(ilo, jlo) += C_ONE;
-                }
                 rpa_for_omega_q = df_headwing->compute_rpa_trace_log_average(
                     headwing_response_block, ifreq, desc_headwing_response, headwing_settings);
             }
