@@ -1249,25 +1249,35 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 replace_gamma_headwing && headwing_settings.rpa_headwing_mode == "head_only";
             complex<double> rpa_for_omega_q = 0.0;
             bool rpa_for_omega_q_done = false;
+            double headwing_proj_left_time = 0.0;
+            double headwing_proj_right_time = 0.0;
+            double headwing_trace_log_time = 0.0;
             if (replace_gamma_headwing)
             {
                 headwing_response_block.zero_out();
+                const double proj_left_begin = omp_get_wtime();
                 ScalapackConnector::pgemm_f(
                     'N', 'N', n_abf, n_nonsingular_headwing, n_abf, C_ONE, chi0_block.ptr(), 1, 1,
                     desc_nabf_nabf.desc, sqrtveig_blacs.ptr(), 1, 1, desc_nabf_nabf.desc, C_ZERO,
                     coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc);
+                const double proj_left_end = omp_get_wtime();
                 ScalapackConnector::pgemm_f(
                     'C', 'N', n_nonsingular_headwing, n_nonsingular_headwing, n_abf,
                     C_ONE, sqrtveig_blacs.ptr(), 1, 1,
                     desc_nabf_nabf.desc, coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc,
                     C_ZERO, headwing_response_block.ptr(), 1, 1, desc_headwing_response.desc);
+                const double proj_right_end = omp_get_wtime();
+                headwing_proj_left_time = proj_left_end - proj_left_begin;
+                headwing_proj_right_time = proj_right_end - proj_left_end;
                 if (head_only_gamma)
                 {
                     replace_rpa_response_head_only(headwing_response_block,
                                                    df_headwing->get_rpa_chi0v_head(ifreq),
                                                    desc_headwing_response);
+                    const double trace_log_begin = omp_get_wtime();
                     rpa_for_omega_q = compute_rpa_response_trace_logdet_blacs_2d(
                         headwing_response_block, desc_headwing_response);
+                    headwing_trace_log_time = omp_get_wtime() - trace_log_begin;
                     rpa_for_omega_q_done = true;
                 }
                 else if (!average_gamma_headwing)
@@ -1293,8 +1303,10 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
             }
             else if (average_gamma_headwing)
             {
+                const double trace_log_begin = omp_get_wtime();
                 rpa_for_omega_q = df_headwing->compute_rpa_trace_log_average(
                     headwing_response_block, ifreq, desc_headwing_response, headwing_settings);
+                headwing_trace_log_time = omp_get_wtime() - trace_log_begin;
             }
             else
             {
@@ -1336,6 +1348,12 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
             if(comm_h.myid==0)
             {
                 lib_printf("| TIME of DET-freq-q:  %f,  q: ( %f, %f, %f)  TOT: %f  CHI_arr: %f  CHI_comm: %f, CHI_2d: %f, Pi: %f, Det: %f\n",freq, q.x,q.y,q.z,pi_freq_end-pi_freq_begin, chi_arr_time,chi_comm_time,chi_2d_time,pi_end-pi_begin,det_end-pi_end);
+                if (replace_gamma_headwing)
+                {
+                    lib_printf("| TIME of HW-proj-freq-q: %f, q: ( %f, %f, %f)  left_chi0U: %f  right_Uchi0U: %f  trace_log_or_avg: %f\n",
+                               freq, q.x, q.y, q.z, headwing_proj_left_time,
+                               headwing_proj_right_time, headwing_trace_log_time);
+                }
                 //cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "      lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
                 cRPA_q[q] += rpa_for_omega_q * freq_weight * map_ibzk_weight.at(q) / TWO_PI;//!check
                 tot_RPA_energy += rpa_for_omega_q * freq_weight * map_ibzk_weight.at(q) / TWO_PI;
