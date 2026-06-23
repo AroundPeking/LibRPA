@@ -1,5 +1,4 @@
 #include "epsilon.h"
-#define OPEN_TEST_FOR_LU_DECOMPOSITION
 #include <math.h>
 #include <omp.h>
 
@@ -1248,6 +1247,8 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 headwing_settings.rpa_headwing_mode == "qavg";
             const bool head_only_gamma =
                 replace_gamma_headwing && headwing_settings.rpa_headwing_mode == "head_only";
+            complex<double> rpa_for_omega_q = 0.0;
+            bool rpa_for_omega_q_done = false;
             if (replace_gamma_headwing)
             {
                 headwing_response_block.zero_out();
@@ -1265,17 +1266,9 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                     replace_rpa_response_head_only(headwing_response_block,
                                                    df_headwing->get_rpa_chi0v_head(ifreq),
                                                    desc_headwing_response);
-                    ScalapackConnector::pgemm_f(
-                        'N', 'N', n_abf, n_nonsingular_headwing, n_nonsingular_headwing, C_ONE,
-                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf.desc,
-                        headwing_response_block.ptr(), 1, 1, desc_headwing_response.desc,
-                        C_ZERO, coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc);
-                    ScalapackConnector::pgemm_f(
-                        'N', 'C', n_abf, n_abf, n_nonsingular_headwing, C_ONE,
-                        coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc,
-                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf.desc, C_ZERO,
-                        chi0_block.ptr(), 1, 1, desc_nabf_nabf.desc);
-                    copy(chi0_block, coul_chi0_block);
+                    rpa_for_omega_q = compute_rpa_response_trace_logdet_blacs_2d(
+                        headwing_response_block, desc_headwing_response);
+                    rpa_for_omega_q_done = true;
                 }
                 else if (!average_gamma_headwing)
                 {
@@ -1294,8 +1287,11 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
             // sprintf(fnp, "pi_ifreq_%d_iq_%d.mtx", ifreq, iq);
             double pi_end = omp_get_wtime();
 
-            complex<double> rpa_for_omega_q = 0.0;
-            if (average_gamma_headwing)
+            if (rpa_for_omega_q_done)
+            {
+                // Already evaluated in the reduced Coulomb-eigenvector subspace.
+            }
+            else if (average_gamma_headwing)
             {
                 rpa_for_omega_q = df_headwing->compute_rpa_trace_log_average(
                     headwing_response_block, ifreq, desc_headwing_response, headwing_settings);
@@ -1500,6 +1496,36 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
     //MPI_Allreduce(&det_loc,&det_glo,1,MPI_DOUBLE_COMPLEX,MPI_PROD,comm_h.comm);
     //ln_det_all=std::log(det_glo);
     return ln_det_all;
+}
+
+cplxdb compute_rpa_response_trace_logdet_blacs_2d(
+    const Matz &response, const ArrayDesc &response_desc)
+{
+    cplxdb trace_loc(0.0, 0.0);
+    cplxdb trace(0.0, 0.0);
+    for (int i = 0; i != response_desc.m(); ++i)
+    {
+        const int ilo = response_desc.indx_g2l_r(i);
+        const int jlo = response_desc.indx_g2l_c(i);
+        if (ilo >= 0 && jlo >= 0) trace_loc += response(ilo, jlo);
+    }
+    MPI_Allreduce(&trace_loc, &trace, 1, MPI_DOUBLE_COMPLEX, MPI_SUM,
+                  response_desc.comm());
+
+    auto identity_minus_response = response.copy();
+    identity_minus_response *= -1.0;
+    for (int i = 0; i != response_desc.m(); ++i)
+    {
+        const int ilo = response_desc.indx_g2l_r(i);
+        const int jlo = response_desc.indx_g2l_c(i);
+        if (ilo >= 0 && jlo >= 0) identity_minus_response(ilo, jlo) += C_ONE;
+    }
+
+    int info = 0;
+    std::vector<int> ipiv(std::max(1, response_desc.m_loc() * 10));
+    const cplxdb ln_det = compute_pi_det_blacs_2d(
+        identity_minus_response, response_desc, ipiv.data(), info);
+    return trace + ln_det;
 }
 
 complex<double> compute_pi_det_blacs(ComplexMatrix &loc_piT, const ArrayDesc &arrdesc_pi, int *ipiv, int &info)

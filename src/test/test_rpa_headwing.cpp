@@ -5,6 +5,7 @@
 #include <iostream>
 
 #include "../core/dielecmodel.h"
+#include "../core/epsilon.h"
 #include "../core/params.h"
 #include "../math/utils_matrix_m_mpi.h"
 #include "../mpi/base_blacs.h"
@@ -182,6 +183,75 @@ void test_replace_rpa_response_head_only_keeps_numeric_wings(
             assert_complex_close(response(ilo, jlo), expected, 1e-12);
         }
     }
+}
+
+void test_head_only_trace_logdet_can_use_reduced_response(
+    const BlacsCtxtHandler &blacs_h)
+{
+    ArrayDesc desc(blacs_h);
+    desc.init_square_blk(3, 3, 0, 0);
+
+    auto response = init_local_mat<std::complex<double>>(desc, MAJOR::COL);
+    for (int i = 0; i != 3; ++i)
+    {
+        const int ilo = desc.indx_g2l_r(i);
+        if (ilo < 0) continue;
+        for (int j = 0; j != 3; ++j)
+        {
+            const int jlo = desc.indx_g2l_c(j);
+            if (jlo < 0) continue;
+            response(ilo, jlo) = std::complex<double>{
+                0.02 * (i + 1) + 0.01 * (j + 1), 0.002 * (i - j)};
+        }
+    }
+
+    const auto actual = librpa_int::compute_rpa_response_trace_logdet_blacs_2d(
+        response, desc);
+
+    const matrix_m<std::complex<double>> dense_response(
+        std::vector<std::vector<std::complex<double>>>{
+            {{0.03, 0.0}, {0.04, -0.002}, {0.05, -0.004}},
+            {{0.05, 0.002}, {0.06, 0.0}, {0.07, -0.002}},
+            {{0.07, 0.004}, {0.08, 0.002}, {0.09, 0.0}}},
+        MAJOR::COL);
+    std::complex<double> trace = 0.0;
+    for (int i = 0; i != 3; ++i)
+    {
+        trace += dense_response(i, i);
+    }
+    const auto a = 1.0 - dense_response(0, 0);
+    const auto b = -dense_response(0, 1);
+    const auto c = -dense_response(0, 2);
+    const auto d = -dense_response(1, 0);
+    const auto e = 1.0 - dense_response(1, 1);
+    const auto f = -dense_response(1, 2);
+    const auto g = -dense_response(2, 0);
+    const auto h = -dense_response(2, 1);
+    const auto i = 1.0 - dense_response(2, 2);
+    const auto det = a * (e * i - f * h) - b * (d * i - f * g)
+                     + c * (d * h - e * g);
+    const auto expected = trace + std::log(det);
+
+    assert_complex_close(actual, expected, 1e-12);
+
+    ArrayDesc desc_full(blacs_h);
+    desc_full.init_square_blk(5, 5, 0, 0);
+    auto full_response = init_local_mat<std::complex<double>>(desc_full, MAJOR::COL);
+    for (int i = 0; i != 3; ++i)
+    {
+        const int ilo = desc_full.indx_g2l_r(i);
+        if (ilo < 0) continue;
+        for (int j = 0; j != 3; ++j)
+        {
+            const int jlo = desc_full.indx_g2l_c(j);
+            if (jlo < 0) continue;
+            full_response(ilo, jlo) = dense_response(i, j);
+        }
+    }
+    const auto full_actual = librpa_int::compute_rpa_response_trace_logdet_blacs_2d(
+        full_response, desc_full);
+
+    assert_complex_close(full_actual, actual, 1e-12);
 }
 
 void test_rpa_trace_log_average_uses_directional_head_and_wing()
@@ -415,6 +485,7 @@ int main(int argc, char *argv[])
 
         test_replace_rpa_response_headwing_replaces_only_singular_channels(blacs_h);
         test_replace_rpa_response_head_only_keeps_numeric_wings(blacs_h);
+        test_head_only_trace_logdet_can_use_reduced_response(blacs_h);
         test_rpa_trace_log_average_uses_directional_head_and_wing();
         test_rpa_headwing_regular_body_start_channel();
         test_rpa_headwing_gamma_cell_volume_uses_reciprocal_lattice();
