@@ -78,21 +78,24 @@ void initialize_ds_atpairs_local(Dataset &ds, LibrpaParallelRouting routing)
     const int n_atoms_basis_wfc = ds.basis_wfc.n_atoms;
     const int n_atoms_basis_aux = ds.basis_aux.n_atoms;
     const int n_atoms_struc = ds.atoms.size();
-    const int n_atoms = n_atoms_struc > 0? n_atoms_struc : std::max(n_atoms_basis_aux, n_atoms_basis_wfc);
+    const int n_atoms =
+        n_atoms_struc > 0 ? n_atoms_struc : std::max(n_atoms_basis_aux, n_atoms_basis_wfc);
     if (n_atoms == 0)
-        throw LIBRPA_RUNTIME_ERROR("Number of atoms can not be extracted, please set structure or basis first");
+        throw LIBRPA_RUNTIME_ERROR(
+            "Number of atoms can not be extracted, please set structure or basis first");
 
     if (routing == LIBRPA_ROUTING_AUTO)
     {
-        throw LIBRPA_RUNTIME_ERROR("internal error: routing should be decided before initialize_ds_atpairs_local, not AUTO");
+        throw LIBRPA_RUNTIME_ERROR(
+            "internal error: routing should be decided before initialize_ds_atpairs_local, not "
+            "AUTO");
     }
-    else if(routing == LIBRPA_ROUTING_ATOMPAIR || routing == LIBRPA_ROUTING_LIBRI)
+    else if (routing == LIBRPA_ROUTING_ATOMPAIR || routing == LIBRPA_ROUTING_LIBRI)
     {
         auto tri_local_atpair = librpa_int::dispatch_upper_triangular_tasks(
-            n_atoms, ds.blacs_h.myid, ds.blacs_h.nprows, ds.blacs_h.npcols,
-            ds.blacs_h.myprow, ds.blacs_h.mypcol);
-        for (const auto &p: tri_local_atpair)
-            ds.atpairs_local.emplace_back(p);
+            n_atoms, ds.blacs_h.myid, ds.blacs_h.nprows, ds.blacs_h.npcols, ds.blacs_h.myprow,
+            ds.blacs_h.mypcol);
+        for (const auto &p : tri_local_atpair) ds.atpairs_local.emplace_back(p);
     }
     else
     {
@@ -106,8 +109,8 @@ void initialize_ds_exx(Dataset &ds, const LibrpaOptions &opts) noexcept
 {
     global::profiler.start("initialize_ds_exx");
     const bool is_eigvec_k_distributed = opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON;
-    ds.p_exx = std::make_unique<librpa_int::Exx>(ds.mf, ds.basis_wfc, ds.pbc, ds.scfk_blacs_ctxt, ds.desc_wfc_kb_full,
-                                                 is_eigvec_k_distributed);
+    ds.p_exx = std::make_unique<librpa_int::Exx>(ds.mf, ds.basis_wfc, ds.pbc, ds.scfk_blacs_ctxt,
+                                                 ds.desc_wfc_kb_full, is_eigvec_k_distributed);
     ds.p_exx->libri_threshold_C = opts.libri_exx_threshold_C;
     ds.p_exx->libri_threshold_D = opts.libri_exx_threshold_D;
     ds.p_exx->libri_threshold_V = opts.libri_exx_threshold_V;
@@ -119,13 +122,13 @@ void initialize_ds_chi0(Dataset &ds, const LibrpaOptions &opts) noexcept
     global::profiler.start("initialize_ds_chi0");
     const bool is_eigvec_k_distributed = opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON;
     if (opts.use_shrink_abfs == LIBRPA_SWITCH_ON && opts.use_shrink_chi == LIBRPA_SWITCH_ON)
-        ds.p_chi0 = std::make_unique<librpa_int::Chi0>(ds.mf, ds.basis_wfc, ds.basis_aux_shrink, ds.pbc,
-                                                       ds.tfg, ds.scfk_blacs_ctxt, ds.desc_wfc_kb_full,
-                                                       is_eigvec_k_distributed);
+        ds.p_chi0 = std::make_unique<librpa_int::Chi0>(
+            ds.mf, ds.basis_wfc, ds.basis_aux_shrink, ds.pbc, ds.tfg, ds.scfk_blacs_ctxt,
+            ds.desc_wfc_kb_full, is_eigvec_k_distributed);
     else
-        ds.p_chi0 = std::make_unique<librpa_int::Chi0>(ds.mf, ds.basis_wfc, ds.basis_aux, ds.pbc,
-                                                       ds.tfg, ds.scfk_blacs_ctxt, ds.desc_wfc_kb_full,
-                                                       is_eigvec_k_distributed);
+        ds.p_chi0 = std::make_unique<librpa_int::Chi0>(
+            ds.mf, ds.basis_wfc, ds.basis_aux, ds.pbc, ds.tfg, ds.scfk_blacs_ctxt,
+            ds.desc_wfc_kb_full, is_eigvec_k_distributed);
     ds.p_chi0->gf_threshold = opts.gf_threshold;
     ds.p_chi0->libri_collect_s0_chunk = opts.libri_chi0_collect_s0_chunk;
     ds.p_chi0->libri_collect_max_bytes = opts.libri_chi0_collect_max_bytes;
@@ -140,9 +143,9 @@ void initialize_ds_g0w0(Dataset &ds, const LibrpaOptions &opts) noexcept
     global::profiler.start("initialize_ds_g0w0");
     const bool is_eigvec_k_distributed = opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON;
     // global::ofs_myid << "is_eigvec_k_distributed " << is_eigvec_k_distributed << std::endl;
-    ds.p_g0w0 = std::make_unique<librpa_int::G0W0>(ds.mf, ds.basis_wfc, ds.pbc, ds.tfg,
-                                                   ds.scfk_blacs_ctxt, ds.desc_wfc_kb_full,
-                                                   is_eigvec_k_distributed);
+    ds.p_g0w0 =
+        std::make_unique<librpa_int::G0W0>(ds.mf, ds.basis_wfc, ds.pbc, ds.tfg, ds.scfk_blacs_ctxt,
+                                           ds.desc_wfc_kb_full, is_eigvec_k_distributed);
     ds.p_g0w0->libri_threshold_C = opts.libri_g0w0_threshold_C;
     ds.p_g0w0->libri_threshold_G = opts.libri_g0w0_threshold_G;
     ds.p_g0w0->libri_threshold_Wc = opts.libri_g0w0_threshold_Wc;
@@ -174,8 +177,7 @@ void initialize_ds_headwing(Dataset &ds, const LibrpaOptions &opts, const bool n
         const auto &headwing_cs =
             opts.use_shrink_abfs == LIBRPA_SWITCH_ON ? ds.cs_data_shrink : ds.cs_data;
         ds.p_headwing->cal_wing(headwing_cs, opts.sqrt_coulomb_threshold, ds.vq);
-        if (opts.output_level >= LIBRPA_VERBOSE_DEBUG)
-            ds.p_headwing->test_wing();
+        if (opts.output_level >= LIBRPA_VERBOSE_DEBUG) ds.p_headwing->test_wing();
         global::profiler.stop("initialize_ds_headwing");
         return;
     }
@@ -191,7 +193,8 @@ void initialize_ds_headwing(Dataset &ds, const LibrpaOptions &opts, const bool n
         throw LIBRPA_RUNTIME_ERROR("analytic head/wing meanfield is not initialized");
 
     if (static_cast<int>(ds.pbc.kfrac_list.size()) != mf.get_n_kpoints())
-        throw LIBRPA_RUNTIME_ERROR("analytic head/wing k-point list is inconsistent with meanfield");
+        throw LIBRPA_RUNTIME_ERROR(
+            "analytic head/wing k-point list is inconsistent with meanfield");
 
     const auto &headwing_basis_aux =
         opts.use_shrink_abfs == LIBRPA_SWITCH_ON ? ds.basis_aux_shrink : ds.basis_aux;
@@ -200,9 +203,9 @@ void initialize_ds_headwing(Dataset &ds, const LibrpaOptions &opts, const bool n
 
     const auto &freqs = ds.tfg.get_freq_nodes();
     ds.p_headwing = std::make_unique<diele_func>(
-        mf, ds.headwing_velocity, ds.pbc.kfrac_list, ds.basis_wfc,
-        headwing_basis_aux, freqs, mf.get_n_aos(), mf.get_n_states(),
-        mf.get_n_spins(), headwing_basis_aux.nb_total, ds.pbc, ds.comm_h, ds.blacs_h);
+        mf, ds.headwing_velocity, ds.pbc.kfrac_list, ds.basis_wfc, headwing_basis_aux, freqs,
+        mf.get_n_aos(), mf.get_n_states(), mf.get_n_spins(), headwing_basis_aux.nb_total, ds.pbc,
+        ds.comm_h, ds.blacs_h, &ds.scfk_blacs_ctxt);
     ds.p_headwing->use_2d_dielectric = opts.use_2d_dielectric == LIBRPA_SWITCH_ON;
     ds.p_headwing->use_soc = mf.get_n_spinor() > 1;
     ds.p_headwing->debug = opts.output_level >= LIBRPA_VERBOSE_DEBUG;
@@ -217,11 +220,10 @@ void initialize_ds_headwing(Dataset &ds, const LibrpaOptions &opts, const bool n
         const auto &headwing_cs =
             opts.use_shrink_abfs == LIBRPA_SWITCH_ON ? ds.cs_data_shrink : ds.cs_data;
         ds.p_headwing->cal_wing(headwing_cs, opts.sqrt_coulomb_threshold, ds.vq);
-        if (opts.output_level >= LIBRPA_VERBOSE_DEBUG)
-            ds.p_headwing->test_wing();
+        if (opts.output_level >= LIBRPA_VERBOSE_DEBUG) ds.p_headwing->test_wing();
     }
 
     global::profiler.stop("initialize_ds_headwing");
 }
 
-}
+}  // namespace librpa_int
