@@ -65,7 +65,7 @@ void validate_input_symmetry_kstar_meanfield_restore(
     {
         if (atom_nw.count(type_entry.first) == 0)
         {
-            throw std::runtime_error("ABACUS k-star restore atom_nw does not cover every sidecar atom");
+            throw std::runtime_error("ABACUS k-star restore atom_nw does not cover every atom");
         }
     }
     for (const auto& kfrac : kfrac_list)

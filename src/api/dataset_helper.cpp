@@ -455,13 +455,16 @@ void initialize_input_symmetry_context(Dataset &ds, const bool build_shell_rotat
             fractional_rotation_to_cartesian(op, ctx.lattice_vectors).Inverse();
         for (int l = 0; l <= lmax; ++l)
         {
-            op.shell_rotations[l] =
-                real_spherical_harmonic_rotation_matrix(
-                    cartesian_rotation,
-                    l,
-                    basis_convention.order,
-                    basis_convention.coeff_m_negative,
-                    basis_convention.coeff_m_positive);
+            if (op.shell_rotations.find(l) == op.shell_rotations.end())
+            {
+                op.shell_rotations[l] =
+                    real_spherical_harmonic_rotation_matrix(
+                        cartesian_rotation,
+                        l,
+                        basis_convention.order,
+                        basis_convention.coeff_m_negative,
+                        basis_convention.coeff_m_positive);
+            }
         }
     }
 
