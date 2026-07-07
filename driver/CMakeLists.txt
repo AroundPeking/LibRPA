@@ -12,6 +12,7 @@ list(APPEND exe_sources
   inputfile.cpp
   main.cpp
   reader_2d_coulomb_head.cpp
+  reader_sternheimer.cpp
   task.cpp
   # Specific task implementations
   tasks/task_helper.cpp
@@ -20,6 +21,7 @@ list(APPEND exe_sources
   tasks/g0w0.cpp
   tasks/g0w0_band.cpp
   tasks/rpa.cpp
+  tasks/sternheimer_rpa.cpp
   tasks/print_minimax.cpp
   tasks/qsgw.cpp
   qsgw/vxc_io.cpp
