@@ -193,7 +193,11 @@ set(_librpa_filesystem_check_source [=[
 
 int main()
 {
-  return std::filesystem::exists(std::filesystem::path(".")) ? 0 : 1;
+  std::filesystem::path path(".");
+  std::filesystem::directory_iterator iter(path);
+  std::filesystem::create_directories(path / "librpa_filesystem_probe_dir");
+  std::filesystem::remove(path / "librpa_filesystem_probe_dir");
+  return std::filesystem::exists(path) && iter != std::filesystem::directory_iterator{} ? 0 : 1;
 }
 ]=])
 check_cxx_source_compiles(

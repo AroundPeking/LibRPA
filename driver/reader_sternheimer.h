@@ -1,0 +1,30 @@
+#pragma once
+
+#include <complex>
+#include <string>
+#include <vector>
+
+#include "../src/math/complexmatrix.h"
+
+namespace driver
+{
+
+struct SternheimerChi0V1Matrix
+{
+    std::string path;
+    int iq = 0;
+    int ifreq = 0;
+    double omega = 0.0;
+    double weight = 0.0;
+    std::vector<int> atom_naux;
+    librpa_int::ComplexMatrix matrix;
+};
+
+librpa_int::ComplexMatrix read_coulomb_v1_full_matrix(const std::string &dir_path,
+                                                      const std::string &prefix, int iq);
+
+std::vector<SternheimerChi0V1Matrix> read_sternheimer_chi0_v1_matrices(const std::string &dir_path,
+                                                                       const std::string &prefix,
+                                                                       int iq);
+
+}  // namespace driver

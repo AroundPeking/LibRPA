@@ -20,6 +20,9 @@ DriverParams::DriverParams():
     prefix_lri_coeff_shrink("Cs_shrinked_data"),
     prefix_shrink_sinvS("shrink_sinvS_"),
     prefix_coul_full("coulomb_mat"),
+    prefix_sternheimer_chi0("v1_sternheimer_chi0_iq_"),
+    sternheimer_iq(1),
+    sternheimer_qweight(1.0),
     prefix_coul_cut("coulomb_cut"),
     prefix_eigvecs_scf("KS_eigenvector"),
     fn_stru("stru_out"),
@@ -63,6 +66,7 @@ std::string DriverParams::format()
             normal_pair(prefix_lri_coeff_shrink),
             normal_pair(prefix_shrink_sinvS),
             normal_pair(prefix_coul_full),
+            normal_pair(prefix_sternheimer_chi0),
             normal_pair(prefix_coul_cut),
             normal_pair(prefix_eigvecs_scf),
             normal_pair(fn_stru),
@@ -94,6 +98,8 @@ std::string DriverParams::format()
 
     ss << "version_coul_reader = " << version_coul_reader << std::endl;
     ss << "version_lri_reader = " << version_lri_reader << std::endl;
+    ss << "sternheimer_iq = " << sternheimer_iq << std::endl;
+    ss << "sternheimer_qweight = " << sternheimer_qweight << std::endl;
     ss << "cs_R_threshold = " << cs_threshold << std::endl;
     ss << "i_state_low = " << i_state_low << std::endl;
     ss << "i_state_high = " << i_state_high << std::endl;
