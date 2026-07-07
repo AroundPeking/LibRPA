@@ -68,6 +68,27 @@ struct DriverParams
     //! `coulomb_mat`
     std::string prefix_coul_full;
 
+    //! Prefix of Sternheimer chi0 v1 response files.
+    //! @par Default
+    //! `v1_sternheimer_chi0_iq_`
+    //! @par Status
+    //! Experimental
+    std::string prefix_sternheimer_chi0;
+
+    //! One-based q index for Sternheimer-RPA postprocessing.
+    //! @par Default
+    //! 1
+    //! @par Status
+    //! Experimental
+    int sternheimer_iq;
+
+    //! q-point weight for Sternheimer-RPA postprocessing.
+    //! @par Default
+    //! 1.0
+    //! @par Status
+    //! Experimental
+    double sternheimer_qweight;
+
     //! Prefix of truncated Coulomb matrix files.
     //! @par Default
     //! `coulomb_cut`
