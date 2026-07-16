@@ -59,6 +59,7 @@ foreach(target
     test_rsh
     test_rpa_headwing
     test_sternheimer_rpa
+    test_sternheimer_qsum
     test_symmetry
     test_timefreq
     test_vector3

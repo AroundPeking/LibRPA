@@ -75,6 +75,14 @@ struct DriverParams
     //! Experimental
     std::string prefix_sternheimer_chi0;
 
+    //! Sternheimer q-point manifest filename with rows `iq qx qy qz qweight`.
+    //! An empty value preserves the single-q `sternheimer_iq` mode.
+    //! @par Default
+    //! empty
+    //! @par Status
+    //! Experimental
+    std::string fn_sternheimer_qpoints;
+
     //! One-based q index for Sternheimer-RPA postprocessing.
     //! @par Default
     //! 1

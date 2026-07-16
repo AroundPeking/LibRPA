@@ -17,6 +17,7 @@ list(APPEND exe_sources
   reader_lri.cpp
   reader_coulomb.cpp
   reader_sternheimer.cpp
+  reader_sternheimer_qpoints.cpp
   task.cpp
   # Specific task implementations
   tasks/task_helper.cpp
