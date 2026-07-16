@@ -320,6 +320,46 @@ BlockedMatrixFile find_single_coulomb_file(const std::string &dir_path, const st
     return matches.front();
 }
 
+std::vector<BlockedMatrixFile> find_sternheimer_files(const std::string &dir_path,
+                                                      const std::string &prefix, const int iq)
+{
+    const auto files = librpa_int::discover_files_with_prefix(dir_path, prefix);
+    if (files.empty())
+    {
+        throw std::runtime_error("No Sternheimer chi0 v1 files found with prefix " + prefix);
+    }
+
+    std::vector<BlockedMatrixFile> matches;
+    for (const auto &path : files)
+    {
+        auto metadata = read_sternheimer_file_metadata(path);
+        if (metadata.iq != iq)
+        {
+            continue;
+        }
+        if (metadata.value_flag != kComplexFlag)
+        {
+            throw std::runtime_error(path + ": Sternheimer chi0 v1 must be complex-valued");
+        }
+        matches.push_back(std::move(metadata));
+    }
+    if (matches.empty())
+    {
+        throw std::runtime_error("No Sternheimer chi0 v1 file found for iq=" + std::to_string(iq));
+    }
+
+    std::sort(matches.begin(), matches.end(),
+              [](const auto &lhs, const auto &rhs) { return lhs.ifreq < rhs.ifreq; });
+    for (std::size_t i = 0; i != matches.size(); ++i)
+    {
+        if (matches[i].ifreq != static_cast<int>(i + 1))
+        {
+            throw std::runtime_error("Sternheimer chi0 v1 files are not contiguous in ifrequency");
+        }
+    }
+    return matches;
+}
+
 }  // namespace
 
 librpa_int::ComplexMatrix read_coulomb_v1_full_matrix(const std::string &dir_path,
@@ -329,28 +369,21 @@ librpa_int::ComplexMatrix read_coulomb_v1_full_matrix(const std::string &dir_pat
     return read_dense_blocked_matrix(file);
 }
 
+void validate_coulomb_v1_full_matrix_file(const std::string &dir_path, const std::string &prefix,
+                                          const int iq)
+{
+    static_cast<void>(find_single_coulomb_file(dir_path, prefix, iq));
+}
+
 std::vector<SternheimerChi0V1Matrix> read_sternheimer_chi0_v1_matrices(const std::string &dir_path,
                                                                        const std::string &prefix,
                                                                        const int iq)
 {
-    const auto files = librpa_int::discover_files_with_prefix(dir_path, prefix);
-    if (files.empty())
-    {
-        throw std::runtime_error("No Sternheimer chi0 v1 files found with prefix " + prefix);
-    }
-
+    const auto files = find_sternheimer_files(dir_path, prefix, iq);
     std::vector<SternheimerChi0V1Matrix> responses;
-    for (const auto &path : files)
+    responses.reserve(files.size());
+    for (const auto &metadata : files)
     {
-        const auto metadata = read_sternheimer_file_metadata(path);
-        if (metadata.iq != iq)
-        {
-            continue;
-        }
-        if (metadata.value_flag != kComplexFlag)
-        {
-            throw std::runtime_error(path + ": Sternheimer chi0 v1 must be complex-valued");
-        }
         SternheimerChi0V1Matrix response;
         response.path = metadata.path;
         response.iq = metadata.iq;
@@ -361,17 +394,19 @@ std::vector<SternheimerChi0V1Matrix> read_sternheimer_chi0_v1_matrices(const std
         response.matrix = read_dense_blocked_matrix(metadata);
         responses.push_back(std::move(response));
     }
-
-    std::sort(responses.begin(), responses.end(),
-              [](const auto &lhs, const auto &rhs) { return lhs.ifreq < rhs.ifreq; });
-    for (std::size_t i = 0; i != responses.size(); ++i)
-    {
-        if (responses[i].ifreq != static_cast<int>(i + 1))
-        {
-            throw std::runtime_error("Sternheimer chi0 v1 files are not contiguous in ifrequency");
-        }
-    }
     return responses;
+}
+
+void validate_sternheimer_chi0_v1_files(const std::string &dir_path, const std::string &prefix,
+                                        const int iq, const int expected_nfreq)
+{
+    const auto files = find_sternheimer_files(dir_path, prefix, iq);
+    if (static_cast<int>(files.size()) != expected_nfreq)
+    {
+        throw std::runtime_error("Sternheimer chi0 frequency count (" +
+                                 std::to_string(files.size()) + ") for iq=" + std::to_string(iq) +
+                                 " does not match nfreq (" + std::to_string(expected_nfreq) + ")");
+    }
 }
 
 }  // namespace driver

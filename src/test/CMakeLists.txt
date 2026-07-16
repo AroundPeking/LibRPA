@@ -66,6 +66,7 @@ foreach(target
     test_rpa_headwing
     test_strict_2d_coulomb_head_metadata
     test_sternheimer_rpa
+    test_sternheimer_qsum
     test_symmetry
     test_timefreq
     test_vector3

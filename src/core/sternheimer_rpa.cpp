@@ -161,4 +161,15 @@ SternheimerRpaFrequencyResult compute_sternheimer_rpa_frequency(const ComplexMat
     return result;
 }
 
+std::complex<double> sum_sternheimer_rpa_energies(
+    const std::vector<SternheimerRpaFrequencyResult> &results)
+{
+    std::complex<double> total(0.0, 0.0);
+    for (const auto &result : results)
+    {
+        total += result.energy;
+    }
+    return total;
+}
+
 }  // namespace librpa_int

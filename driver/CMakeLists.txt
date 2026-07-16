@@ -13,6 +13,7 @@ list(APPEND exe_sources
   main.cpp
   reader_2d_coulomb_head.cpp
   reader_sternheimer.cpp
+  reader_sternheimer_qpoints.cpp
   task.cpp
   # Specific task implementations
   tasks/task_helper.cpp

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <complex>
+#include <vector>
 
 #include "../math/complexmatrix.h"
 
@@ -30,5 +31,8 @@ SternheimerRpaFrequencyResult compute_sternheimer_rpa_frequency(const ComplexMat
                                                                 int ifreq, double omega,
                                                                 double weight, double qweight,
                                                                 double sqrt_coulomb_threshold);
+
+std::complex<double> sum_sternheimer_rpa_energies(
+    const std::vector<SternheimerRpaFrequencyResult> &results);
 
 }  // namespace librpa_int

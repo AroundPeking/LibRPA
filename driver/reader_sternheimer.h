@@ -23,8 +23,14 @@ struct SternheimerChi0V1Matrix
 librpa_int::ComplexMatrix read_coulomb_v1_full_matrix(const std::string &dir_path,
                                                       const std::string &prefix, int iq);
 
+void validate_coulomb_v1_full_matrix_file(const std::string &dir_path, const std::string &prefix,
+                                          int iq);
+
 std::vector<SternheimerChi0V1Matrix> read_sternheimer_chi0_v1_matrices(const std::string &dir_path,
                                                                        const std::string &prefix,
                                                                        int iq);
+
+void validate_sternheimer_chi0_v1_files(const std::string &dir_path, const std::string &prefix,
+                                        int iq, int expected_nfreq);
 
 }  // namespace driver
