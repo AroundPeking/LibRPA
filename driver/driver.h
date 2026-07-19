@@ -97,6 +97,11 @@ struct DriverParams
     //! Experimental
     double sternheimer_qweight;
 
+    //! Include the Gamma-point contribution in the reported RPA q sum.
+    //! @par Default
+    //! true
+    bool use_rpa_gamma;
+
     //! Prefix of truncated Coulomb matrix files.
     //! @par Default
     //! `coulomb_cut`

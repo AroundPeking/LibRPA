@@ -10,6 +10,7 @@ add_executable(
   test_reader_sternheimer_qpoints.cpp
   ../reader_sternheimer.cpp
   ../reader_sternheimer_qpoints.cpp
+  ../rpa_qsum.cpp
 )
 target_link_libraries(test_reader_sternheimer_qpoints PRIVATE rpa_lib)
 if(BUILD_SHARED_LIBS)
@@ -17,3 +18,10 @@ if(BUILD_SHARED_LIBS)
 endif()
 add_test(NAME test_reader_sternheimer_qpoints
          COMMAND $<TARGET_FILE:test_reader_sternheimer_qpoints>)
+
+add_executable(
+  test_rpa_qsum
+  test_rpa_qsum.cpp
+  ../rpa_qsum.cpp
+)
+add_test(NAME test_rpa_qsum COMMAND $<TARGET_FILE:test_rpa_qsum>)

@@ -13,6 +13,7 @@
 #include "../driver.h"
 #include "../reader_sternheimer.h"
 #include "../reader_sternheimer_qpoints.h"
+#include "../rpa_qsum.h"
 #include "../task.h"
 
 void driver::task_sternheimer_rpa()
@@ -53,14 +54,23 @@ void driver::task_sternheimer_rpa()
                                                     driver_params.fn_sternheimer_qpoints);
         qpoints = read_sternheimer_qpoint_manifest(manifest_path);
     }
+    if (!driver_params.use_rpa_gamma && manifest_path.empty())
+    {
+        throw std::runtime_error(
+            "use_rpa_gamma=false requires fn_sternheimer_qpoints with the full q mesh");
+    }
     validate_sternheimer_qpoint_input_files(
         qpoints, driver_params.input_dir, driver_params.prefix_coul_full,
-        driver_params.prefix_sternheimer_chi0, driver::opts.nfreq);
+        driver_params.prefix_sternheimer_chi0, driver::opts.nfreq, driver_params.use_rpa_gamma);
 
     std::vector<QResult> qresults;
     qresults.reserve(qpoints.size());
     for (const auto &point : qpoints)
     {
+        if (!driver_params.use_rpa_gamma && is_rpa_gamma_point(point.q))
+        {
+            continue;
+        }
         auto coulomb = read_coulomb_v1_full_matrix(driver_params.input_dir,
                                                    driver_params.prefix_coul_full, point.iq);
         auto responses = read_sternheimer_chi0_v1_matrices(
@@ -97,6 +107,18 @@ void driver::task_sternheimer_rpa()
         lib_printf("| Coulomb prefix = %s\n", driver_params.prefix_coul_full.c_str());
         lib_printf("| Sternheimer chi0 prefix = %s\n",
                    driver_params.prefix_sternheimer_chi0.c_str());
+        lib_printf("| use_rpa_gamma = %s\n", driver_params.use_rpa_gamma ? "true" : "false");
+        if (!driver_params.use_rpa_gamma)
+        {
+            for (const auto &point : qpoints)
+            {
+                if (is_rpa_gamma_point(point.q))
+                {
+                    lib_printf("| excluded Gamma iq = %d, q weight = %.16e\n", point.iq,
+                               point.weight);
+                }
+            }
+        }
         for (const auto &qresult : qresults)
         {
             lib_printf("| iq = %d\n", qresult.point.iq);
@@ -116,6 +138,11 @@ void driver::task_sternheimer_rpa()
             }
             lib_printf("| q Sternheimer EcRPA: %20.12e %20.12e\n", qresult.energy.real(),
                        qresult.energy.imag());
+        }
+        if (!driver_params.use_rpa_gamma)
+        {
+            lib_printf("| Total Sternheimer EcRPA excluding q=0: %20.12e %20.12e\n",
+                       total_energy.real(), total_energy.imag());
         }
         lib_printf("| Total Sternheimer EcRPA: %20.12e %20.12e\n", total_energy.real(),
                    total_energy.imag());

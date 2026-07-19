@@ -24,6 +24,7 @@ DriverParams::DriverParams():
     fn_sternheimer_qpoints(""),
     sternheimer_iq(1),
     sternheimer_qweight(1.0),
+    use_rpa_gamma(true),
     prefix_coul_cut("coulomb_cut"),
     prefix_eigvecs_scf("KS_eigenvector"),
     fn_stru("stru_out"),
@@ -89,6 +90,7 @@ std::string DriverParams::format()
     const std::vector<std::pair<std::string, bool>> bool_params
         {
             normal_pair(use_spinor_wfc),
+            normal_pair(use_rpa_gamma),
             normal_pair(output_energy_qp),
             normal_pair(output_gw_spec_func),
             normal_pair(output_hamgnn),

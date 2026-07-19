@@ -125,6 +125,7 @@ void parse_inputfile_to_params(const std::string &fn)
     _parse_string(driver_params, fn_sternheimer_qpoints);
     _parse_int(driver_params, sternheimer_iq);
     _parse_double(driver_params, sternheimer_qweight);
+    _parse_bool(driver_params, use_rpa_gamma);
     _parse_string(driver_params, prefix_coul_cut);
     _parse_string(driver_params, prefix_eigvecs_scf);
     _parse_string(driver_params, fn_stru);

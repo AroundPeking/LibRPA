@@ -10,6 +10,7 @@
 
 #include "../src/io/fs.h"
 #include "reader_sternheimer.h"
+#include "rpa_qsum.h"
 
 namespace driver
 {
@@ -92,18 +93,40 @@ std::vector<SternheimerQPoint> read_sternheimer_qpoint_manifest(const std::strin
     return qpoints;
 }
 
+void validate_sternheimer_gamma_contract(const std::vector<SternheimerQPoint> &qpoints,
+                                         const bool use_rpa_gamma)
+{
+    if (use_rpa_gamma)
+    {
+        return;
+    }
+    const auto gamma_count =
+        std::count_if(qpoints.begin(), qpoints.end(),
+                      [](const auto &point) { return is_rpa_gamma_point(point.q); });
+    if (gamma_count != 1)
+    {
+        throw std::runtime_error(
+            "use_rpa_gamma=false requires exactly one Gamma row in the Sternheimer q manifest");
+    }
+}
+
 void validate_sternheimer_qpoint_input_files(const std::vector<SternheimerQPoint> &qpoints,
                                              const std::string &dir_path,
                                              const std::string &coulomb_prefix,
                                              const std::string &response_prefix,
-                                             const int expected_nfreq)
+                                             const int expected_nfreq, const bool use_rpa_gamma)
 {
+    validate_sternheimer_gamma_contract(qpoints, use_rpa_gamma);
     if (expected_nfreq <= 0)
     {
         throw std::runtime_error("Sternheimer nfreq must be positive");
     }
     for (const auto &point : qpoints)
     {
+        if (!use_rpa_gamma && is_rpa_gamma_point(point.q))
+        {
+            continue;
+        }
         validate_coulomb_v1_full_matrix_file(dir_path, coulomb_prefix, point.iq);
         validate_sternheimer_chi0_v1_files(dir_path, response_prefix, point.iq, expected_nfreq);
     }
