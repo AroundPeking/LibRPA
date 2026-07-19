@@ -152,6 +152,26 @@ void test_rejects_missing_frequency_files()
         "No Sternheimer chi0 v1 files found");
 }
 
+void test_skips_missing_gamma_files_when_gamma_is_excluded()
+{
+    TempDirectory temp;
+    const std::vector<driver::SternheimerQPoint> qpoints{{1, {0.0, 0.0, 0.0}, 1.0}};
+
+    driver::validate_sternheimer_qpoint_input_files(
+        qpoints, temp.path.string(), "v1_coulomb_full_iq_", "v1_sternheimer_chi0_iq_", 1, false);
+}
+
+void test_requires_gamma_manifest_row_when_gamma_is_excluded()
+{
+    const std::vector<driver::SternheimerQPoint> without_gamma{{2, {0.5, 0.0, 0.0}, 1.0}};
+    require_throws([&]() { driver::validate_sternheimer_gamma_contract(without_gamma, false); },
+                   "exactly one Gamma row");
+
+    const std::vector<driver::SternheimerQPoint> with_gamma{{1, {0.0, 0.0, 0.0}, 0.25},
+                                                            {2, {0.5, 0.0, 0.0}, 0.75}};
+    driver::validate_sternheimer_gamma_contract(with_gamma, false);
+}
+
 }  // namespace
 
 int main()
@@ -161,5 +181,7 @@ int main()
     test_rejects_unnormalized_or_nonpositive_weights();
     test_rejects_missing_coulomb_iq();
     test_rejects_missing_frequency_files();
+    test_skips_missing_gamma_files_when_gamma_is_excluded();
+    test_requires_gamma_manifest_row_when_gamma_is_excluded();
     return 0;
 }
