@@ -132,4 +132,21 @@ void validate_sternheimer_qpoint_input_files(const std::vector<SternheimerQPoint
     }
 }
 
+void validate_sternheimer_partial_qpoint_input_files(
+    const std::vector<SternheimerQPoint> &qpoints,
+    const std::string &dir_path,
+    const std::string &coulomb_prefix,
+    const bool use_rpa_gamma)
+{
+    validate_sternheimer_gamma_contract(qpoints, use_rpa_gamma);
+    for (const auto &point : qpoints)
+    {
+        if (!use_rpa_gamma && is_rpa_gamma_point(point.q))
+        {
+            continue;
+        }
+        validate_coulomb_v1_full_matrix_file(dir_path, coulomb_prefix, point.iq);
+    }
+}
+
 }  // namespace driver

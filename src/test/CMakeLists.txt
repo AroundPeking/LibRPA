@@ -66,6 +66,7 @@ foreach(target
     test_rpa_headwing
     test_strict_2d_coulomb_head_metadata
     test_sternheimer_rpa
+    test_sternheimer_symmetry
     test_sternheimer_qsum
     test_symmetry
     test_timefreq
@@ -78,6 +79,11 @@ endforeach()
 target_sources(test_task_helper PRIVATE ../../driver/tasks/task_helper.cpp)
 target_sources(test_strict_2d_coulomb_head_metadata
   PRIVATE ../../driver/reader_2d_coulomb_head.cpp)
+
+# These suites use standard assert() and must remain active in Release builds.
+target_compile_options(test_sternheimer_rpa PRIVATE -UNDEBUG)
+target_compile_options(test_sternheimer_symmetry PRIVATE -UNDEBUG)
+target_compile_options(test_symmetry_context PRIVATE -UNDEBUG)
 
 # add 4-process tests
 foreach(target

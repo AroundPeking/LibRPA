@@ -1,6 +1,7 @@
 #include "reader_sternheimer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -54,6 +55,16 @@ Value read_scalar(std::ifstream &input, const std::string &path)
         throw std::runtime_error("Failed to read binary scalar from " + path);
     }
     return value;
+}
+
+template <typename Value>
+void write_scalar(std::ofstream &output, const Value &value, const std::string &path)
+{
+    output.write(reinterpret_cast<const char *>(&value), sizeof(Value));
+    if (!output.good())
+    {
+        throw std::runtime_error("Failed to write binary scalar to " + path);
+    }
 }
 
 std::size_t checked_matrix_size(const int nrow, const int ncol, const std::string &context)
@@ -375,6 +386,118 @@ void validate_coulomb_v1_full_matrix_file(const std::string &dir_path, const std
     static_cast<void>(find_single_coulomb_file(dir_path, prefix, iq));
 }
 
+SternheimerChi0V1Matrix read_sternheimer_chi0_v1_matrix_file(const std::string &path)
+{
+    const auto metadata = read_sternheimer_file_metadata(path);
+    if (metadata.ifreq <= 0)
+    {
+        throw std::runtime_error(path + ": Sternheimer chi0 v1 requires a positive ifrequency");
+    }
+    if (metadata.value_flag != kComplexFlag)
+    {
+        throw std::runtime_error(path + ": Sternheimer chi0 v1 must be complex-valued");
+    }
+
+    SternheimerChi0V1Matrix response;
+    response.path = metadata.path;
+    response.iq = metadata.iq;
+    response.ifreq = metadata.ifreq;
+    response.omega = metadata.omega;
+    response.weight = metadata.weight;
+    response.atom_naux = metadata.atom_naux;
+    response.matrix = read_dense_blocked_matrix(metadata);
+    return response;
+}
+
+void write_sternheimer_chi0_v1_matrix_file(const std::string &path,
+                                            const SternheimerChi0V1Matrix &response)
+{
+    if (response.iq <= 0 || response.ifreq <= 0 || !std::isfinite(response.omega)
+        || !std::isfinite(response.weight) || response.weight <= 0.0
+        || response.atom_naux.empty())
+    {
+        throw std::runtime_error(path + ": invalid Sternheimer chi0 v1 metadata");
+    }
+    const auto atom_offsets = make_atom_offsets(response.atom_naux);
+    const int naux = atom_offsets.back();
+    if (response.matrix.nr != naux || response.matrix.nc != naux)
+    {
+        throw std::runtime_error(path + ": Sternheimer chi0 matrix dimension does not match atom_naux");
+    }
+    double matrix_scale = 0.0;
+    double hermiticity_residual = 0.0;
+    for (int row = 0; row != naux; ++row)
+    {
+        for (int column = 0; column != naux; ++column)
+        {
+            matrix_scale = std::max(matrix_scale, std::abs(response.matrix(row, column)));
+            hermiticity_residual =
+                std::max(hermiticity_residual,
+                         std::abs(response.matrix(row, column)
+                                  - std::conj(response.matrix(column, row))));
+        }
+    }
+    if (hermiticity_residual > 1.0e-10 * std::max(1.0, matrix_scale))
+    {
+        throw std::runtime_error(path + ": Sternheimer chi0 v1 output matrix is not Hermitian");
+    }
+
+    const auto atom_pairs = make_atom_pairs(static_cast<int>(response.atom_naux.size()));
+    const std::int32_t nblocks = static_cast<std::int32_t>(atom_pairs.size());
+    const std::int64_t payload_start =
+        7 * static_cast<std::int64_t>(sizeof(std::int32_t))
+        + 2 * static_cast<std::int64_t>(sizeof(double))
+        + static_cast<std::int64_t>(response.atom_naux.size()) * sizeof(std::int32_t)
+        + static_cast<std::int64_t>(atom_pairs.size())
+              * (sizeof(std::int32_t) + sizeof(std::int64_t));
+    std::vector<std::int64_t> payload_offsets;
+    payload_offsets.reserve(atom_pairs.size());
+    std::int64_t next_offset = payload_start;
+    for (const auto &[iatom, jatom] : atom_pairs)
+    {
+        payload_offsets.push_back(next_offset);
+        next_offset += static_cast<std::int64_t>(response.atom_naux[iatom])
+                       * static_cast<std::int64_t>(response.atom_naux[jatom])
+                       * static_cast<std::int64_t>(sizeof(std::complex<double>));
+    }
+
+    std::ofstream output(path.c_str(), std::ios::binary | std::ios::trunc);
+    if (!output)
+    {
+        throw std::runtime_error("Cannot open Sternheimer chi0 v1 output file " + path);
+    }
+    write_scalar(output, kSternheimerChi0V1Marker, path);
+    write_scalar(output, static_cast<std::int32_t>(response.iq), path);
+    write_scalar(output, static_cast<std::int32_t>(response.ifreq), path);
+    write_scalar(output, static_cast<std::int32_t>(naux), path);
+    write_scalar(output, kComplexFlag, path);
+    write_scalar(output, static_cast<std::int32_t>(response.atom_naux.size()), path);
+    write_scalar(output, response.omega, path);
+    write_scalar(output, response.weight, path);
+    write_scalar(output, nblocks, path);
+    for (const int atom_aux : response.atom_naux)
+    {
+        write_scalar(output, static_cast<std::int32_t>(atom_aux), path);
+    }
+    for (std::size_t pair_index = 0; pair_index != atom_pairs.size(); ++pair_index)
+    {
+        write_scalar(output, static_cast<std::int32_t>(pair_index), path);
+        write_scalar(output, payload_offsets[pair_index], path);
+    }
+    for (const auto &[iatom, jatom] : atom_pairs)
+    {
+        const int ioffset = atom_offsets[iatom];
+        const int joffset = atom_offsets[jatom];
+        for (int imu = 0; imu != response.atom_naux[iatom]; ++imu)
+        {
+            for (int jmu = 0; jmu != response.atom_naux[jatom]; ++jmu)
+            {
+                write_scalar(output, response.matrix(ioffset + imu, joffset + jmu), path);
+            }
+        }
+    }
+}
+
 std::vector<SternheimerChi0V1Matrix> read_sternheimer_chi0_v1_matrices(const std::string &dir_path,
                                                                        const std::string &prefix,
                                                                        const int iq)
@@ -384,15 +507,7 @@ std::vector<SternheimerChi0V1Matrix> read_sternheimer_chi0_v1_matrices(const std
     responses.reserve(files.size());
     for (const auto &metadata : files)
     {
-        SternheimerChi0V1Matrix response;
-        response.path = metadata.path;
-        response.iq = metadata.iq;
-        response.ifreq = metadata.ifreq;
-        response.omega = metadata.omega;
-        response.weight = metadata.weight;
-        response.atom_naux = metadata.atom_naux;
-        response.matrix = read_dense_blocked_matrix(metadata);
-        responses.push_back(std::move(response));
+        responses.push_back(read_sternheimer_chi0_v1_matrix_file(metadata.path));
     }
     return responses;
 }

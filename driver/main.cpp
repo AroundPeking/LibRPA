@@ -218,14 +218,23 @@ int main(int argc, char **argv)
         const string path_eigocc_scf = driver_params.input_dir + driver_params.fn_eigocc_scf;
 
         profiler.start("driver_read_common_input_data", "Driver Read Task-Common Input Data");
-        if (task != task_t::SternheimerRPA)
+        const bool needs_scf_eigenvalues = task != task_t::SternheimerRPA;
+        const bool needs_standard_meanfield_data =
+            task != task_t::print_minimax && task != task_t::SternheimerRPA;
+        const bool needs_sternheimer_symmetry_metadata =
+            task == task_t::SternheimerRPA
+            && !driver_params.fn_sternheimer_partial_manifest.empty();
+        const bool needs_structure_bz_basis =
+            needs_standard_meanfield_data || needs_sternheimer_symmetry_metadata;
+
+        if (needs_scf_eigenvalues)
         {
             profiler.start("driver_band_out", "DFT SCF eigenvalues/occupations");
             read_scf_occ_eigenvalues(path_eigocc_scf);
             profiler.stop("driver_band_out");
         }
 
-        if (task != task_t::print_minimax && task != task_t::SternheimerRPA)
+        if (needs_structure_bz_basis)
         {
             profiler.start("driver_struct", "Structure");
             read_stru(path_stru);
@@ -250,6 +259,8 @@ int main(int argc, char **argv)
             lib_printf_root("\n");
             profiler.stop("driver_basis");
 
+            if (needs_standard_meanfield_data)
+            {
             // Direct k-BLACS eigenvector input is a LibRI path.  Resolve AUTO before
             // reading wave functions so the reader can choose the final ownership
             // layout instead of first materializing dense matrices on k-group roots.
@@ -286,6 +297,7 @@ int main(int argc, char **argv)
 
             // Vq distributed using the same strategy
             // There should be no duplicate for V
+            }
         }
 
         mpi_comm_global_h.barrier();
