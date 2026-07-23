@@ -83,6 +83,23 @@ struct DriverParams
     //! Experimental
     std::string fn_sternheimer_qpoints;
 
+    //! Sternheimer partial-response manifest with rows
+    //! `iq ik_full ifreq response_file`.
+    //! An empty value preserves aggregate Sternheimer response input.
+    //! @par Default
+    //! empty
+    //! @par Status
+    //! Experimental
+    std::string fn_sternheimer_partial_manifest;
+
+    //! Optional prefix for reconstructed full-q Sternheimer chi0 v1 files.
+    //! An empty value disables the diagnostic output.
+    //! @par Default
+    //! empty
+    //! @par Status
+    //! Experimental
+    std::string prefix_sternheimer_reconstructed;
+
     //! One-based q index for Sternheimer-RPA postprocessing.
     //! @par Default
     //! 1

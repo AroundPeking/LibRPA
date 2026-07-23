@@ -17,8 +17,10 @@ list(APPEND exe_sources
   reader_lri.cpp
   reader_coulomb.cpp
   reader_sternheimer.cpp
+  reader_sternheimer_partial.cpp
   reader_sternheimer_qpoints.cpp
   rpa_qsum.cpp
+  sternheimer_partial_reconstruction.cpp
   task.cpp
   # Specific task implementations
   tasks/task_helper.cpp

@@ -26,4 +26,10 @@ void validate_sternheimer_qpoint_input_files(const std::vector<SternheimerQPoint
                                              const std::string &response_prefix, int expected_nfreq,
                                              bool use_rpa_gamma = true);
 
+void validate_sternheimer_partial_qpoint_input_files(
+    const std::vector<SternheimerQPoint> &qpoints,
+    const std::string &dir_path,
+    const std::string &coulomb_prefix,
+    bool use_rpa_gamma = true);
+
 }  // namespace driver

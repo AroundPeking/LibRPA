@@ -173,6 +173,11 @@ int main(int argc, char **argv)
     const bool needs_scf_eigenvalues = task != task_t::SternheimerRPA;
     const bool needs_standard_meanfield_data =
         task != task_t::print_minimax && task != task_t::SternheimerRPA;
+    const bool needs_sternheimer_symmetry_metadata =
+        task == task_t::SternheimerRPA
+        && !driver_params.fn_sternheimer_partial_manifest.empty();
+    const bool needs_structure_bz_basis =
+        needs_standard_meanfield_data || needs_sternheimer_symmetry_metadata;
     if (needs_scf_eigenvalues)
     {
         profiler.start("driver_band_out", "DFT SCF eigenvalues/occupations");
@@ -180,7 +185,7 @@ int main(int argc, char **argv)
         profiler.stop("driver_band_out");
     }
 
-    if (needs_standard_meanfield_data)
+    if (needs_structure_bz_basis)
     {
         profiler.start("driver_struct", "Structure");
         read_stru(path_stru);
@@ -204,7 +209,10 @@ int main(int argc, char **argv)
                            driver_params.fn_basis_wfc, driver_params.fn_basis_aux);
         lib_printf_root("\n");
         profiler.stop("driver_basis");
+    }
 
+    if (needs_standard_meanfield_data)
+    {
         profiler.start("driver_read_eigenvector", "SCF eigenvectors");
         int ret_eigenvec = read_eigenvector(driver_params.input_dir);
         mpi_comm_global_h.barrier();

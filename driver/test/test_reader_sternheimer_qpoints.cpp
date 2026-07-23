@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "../reader_sternheimer.h"
 #include "../reader_sternheimer_qpoints.h"
 
 namespace
@@ -60,6 +61,37 @@ void write_minimal_coulomb_v1(const std::filesystem::path &path, const int iq)
     write_binary(output, naux);
     write_binary(output, complex_flag);
     write_binary(output, natoms);
+    write_binary(output, nblocks);
+    write_binary(output, naux);
+    write_binary(output, pair_index);
+    write_binary(output, payload_offset);
+    write_binary(output, payload);
+}
+
+void write_minimal_sternheimer_v1(const std::filesystem::path &path,
+                                  const int iq,
+                                  const int ifreq,
+                                  const double omega,
+                                  const double weight,
+                                  const std::complex<double> payload)
+{
+    constexpr std::int32_t marker = -41073291;
+    constexpr std::int32_t naux = 1;
+    constexpr std::int32_t complex_flag = 1;
+    constexpr std::int32_t natoms = 1;
+    constexpr std::int32_t nblocks = 1;
+    constexpr std::int32_t pair_index = 0;
+    constexpr std::int64_t payload_offset = 60;
+
+    std::ofstream output(path, std::ios::binary);
+    write_binary(output, marker);
+    write_binary(output, static_cast<std::int32_t>(iq));
+    write_binary(output, static_cast<std::int32_t>(ifreq));
+    write_binary(output, naux);
+    write_binary(output, complex_flag);
+    write_binary(output, natoms);
+    write_binary(output, omega);
+    write_binary(output, weight);
     write_binary(output, nblocks);
     write_binary(output, naux);
     write_binary(output, pair_index);
@@ -161,6 +193,16 @@ void test_skips_missing_gamma_files_when_gamma_is_excluded()
         qpoints, temp.path.string(), "v1_coulomb_full_iq_", "v1_sternheimer_chi0_iq_", 1, false);
 }
 
+void test_partial_mode_requires_coulomb_but_not_aggregate_response_files()
+{
+    TempDirectory temp;
+    write_minimal_coulomb_v1(temp.path / "v1_coulomb_full_iq_2", 2);
+    const std::vector<driver::SternheimerQPoint> qpoints{{2, {0.5, 0.0, 0.0}, 1.0}};
+
+    driver::validate_sternheimer_partial_qpoint_input_files(
+        qpoints, temp.path.string(), "v1_coulomb_full_iq_");
+}
+
 void test_requires_gamma_manifest_row_when_gamma_is_excluded()
 {
     const std::vector<driver::SternheimerQPoint> without_gamma{{2, {0.5, 0.0, 0.0}, 1.0}};
@@ -170,6 +212,24 @@ void test_requires_gamma_manifest_row_when_gamma_is_excluded()
     const std::vector<driver::SternheimerQPoint> with_gamma{{1, {0.0, 0.0, 0.0}, 0.25},
                                                             {2, {0.5, 0.0, 0.0}, 0.75}};
     driver::validate_sternheimer_gamma_contract(with_gamma, false);
+}
+
+void test_reads_one_sternheimer_response_from_explicit_path()
+{
+    TempDirectory temp;
+    const auto response_path = temp.path / "representative_k17_ifreq2.bin";
+    write_minimal_sternheimer_v1(response_path, 3, 2, 0.75, 0.125, {-4.0, 0.0});
+
+    const auto response = driver::read_sternheimer_chi0_v1_matrix_file(response_path.string());
+    assert(response.path == response_path.string());
+    assert(response.iq == 3);
+    assert(response.ifreq == 2);
+    assert(std::abs(response.omega - 0.75) < 1.0e-15);
+    assert(std::abs(response.weight - 0.125) < 1.0e-15);
+    assert((response.atom_naux == std::vector<int>{1}));
+    assert(response.matrix.nr == 1);
+    assert(response.matrix.nc == 1);
+    assert(std::abs(response.matrix(0, 0) - std::complex<double>(-4.0, 0.0)) < 1.0e-15);
 }
 
 }  // namespace
@@ -182,6 +242,8 @@ int main()
     test_rejects_missing_coulomb_iq();
     test_rejects_missing_frequency_files();
     test_skips_missing_gamma_files_when_gamma_is_excluded();
+    test_partial_mode_requires_coulomb_but_not_aggregate_response_files();
     test_requires_gamma_manifest_row_when_gamma_is_excluded();
+    test_reads_one_sternheimer_response_from_explicit_path();
     return 0;
 }

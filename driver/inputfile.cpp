@@ -123,6 +123,8 @@ void parse_inputfile_to_params(const std::string &fn)
     _parse_string(driver_params, prefix_coul_full);
     _parse_string(driver_params, prefix_sternheimer_chi0);
     _parse_string(driver_params, fn_sternheimer_qpoints);
+    _parse_string(driver_params, fn_sternheimer_partial_manifest);
+    _parse_string(driver_params, prefix_sternheimer_reconstructed);
     _parse_int(driver_params, sternheimer_iq);
     _parse_double(driver_params, sternheimer_qweight);
     _parse_bool(driver_params, use_rpa_gamma);

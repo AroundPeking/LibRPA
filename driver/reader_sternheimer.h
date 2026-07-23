@@ -20,6 +20,11 @@ struct SternheimerChi0V1Matrix
     librpa_int::ComplexMatrix matrix;
 };
 
+SternheimerChi0V1Matrix read_sternheimer_chi0_v1_matrix_file(const std::string &path);
+
+void write_sternheimer_chi0_v1_matrix_file(const std::string &path,
+                                            const SternheimerChi0V1Matrix &response);
+
 librpa_int::ComplexMatrix read_coulomb_v1_full_matrix(const std::string &dir_path,
                                                       const std::string &prefix, int iq);
 
