@@ -43,10 +43,16 @@ struct SymmetryContext
     SpaceGroupSymOps rspace_operations;
     //! Cached per-spatial-operation metadata, aligned by index with rspace_operations.
     std::vector<SymmetrySpatialOperationRecord> operation_pool;
-    //! Grey-group expansion of the spatial operations: the first N entries are the
-    //! unitary (identity-spin) copies and the next N the antiunitary ones, following
-    //! the ABACUS convention (isym < nrotk unitary, j + nrotk antiunitary).
+    //! Spin-space operation table driving k/q-star generation. By default this is
+    //! the grey-group expansion of the spatial operations: the first N entries are
+    //! the unitary (identity-spin) copies and the next N the antiunitary ones,
+    //! following the ABACUS convention (isym < nrotk unitary, j + nrotk
+    //! antiunitary). When has_explicit_spin_operations is set, the table was
+    //! provided through set_symmetry_spin_operations instead.
     std::vector<SymmetrySpinOperation> spin_operations;
+    //! Whether spin_operations holds an explicit (possibly magnetic or
+    //! spin-space-group) table instead of the grey-group default expansion.
+    bool has_explicit_spin_operations = false;
     //! Deduplicated (spatial_id, antiunitary) geometric actions referenced by
     //! SymmetryKStarMember::action_id and SymmetryFullKpointMemberEntry::action_id.
     std::vector<SymmetryGeometricAction> kspace_actions;
@@ -67,9 +73,26 @@ struct SymmetryContext
     void add_rspace_operation(SymmetryOperation operation);
     void set_rspace_operations(std::vector<SymmetryOperation> operations);
     /*!
+     * @brief Install an explicit spin-space operation table.
+     *
+     * Requires set_rspace_operations to have been called first: every
+     * spatial_id must reference the current operation pool. With
+     * grey_group=true the input is treated as the unitary block and one
+     * antiunitary copy per input operation is appended after it (ABACUS
+     * ordering convention); the input must then contain only unitary entries.
+     * The final table is validated by validate_symmetry_spin_operations and
+     * replaces the grey-group default built by ensure_operation_metadata().
+     */
+    void set_symmetry_spin_operations(std::vector<SymmetrySpinOperation> ops,
+                                      bool grey_group);
+    /*!
      * @brief Rebuild operation_pool and spin_operations when out of sync.
      *
      * Idempotent: does nothing while the pool size matches rspace_operations.
+     * The pool is always rebuilt when stale. The grey-group spin_operations
+     * table is rebuilt only when no explicit table was installed; an explicit
+     * table survives a pool rebuild and is re-validated against the new pool
+     * (an out-of-range spatial_id throws std::runtime_error).
      * Called at the end of set_rspace_operations and at the entry of the k-star
      * generators, so directly pushing into rspace_operations degrades gracefully.
      */
