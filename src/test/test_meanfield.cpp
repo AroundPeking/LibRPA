@@ -398,6 +398,77 @@ void test_symmetry_context_kstar_restored_dmat_uses_target_kpoint_gauge()
         throw std::runtime_error("ABACUS k-star restored density matrix ignored target k-point gauge");
 }
 
+//! Lock the spinor storage layout (Phase 0 convention C8):
+//! AO matrices carry no interleaved spin dimension; the spinor degree of
+//! freedom lives entirely in the outer (ispinor_bra, ispinor_ket) channels,
+//! and each spin block is the outer product of the two channel wfc blocks,
+//! D^{ab}(i,j) = sum_n occ_n * C_a(n,i) * conj(C_b(n,j)).
+void test_spinor_channel_layout_uses_outer_blocks_no_interleave()
+{
+    using namespace librpa_int;
+
+    const int n_spins = 1, nk = 1, nb = 4, nao = 3, n_spinor = 2;
+    MeanField mf(n_spins, nk, nb, nao, n_spinor);
+
+    for (int ib = 0; ib != nb; ++ib)
+        mf.get_eigenvals()[0](0, ib) = -1.0 + 0.5 * ib;
+    mf.get_weight()[0].zero_out();
+    mf.get_weight()[0](0, 0) = 1.0;
+    mf.get_weight()[0](0, 1) = 0.5;
+
+    // deterministic non-symmetric wfc, distinct per spinor channel
+    for (int ispinor = 0; ispinor != n_spinor; ++ispinor)
+    {
+        mf.get_eigenvectors()[0][ispinor][0].create(nb, nao);
+        for (int ib = 0; ib != nb; ++ib)
+            for (int iw = 0; iw != nao; ++iw)
+                mf.get_eigenvectors()[0][ispinor][0](ib, iw) =
+                    std::complex<double>(0.11 * (ib + 1) + 0.07 * iw + 0.31 * ispinor,
+                                         0.05 * ib - 0.13 * iw + 0.17 * ispinor);
+    }
+
+    const std::complex<double> thres = 1e-13;
+    const double occ[2] = {1.0, 0.5};
+    for (int bra = 0; bra != n_spinor; ++bra)
+    {
+        for (int ket = 0; ket != n_spinor; ++ket)
+        {
+            const auto block = mf.get_dmat_cplx(0, bra, ket, 0);
+            assert(block.nr == nao && block.nc == nao);
+            for (int i = 0; i != nao; ++i)
+                for (int j = 0; j != nao; ++j)
+                {
+                    std::complex<double> expected = 0.0;
+                    for (int n = 0; n != 2; ++n)
+                        expected += occ[n]
+                            * mf.get_eigenvectors()[0][bra][0](n, i)
+                            * std::conj(mf.get_eigenvectors()[0][ket][0](n, j));
+                    if (!fequal(block(i, j), expected, thres))
+                        throw std::runtime_error(
+                            "spinor density block deviates from channel outer product");
+                }
+        }
+    }
+
+    // off-diagonal blocks must be genuinely non-zero: channels are mixed
+    // only through the (bra, ket) indices, never through an interleaved layout
+    const auto d01 = mf.get_dmat_cplx(0, 0, 1, 0);
+    double max_abs = 0.0;
+    for (int i = 0; i != nao; ++i)
+        for (int j = 0; j != nao; ++j)
+            if (std::abs(d01(i, j)) > max_abs) max_abs = std::abs(d01(i, j));
+    if (max_abs < 1e-3)
+        throw std::runtime_error("spinor off-diagonal density block unexpectedly zero");
+
+    // G(tau -> 0^-) approaches minus the density block, per channel
+    const auto gf00 = mf.get_gf_cplx_imagtime(0, 0, 0, 0, -1e-12);
+    const auto d00 = mf.get_dmat_cplx(0, 0, 0, 0);
+    for (int i = 0; i != nao; ++i)
+        for (int j = 0; j != nao; ++j)
+            if (!fequal(gf00(i, j), -d00(i, j), std::complex<double>(1e-9, 0.0)))
+                throw std::runtime_error("spinor GF tau->0- limit mismatch");
+}
+
 int main(int argc, char *argv[])
 {
     test_BCC_He_gamma_minimal_basis_aims();
@@ -408,5 +479,6 @@ int main(int argc, char *argv[])
     test_symmetry_context_kstar_restore_skips_full_grid();
     test_symmetry_context_full_grid_kstar_route_matches_direct_full_k();
     test_symmetry_context_kstar_restored_dmat_uses_target_kpoint_gauge();
+    test_spinor_channel_layout_uses_outer_blocks_no_interleave();
     return 0;
 }
