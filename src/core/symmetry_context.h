@@ -41,6 +41,15 @@ struct SymmetryContext
     symmetry_irreducible_sector_t irreducible_sector;
     symmetry_rspace_sector_stars_t rspace_sector_stars;
     SpaceGroupSymOps rspace_operations;
+    //! Cached per-spatial-operation metadata, aligned by index with rspace_operations.
+    std::vector<SymmetrySpatialOperationRecord> operation_pool;
+    //! Grey-group expansion of the spatial operations: the first N entries are the
+    //! unitary (identity-spin) copies and the next N the antiunitary ones, following
+    //! the ABACUS convention (isym < nrotk unitary, j + nrotk antiunitary).
+    std::vector<SymmetrySpinOperation> spin_operations;
+    //! Deduplicated (spatial_id, antiunitary) geometric actions referenced by
+    //! SymmetryKStarMember::action_id and SymmetryFullKpointMemberEntry::action_id.
+    std::vector<SymmetryGeometricAction> kspace_actions;
     std::vector<std::map<int, ComplexMatrix>> rsh_rotations;
     std::vector<SymmetryKStar> kstars;
     std::vector<SymmetryKStarGridMappingEntry> kstar_grid_mapping;
@@ -57,6 +66,14 @@ struct SymmetryContext
     void unset_available();
     void add_rspace_operation(SymmetryOperation operation);
     void set_rspace_operations(std::vector<SymmetryOperation> operations);
+    /*!
+     * @brief Rebuild operation_pool and spin_operations when out of sync.
+     *
+     * Idempotent: does nothing while the pool size matches rspace_operations.
+     * Called at the end of set_rspace_operations and at the entry of the k-star
+     * generators, so directly pushing into rspace_operations degrades gracefully.
+     */
+    void ensure_operation_metadata();
     void set_crystal_structure(const Matrix3& latvec,
                                const Matrix3& reciprocal,
                                const std::map<atom_t, int>& atom_types,
@@ -87,6 +104,33 @@ bool symmetry_species_layouts_match_atom_counts(
     const std::vector<SpeciesBasisLayout>& layouts,
     const std::map<atom_t, int>& atom_to_type,
     const std::map<atom_t, size_t>& atom_nb);
+
+/*!
+ * @brief Test two SU(2) matrices for equality up to the ±U sign ambiguity.
+ *
+ * Returns true when min(|U1 - U2|, |U1 + U2|) < tol elementwise.
+ */
+bool symmetry_spin_u_equal(const std::array<std::complex<double>, 4>& u1,
+                           const std::array<std::complex<double>, 4>& u2,
+                           double tol = 1e-10);
+
+/*!
+ * @brief Validate spin operations against the spatial operation pool.
+ *
+ * Every spatial_id must reference an existing pool entry and every spin_u must
+ * be unitary (|U^dagger U - I| < 1e-10 elementwise). Throws std::invalid_argument
+ * naming the offending operation index and the reason.
+ */
+void validate_symmetry_spin_operations(
+    const std::vector<SymmetrySpinOperation>& spin_operations,
+    std::size_t spatial_operation_count);
+
+/*!
+ * @brief Format one readable line per spin operation (id, spatial_id,
+ * antiunitary, source) for logging and tests.
+ */
+std::string format_symmetry_operations(
+    const std::vector<SymmetrySpinOperation>& spin_operations);
 
 ComplexMatrix build_symmetry_shell_rotation_from_direct_rotation(
     const SpaceGroupSymOp& operation,
