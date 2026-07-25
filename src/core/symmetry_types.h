@@ -108,9 +108,9 @@ struct SymmetrySpinOperation
  * @brief One deduplicated geometric action on k/q points.
  *
  * For k/q-space the geometry key is (spatial_id, antiunitary); the canonical
- * operation represents the action and `equivalent_operation_ids` collects all
- * operations sharing the same geometry (filled in a later phase; for now only
- * the canonical operation itself).
+ * operation is the first spin operation with that key and
+ * `equivalent_operation_ids` collects all spin operations sharing the geometry
+ * (pure-spin duplicates included, so they never widen a star).
  */
 struct SymmetryGeometricAction
 {

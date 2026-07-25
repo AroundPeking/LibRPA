@@ -1720,6 +1720,393 @@ void test_spin_u_equal_pm_invariance()
     assert(!symmetry_spin_u_equal(u_z, u_x));
 }
 
+PeriodicBoundaryData make_cubic_mesh_pbc(const Vector3_Order<int>& mesh)
+{
+    PeriodicBoundaryData pbc;
+    pbc.set_latvec({1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0});
+    std::vector<double> kvecs;
+    for (const auto& kfrac : build_uniform_kmesh_frac(mesh))
+    {
+        const auto kvec = kfrac * pbc.G;
+        kvecs.push_back(kvec.x * TWO_PI);
+        kvecs.push_back(kvec.y * TWO_PI);
+        kvecs.push_back(kvec.z * TWO_PI);
+    }
+    pbc.set_kgrids_kvec(mesh.x, mesh.y, mesh.z, kvecs);
+    return pbc;
+}
+
+SymmetryContext make_single_atom_cubic_context(const PeriodicBoundaryData& pbc,
+                                               const std::vector<SymmetryOperation>& ops)
+{
+    SymmetryContext ctx;
+    ctx.set_crystal_structure(pbc.latvec, pbc.G, {{0, 0}}, {{0, {0.0, 0.0, 0.0}}});
+    ctx.set_rspace_operations(ops);
+    return ctx;
+}
+
+void build_ctx_periodic_mappings(SymmetryContext& ctx, const PeriodicBoundaryData& pbc)
+{
+    ctx.set_available();
+    ctx.build_periodic_mappings(pbc, pbc.Rlist);
+}
+
+void test_explicit_unitary_only_list_widens_kstars()
+{
+    // 2D square lattice, single atom, 4x4x1 grid, spatial group {E, mirror_x}.
+    // Orbit counting on (kx, ky) in {0, 1/4, 1/2, 3/4}^2 (verified with an
+    // independent enumerator): the default grey table {E, mx, Theta, Theta.mx}
+    // acts as (kx, ky) -> (+-kx, +-ky), giving 9 stars (4 singletons, 4 pairs,
+    // 1 quartet); the explicit unitary-only table {E, mx} acts as
+    // (kx, ky) -> (+-kx, ky), giving 12 stars (8 singletons, 4 pairs).
+    auto pbc = make_cubic_mesh_pbc({4, 4, 1});
+    const std::vector<SymmetryOperation> ops{
+        make_row_symmetry_operation({1, 0, 0, 0, 1, 0, 0, 0, 1}),
+        make_row_symmetry_operation({-1, 0, 0, 0, 1, 0, 0, 0, 1}),
+    };
+
+    auto ctx_grey = make_single_atom_cubic_context(pbc, ops);
+    build_ctx_periodic_mappings(ctx_grey, pbc);
+    assert(!ctx_grey.has_explicit_spin_operations);
+    assert(ctx_grey.kstars.size() == 9);
+    assert(ctx_grey.count_kstar_members() == 16);
+    bool grey_has_tr_member = false;
+    for (const auto& star : ctx_grey.kstars)
+    {
+        for (const auto& member : star.members)
+        {
+            grey_has_tr_member = grey_has_tr_member || member.time_reversal;
+        }
+    }
+    assert(grey_has_tr_member);
+
+    auto ctx_unitary = make_single_atom_cubic_context(pbc, ops);
+    std::vector<SymmetrySpinOperation> unitary_table(2);
+    unitary_table[0].spatial_id = 0;
+    unitary_table[1].spatial_id = 1;
+    ctx_unitary.set_symmetry_spin_operations(unitary_table, false);
+    build_ctx_periodic_mappings(ctx_unitary, pbc);
+    assert(ctx_unitary.has_explicit_spin_operations);
+    assert(ctx_unitary.spin_operations.size() == 2);
+    assert(ctx_unitary.kstars.size() == 12);
+    assert(ctx_unitary.count_kstar_members() == 16);
+    for (const auto& star : ctx_unitary.kstars)
+    {
+        for (const auto& member : star.members)
+        {
+            assert(!member.time_reversal);
+        }
+    }
+}
+
+void test_antiunitary_translation_k_action_ignores_translation()
+{
+    // AFM-type anti-translation: spatial {E|(1/2,0,0)} enters the k-star table
+    // once as unitary (k -> k, the translation drops out of the k mapping) and
+    // once as antiunitary Theta{E|t} (k -> -k). On the 4x1x1 grid the stars are
+    // {0}, {1/2}, {1/4, 3/4}.
+    auto pbc = make_cubic_mesh_pbc({4, 1, 1});
+    std::vector<SymmetryOperation> ops;
+    ops.push_back(make_row_symmetry_operation({1, 0, 0, 0, 1, 0, 0, 0, 1}));
+    auto anti_translation = ops.front();
+    anti_translation.translation = {0.5, 0.0, 0.0};
+    ops.push_back(anti_translation);
+
+    SymmetryContext ctx;
+    ctx.set_crystal_structure(pbc.latvec, pbc.G,
+                              {{0, 0}, {1, 0}},
+                              {{0, {0.0, 0.0, 0.0}}, {1, {0.5, 0.0, 0.0}}});
+    ctx.set_rspace_operations(ops);
+    std::vector<SymmetrySpinOperation> spin_table(2);
+    spin_table[0].spatial_id = 1; // {E|t}, unitary: k -> k
+    spin_table[1].spatial_id = 1; // Theta{E|t}: k -> -k
+    spin_table[1].antiunitary = true;
+    ctx.set_symmetry_spin_operations(spin_table, false);
+    build_ctx_periodic_mappings(ctx, pbc);
+
+    assert(ctx.kstars.size() == 3);
+    const SymmetryKStar* two_member_star = nullptr;
+    for (const auto& star : ctx.kstars)
+    {
+        if (star.members.size() == 2)
+        {
+            two_member_star = &star;
+        }
+    }
+    assert(two_member_star != nullptr);
+    const SymmetryKStarMember* unitary_member = nullptr;
+    const SymmetryKStarMember* tr_member = nullptr;
+    for (const auto& member : two_member_star->members)
+    {
+        if (member.time_reversal)
+        {
+            tr_member = &member;
+        }
+        else
+        {
+            unitary_member = &member;
+        }
+    }
+    assert(unitary_member != nullptr && tr_member != nullptr);
+    // k and -k share one star; the antiunitary member sits at exactly -k and
+    // routes through the anti-translation (spatial_isym == 1, eta = true).
+    assert(fequal(unitary_member->k_bz.x, 0.25));
+    assert(fequal(tr_member->k_bz.x, 0.75));
+    assert(same_fractional_kpoint(tr_member->k_bz, unitary_member->k_bz * -1.0, 1e-8));
+    assert(unitary_member->spatial_isym == 1);
+    assert(tr_member->spatial_isym == 1);
+    // Two deduplicated actions with keys (1, false) and (1, true).
+    assert(ctx.kspace_actions.size() == 2);
+    for (const auto& action : ctx.kspace_actions)
+    {
+        const auto& spin_op = ctx.spin_operations.at(action.canonical_operation_id);
+        assert(spin_op.spatial_id == 1);
+    }
+}
+
+void test_inversion_member_is_unitary_not_time_reversal()
+{
+    // Simple cubic {E, I} with the default grey table: inversion (unitary) and
+    // time reversal (antiunitary) both map k to -k, but the route must pick the
+    // unitary inversion, which precedes Theta in the table.
+    // NOTE: the grid must contain k with -k =/= k (mod G); on a 2x2x2 grid
+    // every k is self-inverse and the route check would be vacuous, so a 4x1x1
+    // slice is used instead.
+    auto pbc = make_cubic_mesh_pbc({4, 1, 1});
+    const std::vector<SymmetryOperation> ops{
+        make_row_symmetry_operation({1, 0, 0, 0, 1, 0, 0, 0, 1}),
+        make_row_symmetry_operation({-1, 0, 0, 0, -1, 0, 0, 0, -1}),
+    };
+    auto ctx = make_single_atom_cubic_context(pbc, ops);
+    build_ctx_periodic_mappings(ctx, pbc);
+
+    assert(ctx.kstars.size() == 3);
+    bool found_inversion_member = false;
+    for (const auto& star : ctx.kstars)
+    {
+        for (const auto& member : star.members)
+        {
+            assert(!member.time_reversal);
+            if (member.spatial_isym == 1)
+            {
+                found_inversion_member = true;
+                assert(same_fractional_kpoint(member.k_bz, star.k_ibz * -1.0, 1e-8));
+            }
+        }
+    }
+    assert(found_inversion_member);
+}
+
+void test_pure_spin_duplicates_dedup_actions()
+{
+    // Two spin operations sharing the (spatial_id, antiunitary) geometry but
+    // differing in SU(2) must collapse into one geometric action and leave the
+    // stars (member counts = weights) untouched.
+    auto pbc = make_cubic_mesh_pbc({2, 2, 1});
+    const std::vector<SymmetryOperation> ops{
+        make_row_symmetry_operation({1, 0, 0, 0, 1, 0, 0, 0, 1}),
+    };
+
+    auto ctx_single = make_single_atom_cubic_context(pbc, ops);
+    std::vector<SymmetrySpinOperation> single_table(1);
+    single_table[0].spatial_id = 0;
+    ctx_single.set_symmetry_spin_operations(single_table, false);
+    build_ctx_periodic_mappings(ctx_single, pbc);
+
+    auto ctx_dup = make_single_atom_cubic_context(pbc, ops);
+    std::vector<SymmetrySpinOperation> dup_table(2);
+    dup_table[0].spatial_id = 0;
+    dup_table[1].spatial_id = 0;
+    // Pure-spin rotation about z by 2*0.35 rad: same geometry as the identity.
+    const double half_angle = 0.35;
+    dup_table[1].spin_u = {std::complex<double>(std::cos(half_angle), -std::sin(half_angle)),
+                           0.0,
+                           0.0,
+                           std::complex<double>(std::cos(half_angle), std::sin(half_angle))};
+    dup_table[1].spin_source = SymmetrySpinActionSource::ExplicitSpinSpace;
+    ctx_dup.set_symmetry_spin_operations(dup_table, false);
+    build_ctx_periodic_mappings(ctx_dup, pbc);
+
+    // One deduplicated action collecting both spin operations.
+    assert(ctx_dup.kspace_actions.size() == 1);
+    const auto& action = ctx_dup.kspace_actions.front();
+    assert(action.canonical_operation_id == 0);
+    assert(action.equivalent_operation_ids.size() == 2);
+    assert(action.equivalent_operation_ids[0] == 0);
+    assert(action.equivalent_operation_ids[1] == 1);
+    assert(ctx_single.kspace_actions.size() == 1);
+    assert(ctx_single.kspace_actions.front().equivalent_operation_ids.size() == 1);
+
+    // Stars identical to the single-operation case.
+    assert(ctx_dup.kstars.size() == ctx_single.kstars.size());
+    assert(ctx_dup.count_kstar_members() == ctx_single.count_kstar_members());
+    for (std::size_t istar = 0; istar != ctx_dup.kstars.size(); ++istar)
+    {
+        const auto& star_dup = ctx_dup.kstars[istar];
+        const auto& star_single = ctx_single.kstars[istar];
+        assert(same_fractional_kpoint(star_dup.k_ibz, star_single.k_ibz, 1e-8));
+        assert(star_dup.members.size() == star_single.members.size());
+        for (std::size_t imember = 0; imember != star_dup.members.size(); ++imember)
+        {
+            const auto& member_dup = star_dup.members[imember];
+            const auto& member_single = star_single.members[imember];
+            assert(member_dup.spatial_isym == member_single.spatial_isym);
+            assert(member_dup.time_reversal == member_single.time_reversal);
+            assert(same_fractional_kpoint(member_dup.k_bz, member_single.k_bz, 1e-8));
+        }
+    }
+}
+
+void test_grey_expansion_matches_legacy_stars()
+{
+    PeriodicBoundaryData pbc;
+    pbc.set_latvec({0.0, 0.5, 0.5,
+                    0.5, 0.0, 0.5,
+                    0.5, 0.5, 0.0});
+
+    std::vector<double> kvecs;
+    for (const auto& kfrac : build_uniform_kmesh_frac({3, 3, 3}))
+    {
+        const auto kvec = kfrac * pbc.G;
+        kvecs.push_back(kvec.x * TWO_PI);
+        kvecs.push_back(kvec.y * TWO_PI);
+        kvecs.push_back(kvec.z * TWO_PI);
+    }
+    pbc.set_kgrids_kvec(3, 3, 3, kvecs);
+
+    SymmetryContext ops_ctx;
+    set_mgo_primitive_structure(ops_ctx,
+                                {{0, 0}, {1, 1}},
+                                {{0, {0.0, 0.0, 0.0}}, {1, {0.5, 0.5, 0.5}}});
+    add_mgo_fractional_symmetry_operations(ops_ctx);
+    const auto mgo_operations = ops_ctx.rspace_operations;
+
+    const auto build_mgo_ctx = [&mgo_operations]() {
+        SymmetryContext ctx;
+        set_mgo_primitive_structure(ctx,
+                                    {{0, 0}, {1, 1}},
+                                    {{0, {0.0, 0.0, 0.0}}, {1, {0.5, 0.5, 0.5}}});
+        ctx.set_rspace_operations(mgo_operations);
+        return ctx;
+    };
+
+    auto ctx_legacy = build_mgo_ctx();
+    build_ctx_periodic_mappings(ctx_legacy, pbc);
+
+    auto ctx_grey = build_mgo_ctx();
+    std::vector<SymmetrySpinOperation> unitary_table(mgo_operations.size());
+    for (std::size_t isym = 0; isym != mgo_operations.size(); ++isym)
+    {
+        unitary_table[isym].spatial_id = isym;
+    }
+    ctx_grey.set_symmetry_spin_operations(unitary_table, true);
+    build_ctx_periodic_mappings(ctx_grey, pbc);
+
+    // The grey expansion of the all-unitary table reproduces the legacy default
+    // spin table entry by entry.
+    assert(ctx_grey.spin_operations.size() == ctx_legacy.spin_operations.size());
+    for (std::size_t iop = 0; iop != ctx_grey.spin_operations.size(); ++iop)
+    {
+        const auto& expanded = ctx_grey.spin_operations[iop];
+        const auto& legacy = ctx_legacy.spin_operations[iop];
+        assert(expanded.spatial_id == legacy.spatial_id);
+        assert(expanded.antiunitary == legacy.antiunitary);
+        assert(expanded.spin_u == legacy.spin_u);
+        assert(expanded.spin_source == legacy.spin_source);
+    }
+
+    // K-stars and deduplicated actions are identical, member by member.
+    assert(ctx_grey.kstars.size() == ctx_legacy.kstars.size());
+    for (std::size_t istar = 0; istar != ctx_grey.kstars.size(); ++istar)
+    {
+        const auto& star_grey = ctx_grey.kstars[istar];
+        const auto& star_legacy = ctx_legacy.kstars[istar];
+        assert(same_fractional_kpoint(star_grey.k_ibz, star_legacy.k_ibz, 1e-8));
+        assert(star_grey.members.size() == star_legacy.members.size());
+        for (std::size_t imember = 0; imember != star_grey.members.size(); ++imember)
+        {
+            const auto& member_grey = star_grey.members[imember];
+            const auto& member_legacy = star_legacy.members[imember];
+            assert(member_grey.spatial_isym == member_legacy.spatial_isym);
+            assert(member_grey.time_reversal == member_legacy.time_reversal);
+            assert(member_grey.action_id == member_legacy.action_id);
+            assert(same_fractional_kpoint(member_grey.k_bz, member_legacy.k_bz, 1e-8));
+        }
+    }
+    assert(ctx_grey.kspace_actions.size() == ctx_legacy.kspace_actions.size());
+    for (std::size_t iaction = 0; iaction != ctx_grey.kspace_actions.size(); ++iaction)
+    {
+        const auto& action_grey = ctx_grey.kspace_actions[iaction];
+        const auto& action_legacy = ctx_legacy.kspace_actions[iaction];
+        assert(action_grey.canonical_operation_id == action_legacy.canonical_operation_id);
+        assert(action_grey.equivalent_operation_ids == action_legacy.equivalent_operation_ids);
+    }
+}
+
+void test_explicit_operation_table_builds_offdiagonal_qstar()
+{
+    // Section 17 resolution 2 verification case: the q view derives from the
+    // same explicit operation table as the k-stars. Non-high-symmetry
+    // q = (1/4, 1/2, 0) on the square-lattice 4x4x1 grid with the explicit
+    // unitary-only table {E, mirror_x}: its q-star is exactly
+    // {q, mirror_x q} with mirror_x q = (3/4, 1/2, 0) (mod G).
+    auto pbc = make_cubic_mesh_pbc({4, 4, 1});
+    const std::vector<SymmetryOperation> ops{
+        make_row_symmetry_operation({1, 0, 0, 0, 1, 0, 0, 0, 1}),
+        make_row_symmetry_operation({-1, 0, 0, 0, 1, 0, 0, 0, 1}),
+    };
+    auto ctx = make_single_atom_cubic_context(pbc, ops);
+    std::vector<SymmetrySpinOperation> unitary_table(2);
+    unitary_table[0].spatial_id = 0;
+    unitary_table[1].spatial_id = 1;
+    ctx.set_symmetry_spin_operations(unitary_table, false);
+    build_ctx_periodic_mappings(ctx, pbc);
+
+    const auto view = build_symmetry_qpoint_view(ctx, pbc, true);
+    assert(view.restore_mode == SymmetryQPointRestoreMode::FULL_CRYSTAL);
+    assert(view.representatives.size() == 12);
+    std::size_t n_members = 0;
+    for (const auto& q : view.representatives)
+    {
+        n_members += view.members.at(q).size();
+    }
+    assert(n_members == 16);
+
+    const Vector3_Order<double> q_target{Vector3_Order<double>{0.25, 0.5, 0.0} * pbc.G};
+    const Vector3_Order<double> q_mirror{Vector3_Order<double>{0.75, 0.5, 0.0} * pbc.G};
+    bool found = false;
+    for (const auto& q_rep : view.representatives)
+    {
+        const auto& members = view.members.at(q_rep);
+        bool has_target = false;
+        for (const auto& member : members)
+        {
+            if ((member - q_target).norm() < 1e-8)
+            {
+                has_target = true;
+            }
+        }
+        if (!has_target)
+        {
+            continue;
+        }
+        found = true;
+        assert(members.size() == 2);
+        bool has_mirror = false;
+        for (const auto& member : members)
+        {
+            if ((member - q_mirror).norm() < 1e-8)
+            {
+                has_mirror = true;
+            }
+        }
+        assert(has_mirror);
+    }
+    assert(found);
+}
+
 int main()
 {
     test_symmetry_context_saves_fractional_row_operations();
@@ -1756,4 +2143,10 @@ int main()
     test_kstar_member_action_ids_resolve();
     test_spin_operation_validation_rejects_bad_input();
     test_spin_u_equal_pm_invariance();
+    test_explicit_unitary_only_list_widens_kstars();
+    test_antiunitary_translation_k_action_ignores_translation();
+    test_inversion_member_is_unitary_not_time_reversal();
+    test_pure_spin_duplicates_dedup_actions();
+    test_grey_expansion_matches_legacy_stars();
+    test_explicit_operation_table_builds_offdiagonal_qstar();
 }
