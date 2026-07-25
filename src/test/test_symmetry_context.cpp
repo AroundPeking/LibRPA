@@ -9,6 +9,7 @@
 #include <cmath>
 #include <complex>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -1514,6 +1515,211 @@ void test_bn_shrink_irreducible_sector_can_be_generated_from_symmetry()
 
 } // namespace
 
+void test_spin_operations_identity_translation()
+{
+    SymmetryContext ctx;
+    std::vector<SymmetryOperation> operations;
+    operations.push_back(make_row_symmetry_operation({1, 0, 0, 0, 1, 0, 0, 0, 1}));
+    operations.push_back(make_row_symmetry_operation({0, -1, 0, 1, 0, 0, 0, 0, 1}));
+    operations.push_back(make_row_symmetry_operation({-1, 0, 0, 0, -1, 0, 0, 0, -1}));
+    ctx.set_rspace_operations(operations);
+
+    assert(ctx.operation_pool.size() == 3);
+    assert(ctx.spin_operations.size() == 6);
+    const std::array<std::complex<double>, 4> identity_u{1.0, 0.0, 0.0, 1.0};
+    for (std::size_t isym = 0; isym != 3; ++isym)
+    {
+        const auto& unitary_op = ctx.spin_operations[isym];
+        assert(unitary_op.spatial_id == isym);
+        assert(!unitary_op.antiunitary);
+        assert(unitary_op.spin_source == SymmetrySpinActionSource::Identity);
+        assert(unitary_op.spin_u == identity_u);
+
+        const auto& antiunitary_op = ctx.spin_operations[3 + isym];
+        assert(antiunitary_op.spatial_id == isym);
+        assert(antiunitary_op.antiunitary);
+        assert(antiunitary_op.spin_source == SymmetrySpinActionSource::Identity);
+        assert(antiunitary_op.spin_u == identity_u);
+    }
+
+    // reciprocal_rotation matches the dual rotation used by
+    // apply_space_group_rotation_to_kpoint; the atom-map cache slots stay empty.
+    const Vector3_Order<double> kpoint{0.2, 0.3, 0.4};
+    for (std::size_t isym = 0; isym != 3; ++isym)
+    {
+        const auto expected =
+            apply_space_group_rotation_to_kpoint(ctx.rspace_operations[isym], kpoint);
+        const auto actual =
+            multiply_row_vector(kpoint, ctx.operation_pool[isym].reciprocal_rotation);
+        assert(fequal(actual.x, expected.x));
+        assert(fequal(actual.y, expected.y));
+        assert(fequal(actual.z, expected.z));
+        assert(ctx.operation_pool[isym].atom_map.empty());
+        assert(ctx.operation_pool[isym].return_lattice.empty());
+    }
+
+    // The generated metadata passes its own validation and the rebuild is idempotent.
+    validate_symmetry_spin_operations(ctx.spin_operations, ctx.operation_pool.size());
+    ctx.ensure_operation_metadata();
+    assert(ctx.operation_pool.size() == 3);
+    assert(ctx.spin_operations.size() == 6);
+}
+
+void test_kstar_member_action_ids_resolve()
+{
+    PeriodicBoundaryData pbc;
+    pbc.set_latvec({0.0, 0.5, 0.5,
+                    0.5, 0.0, 0.5,
+                    0.5, 0.5, 0.0});
+
+    std::vector<double> kvecs;
+    for (const auto& kfrac : build_uniform_kmesh_frac({3, 3, 3}))
+    {
+        const auto kvec = kfrac * pbc.G;
+        kvecs.push_back(kvec.x * TWO_PI);
+        kvecs.push_back(kvec.y * TWO_PI);
+        kvecs.push_back(kvec.z * TWO_PI);
+    }
+    pbc.set_kgrids_kvec(3, 3, 3, kvecs);
+
+    SymmetryContext ctx;
+    set_mgo_primitive_structure(ctx,
+                                {{0, 0}, {1, 1}},
+                                {{0, {0.0, 0.0, 0.0}}, {1, {0.5, 0.5, 0.5}}});
+    // Bypass set_rspace_operations on purpose: the operation metadata must be
+    // rebuilt lazily at the start of the k-star generation.
+    add_mgo_fractional_symmetry_operations(ctx);
+    ctx.set_available();
+    ctx.build_periodic_mappings(pbc, pbc.Rlist);
+
+    assert(ctx.rspace_operations.size() == 48);
+    assert(ctx.operation_pool.size() == 48);
+    assert(ctx.spin_operations.size() == 96);
+    assert(ctx.kstars.size() == 4);
+
+    // Action keys are unique and each action references only its canonical operation.
+    std::set<std::size_t> canonical_ids;
+    for (const auto& action : ctx.kspace_actions)
+    {
+        assert(action.canonical_operation_id < ctx.spin_operations.size());
+        assert(action.equivalent_operation_ids.size() == 1);
+        assert(action.equivalent_operation_ids[0] == action.canonical_operation_id);
+        canonical_ids.insert(action.canonical_operation_id);
+    }
+    assert(canonical_ids.size() == ctx.kspace_actions.size());
+
+    // Every star member resolves to the spin operation matching its
+    // (spatial_isym, time_reversal) key.
+    for (const auto& star : ctx.kstars)
+    {
+        for (const auto& member : star.members)
+        {
+            const auto& action = ctx.kspace_actions.at(member.action_id);
+            const auto& spin_operation =
+                ctx.spin_operations.at(action.canonical_operation_id);
+            assert(static_cast<int>(spin_operation.spatial_id) == member.spatial_isym);
+            assert(spin_operation.antiunitary == member.time_reversal);
+        }
+    }
+
+    // Same invariant for the full-kpoint member table, using a fixture where it
+    // is populated; each entry must copy the action of its star member.
+    PeriodicBoundaryData pbc_line;
+    pbc_line.set_latvec({2.0, 0.0, 0.0,
+                         0.0, 1.0, 0.0,
+                         0.0, 0.0, 1.0});
+    const std::vector<double> kvecs_ibz{
+        0.0, 0.0, 0.0,
+        librpa_int::TWO_PI / 6.0, 0.0, 0.0,
+    };
+    const std::vector<std::vector<Vector3_Order<double>>> full_kstars{
+        {{0.0, 0.0, 0.0}},
+        {{1.0 / 6.0, 0.0, 0.0}, {-1.0 / 6.0, 0.0, 0.0}},
+    };
+    pbc_line.set_irreducible_kgrids_kvec(3, 1, 1, kvecs_ibz, full_kstars);
+
+    SymmetryContext ctx_line;
+    ctx_line.set_crystal_structure(pbc_line.latvec,
+                                   pbc_line.G,
+                                   {{0, 0}},
+                                   {{0, {0.0, 0.0, 0.0}}});
+    ctx_line.set_rspace_operations({SpaceGroupSymOp::IDENTITY});
+    ctx_line.set_available();
+    ctx_line.build_periodic_mappings(pbc_line, pbc_line.Rlist);
+
+    assert(ctx_line.full_kpoint_members.size() == 3);
+    assert(!ctx_line.kspace_actions.empty());
+    for (const auto& entry : ctx_line.full_kpoint_members)
+    {
+        const auto& action = ctx_line.kspace_actions.at(entry.action_id);
+        const auto& spin_operation =
+            ctx_line.spin_operations.at(action.canonical_operation_id);
+        assert(static_cast<int>(spin_operation.spatial_id) == entry.spatial_isym);
+        assert(spin_operation.antiunitary == entry.time_reversal);
+        const auto& member =
+            ctx_line.kstars.at(static_cast<std::size_t>(entry.star_list_index))
+                .members.at(static_cast<std::size_t>(entry.member_index));
+        assert(entry.action_id == member.action_id);
+    }
+}
+
+void test_spin_operation_validation_rejects_bad_input()
+{
+    SymmetrySpinOperation bad_spatial_id;
+    bad_spatial_id.spatial_id = 3;
+    bool caught = false;
+    try
+    {
+        validate_symmetry_spin_operations({bad_spatial_id}, 1);
+    }
+    catch (const std::invalid_argument&)
+    {
+        caught = true;
+    }
+    if (!caught)
+    {
+        throw std::runtime_error(
+            "validate_symmetry_spin_operations accepted an out-of-range spatial_id");
+    }
+
+    SymmetrySpinOperation non_unitary;
+    non_unitary.spin_u = {2.0, 0.0, 0.0, 1.0};
+    caught = false;
+    try
+    {
+        validate_symmetry_spin_operations({non_unitary}, 1);
+    }
+    catch (const std::invalid_argument&)
+    {
+        caught = true;
+    }
+    if (!caught)
+    {
+        throw std::runtime_error(
+            "validate_symmetry_spin_operations accepted a non-unitary spin_u");
+    }
+}
+
+void test_spin_u_equal_pm_invariance()
+{
+    const double half_angle = 0.35;
+    const std::complex<double> phase(std::cos(half_angle), std::sin(half_angle));
+    const std::array<std::complex<double>, 4> u_z{std::conj(phase), 0.0, 0.0, phase};
+    std::array<std::complex<double>, 4> minus_u_z;
+    for (std::size_t i = 0; i != 4; ++i)
+    {
+        minus_u_z[i] = -u_z[i];
+    }
+    // Rotation about a different axis by the same angle.
+    const std::array<std::complex<double>, 4> u_x{
+        std::cos(half_angle), std::complex<double>(0.0, -std::sin(half_angle)),
+        std::complex<double>(0.0, -std::sin(half_angle)), std::cos(half_angle)};
+
+    assert(symmetry_spin_u_equal(u_z, u_z));
+    assert(symmetry_spin_u_equal(u_z, minus_u_z));
+    assert(!symmetry_spin_u_equal(u_z, u_x));
+}
+
 int main()
 {
     test_symmetry_context_saves_fractional_row_operations();
@@ -1546,4 +1752,8 @@ int main()
     test_rspace_block_restore_uses_stored_operation_rotation_convention();
     test_mgo_k333_irreducible_sector_matches_both();
     test_bn_shrink_irreducible_sector_can_be_generated_from_symmetry();
+    test_spin_operations_identity_translation();
+    test_kstar_member_action_ids_resolve();
+    test_spin_operation_validation_rejects_bad_input();
+    test_spin_u_equal_pm_invariance();
 }

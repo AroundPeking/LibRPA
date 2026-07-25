@@ -220,6 +220,36 @@ struct KStarOperations
     std::vector<KStarOperationInfo> info;
 };
 
+/*!
+ * @brief Find or append the geometric action for a (spatial_isym, time_reversal) key.
+ *
+ * The canonical spin-operation id follows the grey-group layout of
+ * SymmetryContext::spin_operations: unitary key (i, false) maps to i and
+ * antiunitary key (i, true) maps to N + i, with N the spatial operation count.
+ * Actions are created in first-appearance order; equivalent_operation_ids only
+ * holds the canonical operation until real equivalence sets are computed.
+ */
+static std::size_t find_or_register_kspace_action(SymmetryContext &ctx,
+                                                  const int spatial_isym,
+                                                  const bool time_reversal)
+{
+    const std::size_t canonical_id =
+        static_cast<std::size_t>(spatial_isym)
+        + (time_reversal ? ctx.rspace_operations.size() : 0);
+    for (std::size_t action_id = 0; action_id != ctx.kspace_actions.size(); ++action_id)
+    {
+        if (ctx.kspace_actions[action_id].canonical_operation_id == canonical_id)
+        {
+            return action_id;
+        }
+    }
+    SymmetryGeometricAction action;
+    action.canonical_operation_id = canonical_id;
+    action.equivalent_operation_ids.push_back(canonical_id);
+    ctx.kspace_actions.push_back(std::move(action));
+    return ctx.kspace_actions.size() - 1;
+}
+
 static KStarOperations build_kstar_operations_with_time_reversal(
     const SpaceGroupSymOps &operations)
 {
@@ -252,6 +282,7 @@ static void build_symmetry_pbc_index_kstars(
 
     ctx.kstars.clear();
     ctx.kstar_member_fold_G.clear();
+    ctx.kspace_actions.clear();
     ctx.kstars.reserve(kpoints.size());
     for (std::size_t ik = 0; ik != kpoints.size(); ++ik)
     {
@@ -259,6 +290,10 @@ static void build_symmetry_pbc_index_kstars(
         member.spatial_isym = identity_isym;
         member.time_reversal = false;
         member.k_bz = kpoints[ik];
+        if (identity_isym >= 0)
+        {
+            member.action_id = find_or_register_kspace_action(ctx, identity_isym, false);
+        }
 
         SymmetryKStar star;
         star.star_index = static_cast<int>(ik);
@@ -352,6 +387,7 @@ static void store_generated_symmetry_kstars(
 
     ctx.kstars.clear();
     ctx.kstar_member_fold_G.clear();
+    ctx.kspace_actions.clear();
     ctx.kstars.reserve(generated_stars.size());
     const auto inverse_map = build_rspace_inverse_map(ctx);
 
@@ -376,6 +412,8 @@ static void store_generated_symmetry_kstars(
                 inverse_map.at(static_cast<std::size_t>(route.spatial_isym));
             member.time_reversal = route.time_reversal;
             member.k_bz = generated_star.members[imember].kpoint;
+            member.action_id = find_or_register_kspace_action(
+                ctx, member.spatial_isym, member.time_reversal);
             auto rotated_member =
                 apply_space_group_rotation_to_kpoint(
                     ctx.rspace_operations.at(static_cast<std::size_t>(member.spatial_isym)),
@@ -529,6 +567,9 @@ void SymmetryContext::clear()
     irreducible_sector.clear();
     rspace_sector_stars.clear();
     rspace_operations.clear();
+    operation_pool.clear();
+    spin_operations.clear();
+    kspace_actions.clear();
     rsh_rotations.clear();
     kstars.clear();
     kstar_grid_mapping.clear();
@@ -562,11 +603,134 @@ void SymmetryContext::set_rspace_operations(std::vector<SymmetryOperation> opera
 {
     rspace_operations.clear();
     rsh_rotations.clear();
+    // Drop the cached metadata so ensure_operation_metadata() rebuilds it from
+    // the new operations even when their count matches the previous one.
+    operation_pool.clear();
+    spin_operations.clear();
     rspace_operations.reserve(operations.size());
     for (auto& operation : operations)
     {
         add_rspace_operation(std::move(operation));
     }
+    ensure_operation_metadata();
+}
+
+void SymmetryContext::ensure_operation_metadata()
+{
+    if (operation_pool.size() == rspace_operations.size()
+        && spin_operations.size() == 2 * rspace_operations.size())
+    {
+        return;
+    }
+    operation_pool.clear();
+    spin_operations.clear();
+    operation_pool.reserve(rspace_operations.size());
+    spin_operations.reserve(2 * rspace_operations.size());
+    for (const auto& operation : rspace_operations)
+    {
+        SymmetrySpatialOperationRecord record;
+        record.spatial = operation;
+        // Dual rotation applied to fractional k/q points, matching
+        // apply_space_group_rotation_to_kpoint.
+        record.reciprocal_rotation = operation.rotation.Inverse().Transpose();
+        operation_pool.push_back(std::move(record));
+    }
+    // Identity spin translation = grey-group expansion: unitary copies first,
+    // antiunitary copies second (ABACUS isym < nrotk / j + nrotk convention).
+    for (std::size_t isym = 0; isym != rspace_operations.size(); ++isym)
+    {
+        SymmetrySpinOperation spin_operation;
+        spin_operation.spatial_id = isym;
+        spin_operations.push_back(spin_operation);
+    }
+    for (std::size_t isym = 0; isym != rspace_operations.size(); ++isym)
+    {
+        SymmetrySpinOperation spin_operation;
+        spin_operation.spatial_id = isym;
+        spin_operation.antiunitary = true;
+        spin_operations.push_back(spin_operation);
+    }
+}
+
+bool symmetry_spin_u_equal(const std::array<std::complex<double>, 4>& u1,
+                           const std::array<std::complex<double>, 4>& u2,
+                           const double tol)
+{
+    for (std::size_t i = 0; i != 4; ++i)
+    {
+        if (std::min(std::abs(u1[i] - u2[i]), std::abs(u1[i] + u2[i])) >= tol)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void validate_symmetry_spin_operations(
+    const std::vector<SymmetrySpinOperation>& spin_operations,
+    const std::size_t spatial_operation_count)
+{
+    constexpr double unitary_tol = 1e-10;
+    for (std::size_t iop = 0; iop != spin_operations.size(); ++iop)
+    {
+        const auto& spin_operation = spin_operations[iop];
+        if (spin_operation.spatial_id >= spatial_operation_count)
+        {
+            throw LIBRPA_INVALID_ARGUMENT(
+                "spin operation " + std::to_string(iop) + " has spatial_id "
+                + std::to_string(spin_operation.spatial_id)
+                + " outside the operation pool of size "
+                + std::to_string(spatial_operation_count));
+        }
+        const auto& u = spin_operation.spin_u;
+        // U is stored row-major as {u00, u01, u10, u11}.
+        const std::array<std::complex<double>, 4> u_dagger_u{
+            std::conj(u[0]) * u[0] + std::conj(u[2]) * u[2],
+            std::conj(u[0]) * u[1] + std::conj(u[2]) * u[3],
+            std::conj(u[1]) * u[0] + std::conj(u[3]) * u[2],
+            std::conj(u[1]) * u[1] + std::conj(u[3]) * u[3]};
+        const std::array<std::complex<double>, 4> identity{1.0, 0.0, 0.0, 1.0};
+        for (std::size_t i = 0; i != 4; ++i)
+        {
+            if (std::abs(u_dagger_u[i] - identity[i]) >= unitary_tol)
+            {
+                throw LIBRPA_INVALID_ARGUMENT(
+                    "spin operation " + std::to_string(iop)
+                    + " has a non-unitary spin_u (|U^dagger U - I| exceeds 1e-10)");
+            }
+        }
+    }
+}
+
+static const char* symmetry_spin_action_source_name(const SymmetrySpinActionSource source)
+{
+    switch (source)
+    {
+        case SymmetrySpinActionSource::Identity:
+            return "Identity";
+        case SymmetrySpinActionSource::ExplicitSpinSpace:
+            return "ExplicitSpinSpace";
+        case SymmetrySpinActionSource::DerivedFromSpatialSOC:
+            return "DerivedFromSpatialSOC";
+    }
+    return "Unknown";
+}
+
+std::string format_symmetry_operations(
+    const std::vector<SymmetrySpinOperation>& spin_operations)
+{
+    std::ostringstream out;
+    out << "symmetry spin operations (" << spin_operations.size() << "):\n";
+    for (std::size_t iop = 0; iop != spin_operations.size(); ++iop)
+    {
+        const auto& spin_operation = spin_operations[iop];
+        out << "  op " << iop
+            << ": spatial_id=" << spin_operation.spatial_id
+            << " antiunitary=" << (spin_operation.antiunitary ? "true" : "false")
+            << " source=" << symmetry_spin_action_source_name(spin_operation.spin_source)
+            << "\n";
+    }
+    return out.str();
 }
 
 void SymmetryContext::set_crystal_structure(const Matrix3& latvec,
@@ -591,6 +755,7 @@ void SymmetryContext::set_crystal_structure(const Matrix3& latvec,
     rsh_rotations.clear();
     kspace_return_lattice.clear();
     kstar_member_fold_G.clear();
+    kspace_actions.clear();
 }
 
 void SymmetryContext::build_periodic_mappings(const PeriodicBoundaryData& pbc,
@@ -603,6 +768,7 @@ void SymmetryContext::build_periodic_mappings(const PeriodicBoundaryData& pbc,
     full_kpoint_members.clear();
     kspace_return_lattice.clear();
     kstar_member_fold_G.clear();
+    kspace_actions.clear();
 
     generate_irreducible_sector(Rlist);
     generate_rspace_sector_stars(pbc.period, Rlist);
@@ -633,6 +799,7 @@ void SymmetryContext::generate_rspace_sector_stars(
 
 void SymmetryContext::generate_kstars(const PeriodicBoundaryData &pbc)
 {
+    ensure_operation_metadata();
     const auto full_kpoints = full_kpoints_frac_from_pbc(pbc);
     const auto coul_kpoints = coul_kpoints_frac_from_pbc(pbc);
     const bool scf_kpoints_cover_full_grid =
@@ -1168,6 +1335,7 @@ void SymmetryContext::generate_kstar_grid_mapping(const PeriodicBoundaryData& pb
 void SymmetryContext::generate_full_kpoint_members(
     const std::vector<Vector3_Order<double>>& kfrac_list)
 {
+    ensure_operation_metadata();
     full_kpoint_members.clear();
     std::vector<SymmetryFullKpointMemberEntry> members;
     if (kstars.empty())
@@ -1190,7 +1358,8 @@ void SymmetryContext::generate_full_kpoint_members(
         {
             const auto& member = star.members[static_cast<std::size_t>(imember)];
             members.push_back({ik_ibz, matched_star_index, imember,
-                               member.spatial_isym, member.time_reversal, member.k_bz});
+                               member.spatial_isym, member.time_reversal, member.k_bz,
+                               member.action_id});
         }
     }
 
