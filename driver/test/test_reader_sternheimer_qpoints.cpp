@@ -93,6 +93,65 @@ struct CoulombBlock
     std::complex<double> value;
 };
 
+struct DenseCoulombBlock
+{
+    std::int32_t pair_index;
+    std::vector<std::complex<double>> values;
+};
+
+void write_dense_coulomb_v1_shard(const std::filesystem::path &path, const int iq,
+                                  const std::vector<std::int32_t> &atom_naux,
+                                  const std::int32_t value_flag,
+                                  const std::vector<DenseCoulombBlock> &blocks)
+{
+    constexpr std::int32_t marker = -20129433;
+    const auto natoms = static_cast<std::int32_t>(atom_naux.size());
+    std::int32_t naux = 0;
+    for (const auto atom_size : atom_naux)
+    {
+        naux += atom_size;
+    }
+    const auto nblocks = static_cast<std::int32_t>(blocks.size());
+    const auto value_bytes = value_flag == 1 ? sizeof(std::complex<double>) : sizeof(double);
+    std::int64_t payload_offset = 6 * sizeof(std::int32_t) + natoms * sizeof(std::int32_t) +
+                                  nblocks * (sizeof(std::int32_t) + sizeof(std::int64_t));
+
+    std::ofstream output(path, std::ios::binary);
+    write_binary(output, marker);
+    write_binary(output, static_cast<std::int32_t>(iq));
+    write_binary(output, naux);
+    write_binary(output, value_flag);
+    write_binary(output, natoms);
+    write_binary(output, nblocks);
+    for (const auto atom_size : atom_naux)
+    {
+        write_binary(output, atom_size);
+    }
+    for (const auto &block : blocks)
+    {
+        write_binary(output, block.pair_index);
+        write_binary(output, payload_offset);
+        payload_offset += static_cast<std::int64_t>(block.values.size() * value_bytes);
+    }
+    for (const auto &block : blocks)
+    {
+        for (const auto value : block.values)
+        {
+            if (value_flag == 1)
+            {
+                write_binary(output, value);
+            }
+            else
+            {
+                require_condition(std::abs(value.imag()) < 1.0e-15,
+                                  "real fixture has an imaginary component");
+                write_binary(output, value.real());
+            }
+        }
+    }
+    require_condition(output.good(), "failed to write dense Coulomb fixture");
+}
+
 void write_two_atom_coulomb_v1_shard(const std::filesystem::path &path, const int iq,
                                      const std::vector<CoulombBlock> &blocks)
 {
@@ -272,6 +331,54 @@ void test_reads_single_coulomb_v1_file()
                       "single-file matrix value");
 }
 
+void test_reads_rectangular_complex_atom_blocks()
+{
+    TempDirectory temp;
+    write_dense_coulomb_v1_shard(temp.path / "v1_coulomb_full_iq_2_rank0.dat", 2, {2, 1}, 1,
+                                 {{0, {{1.0, 0.0}, {0.25, 0.5}, {0.25, -0.5}, {2.0, 0.0}}},
+                                  {1, {{0.75, 0.125}, {-0.5, 0.25}}},
+                                  {2, {{3.0, 0.0}}}});
+
+    const auto matrix =
+        driver::read_coulomb_v1_full_matrix(temp.path.string(), "v1_coulomb_full_iq_", 2);
+    require_condition(matrix.nr == 3 && matrix.nc == 3, "rectangular-block matrix dimensions");
+    require_condition(std::abs(matrix(0, 0) - std::complex<double>(1.0, 0.0)) < 1.0e-15,
+                      "rectangular-block first diagonal");
+    require_condition(std::abs(matrix(0, 1) - std::complex<double>(0.25, 0.5)) < 1.0e-15,
+                      "rectangular-block intra-atom upper element");
+    require_condition(std::abs(matrix(1, 0) - std::complex<double>(0.25, -0.5)) < 1.0e-15,
+                      "rectangular-block intra-atom lower element");
+    require_condition(std::abs(matrix(0, 2) - std::complex<double>(0.75, 0.125)) < 1.0e-15,
+                      "rectangular-block first inter-atom element");
+    require_condition(std::abs(matrix(1, 2) - std::complex<double>(-0.5, 0.25)) < 1.0e-15,
+                      "rectangular-block second inter-atom element");
+    require_condition(std::abs(matrix(2, 0) - std::complex<double>(0.75, -0.125)) < 1.0e-15,
+                      "rectangular-block conjugate first element");
+    require_condition(std::abs(matrix(2, 1) - std::complex<double>(-0.5, -0.25)) < 1.0e-15,
+                      "rectangular-block conjugate second element");
+    require_condition(std::abs(matrix(2, 2) - std::complex<double>(3.0, 0.0)) < 1.0e-15,
+                      "rectangular-block final diagonal");
+}
+
+void test_reads_real_coulomb_payload()
+{
+    TempDirectory temp;
+    write_dense_coulomb_v1_shard(temp.path / "v1_coulomb_full_iq_2_rank0.dat", 2, {1, 1}, 0,
+                                 {{0, {{2.0, 0.0}}}, {1, {{-0.75, 0.0}}}, {2, {{4.0, 0.0}}}});
+
+    const auto matrix =
+        driver::read_coulomb_v1_full_matrix(temp.path.string(), "v1_coulomb_full_iq_", 2);
+    require_condition(matrix.nr == 2 && matrix.nc == 2, "real matrix dimensions");
+    require_condition(std::abs(matrix(0, 0) - std::complex<double>(2.0, 0.0)) < 1.0e-15,
+                      "real matrix first diagonal");
+    require_condition(std::abs(matrix(0, 1) - std::complex<double>(-0.75, 0.0)) < 1.0e-15,
+                      "real matrix upper off-diagonal");
+    require_condition(std::abs(matrix(1, 0) - std::complex<double>(-0.75, 0.0)) < 1.0e-15,
+                      "real matrix lower off-diagonal");
+    require_condition(std::abs(matrix(1, 1) - std::complex<double>(4.0, 0.0)) < 1.0e-15,
+                      "real matrix second diagonal");
+}
+
 void test_rejects_duplicate_coulomb_block_across_rank_shards()
 {
     TempDirectory temp;
@@ -416,6 +523,8 @@ int main()
     test_requires_gamma_manifest_row_when_gamma_is_excluded();
     test_merges_coulomb_atom_pair_blocks_across_rank_shards();
     test_reads_single_coulomb_v1_file();
+    test_reads_rectangular_complex_atom_blocks();
+    test_reads_real_coulomb_payload();
     test_rejects_duplicate_coulomb_block_across_rank_shards();
     test_rejects_missing_coulomb_block_across_rank_shards();
     test_rejects_invalid_coulomb_payload_offset();

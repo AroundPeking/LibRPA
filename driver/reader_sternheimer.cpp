@@ -71,6 +71,33 @@ std::size_t checked_matrix_size(const int nrow, const int ncol, const std::strin
     return rows * cols;
 }
 
+std::size_t checked_upper_pair_count(const int natoms, const std::string &context)
+{
+    if (natoms <= 0)
+    {
+        throw std::runtime_error(context + ": non-positive atom count");
+    }
+    const auto n = static_cast<std::size_t>(natoms);
+    if (n + 1 > std::numeric_limits<std::size_t>::max() / n)
+    {
+        throw std::runtime_error(context + ": atom-pair count overflows size_t");
+    }
+    return n * (n + 1) / 2;
+}
+
+std::streamoff checked_payload_size(const BlockedMatrixFile &file, const std::size_t nvalues)
+{
+    const auto value_bytes =
+        file.value_flag == kComplexFlag ? sizeof(std::complex<double>) : sizeof(double);
+    const auto max_bytes =
+        static_cast<unsigned long long>(std::numeric_limits<std::streamoff>::max());
+    if (static_cast<unsigned long long>(nvalues) > max_bytes / value_bytes)
+    {
+        throw std::runtime_error(file.path + ": v1 payload size overflows streamoff");
+    }
+    return static_cast<std::streamoff>(nvalues * value_bytes);
+}
+
 std::size_t upper_pair_index(const std::size_t iatom, const std::size_t jatom,
                              const std::size_t natoms)
 {
@@ -85,7 +112,7 @@ std::vector<std::pair<std::size_t, std::size_t>> make_atom_pairs(const int natom
 {
     std::vector<std::pair<std::size_t, std::size_t>> pairs;
     const auto n = static_cast<std::size_t>(natoms);
-    pairs.reserve(n * (n + 1) / 2);
+    pairs.reserve(checked_upper_pair_count(natoms, "v1 matrix"));
     for (std::size_t iatom = 0; iatom != n; ++iatom)
     {
         for (std::size_t jatom = iatom; jatom != n; ++jatom)
@@ -163,7 +190,7 @@ void read_atom_sizes_and_blocks(BlockedMatrixFile &file, std::ifstream &input)
     }
 
     file.atom_naux.resize(static_cast<std::size_t>(file.natoms));
-    int naux_sum = 0;
+    std::int64_t naux_sum = 0;
     for (int &atom_aux : file.atom_naux)
     {
         atom_aux = read_scalar<std::int32_t>(input, file.path);
@@ -178,8 +205,7 @@ void read_atom_sizes_and_blocks(BlockedMatrixFile &file, std::ifstream &input)
         throw std::runtime_error(file.path + ": atom_naux does not sum to naux");
     }
 
-    const auto npairs =
-        static_cast<std::size_t>(file.natoms) * (static_cast<std::size_t>(file.natoms) + 1) / 2;
+    const auto npairs = checked_upper_pair_count(file.natoms, file.path);
     if (static_cast<std::size_t>(file.nblocks) > npairs)
     {
         throw std::runtime_error(file.path + ": block count exceeds atom-pair count");
@@ -199,6 +225,55 @@ void read_atom_sizes_and_blocks(BlockedMatrixFile &file, std::ifstream &input)
             throw std::runtime_error(file.path + ": duplicate atom-pair block");
         }
         seen[static_cast<std::size_t>(block.pair_index)] = true;
+    }
+
+    const auto table_end_position = input.tellg();
+    if (table_end_position == std::streampos(-1))
+    {
+        throw std::runtime_error(file.path + ": failed to determine v1 block-table end");
+    }
+    const auto table_end = static_cast<std::streamoff>(table_end_position);
+    input.seekg(0, std::ios::end);
+    const auto file_end_position = input.tellg();
+    if (file_end_position == std::streampos(-1))
+    {
+        throw std::runtime_error(file.path + ": failed to determine v1 file size");
+    }
+    const auto file_size = static_cast<std::streamoff>(file_end_position);
+
+    const auto atom_pairs = make_atom_pairs(file.natoms);
+    const auto max_streamoff = std::numeric_limits<std::streamoff>::max();
+    std::vector<std::pair<std::streamoff, std::streamoff>> payload_ranges;
+    payload_ranges.reserve(file.blocks.size());
+    for (const BlockRecord &block : file.blocks)
+    {
+        if (block.offset < 0 || static_cast<unsigned long long>(block.offset) >
+                                    static_cast<unsigned long long>(max_streamoff))
+        {
+            throw std::runtime_error(file.path + ": invalid v1 byte offset");
+        }
+        const auto [iatom, jatom] = atom_pairs[static_cast<std::size_t>(block.pair_index)];
+        const auto nvalues =
+            checked_matrix_size(file.atom_naux[iatom], file.atom_naux[jatom], file.path);
+        const auto payload_size = checked_payload_size(file, nvalues);
+        const auto payload_offset = static_cast<std::streamoff>(block.offset);
+        if (payload_offset < table_end || payload_offset > file_size ||
+            payload_size > file_size - payload_offset)
+        {
+            std::ostringstream message;
+            message << file.path << ": invalid v1 byte offset " << block.offset
+                    << " for atom-pair index " << block.pair_index;
+            throw std::runtime_error(message.str());
+        }
+        payload_ranges.emplace_back(payload_offset, payload_offset + payload_size);
+    }
+    std::sort(payload_ranges.begin(), payload_ranges.end());
+    for (std::size_t index = 1; index != payload_ranges.size(); ++index)
+    {
+        if (payload_ranges[index].first < payload_ranges[index - 1].second)
+        {
+            throw std::runtime_error(file.path + ": overlapping v1 atom-pair blocks");
+        }
     }
 }
 
@@ -317,8 +392,7 @@ std::vector<BlockedMatrixFile> find_coulomb_files(const std::string &dir_path,
     std::sort(matches.begin(), matches.end(),
               [](const auto &lhs, const auto &rhs) { return lhs.path < rhs.path; });
     const auto &reference = matches.front();
-    const auto npairs = static_cast<std::size_t>(reference.natoms) *
-                        (static_cast<std::size_t>(reference.natoms) + 1) / 2;
+    const auto npairs = checked_upper_pair_count(reference.natoms, reference.path);
     std::vector<int> block_owner(npairs, -1);
     for (std::size_t ifile = 0; ifile != matches.size(); ++ifile)
     {
