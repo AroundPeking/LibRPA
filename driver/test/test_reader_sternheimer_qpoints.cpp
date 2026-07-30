@@ -1,5 +1,4 @@
 #include <array>
-#include <cassert>
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
@@ -39,10 +38,29 @@ void write_text(const std::filesystem::path &path, const std::string &text)
     output << text;
 }
 
+void require_condition(const bool condition, const std::string &message)
+{
+    if (!condition)
+    {
+        std::cerr << "requirement failed: " << message << std::endl;
+        std::abort();
+    }
+}
+
 template <typename Value>
 void write_binary(std::ofstream &output, const Value &value)
 {
     output.write(reinterpret_cast<const char *>(&value), sizeof(Value));
+}
+
+template <typename Value>
+void overwrite_binary(const std::filesystem::path &path, const std::streamoff offset,
+                      const Value &value)
+{
+    std::fstream output(path, std::ios::in | std::ios::out | std::ios::binary);
+    output.seekp(offset);
+    output.write(reinterpret_cast<const char *>(&value), sizeof(Value));
+    require_condition(output.good(), "failed to overwrite binary fixture");
 }
 
 void write_minimal_coulomb_v1(const std::filesystem::path &path, const int iq)
@@ -136,13 +154,17 @@ void test_reads_normalized_manifest()
     write_text(manifest, "# iq qx qy qz qweight\n2 0.5 0 0 0.25\n3 0 0.5 0 0.75 ! row\n");
 
     const auto qpoints = driver::read_sternheimer_qpoint_manifest(manifest.string());
-    assert(qpoints.size() == 2);
-    assert(qpoints[0].iq == 2);
-    assert((qpoints[0].q == std::array<double, 3>{0.5, 0.0, 0.0}));
-    assert(std::abs(qpoints[0].weight - 0.25) < 1.0e-15);
-    assert(qpoints[1].iq == 3);
-    assert((qpoints[1].q == std::array<double, 3>{0.0, 0.5, 0.0}));
-    assert(std::abs(qpoints[1].weight - 0.75) < 1.0e-15);
+    require_condition(qpoints.size() == 2, "manifest q-point count");
+    require_condition(qpoints[0].iq == 2, "first manifest iq");
+    require_condition(qpoints[0].q == std::array<double, 3>{0.5, 0.0, 0.0},
+                      "first manifest q coordinate");
+    require_condition(std::abs(qpoints[0].weight - 0.25) < 1.0e-15,
+                      "first manifest q weight");
+    require_condition(qpoints[1].iq == 3, "second manifest iq");
+    require_condition(qpoints[1].q == std::array<double, 3>{0.0, 0.5, 0.0},
+                      "second manifest q coordinate");
+    require_condition(std::abs(qpoints[1].weight - 0.75) < 1.0e-15,
+                      "second manifest q weight");
 }
 
 void test_rejects_duplicate_iq()
@@ -227,12 +249,27 @@ void test_merges_coulomb_atom_pair_blocks_across_rank_shards()
 
     const auto matrix =
         driver::read_coulomb_v1_full_matrix(temp.path.string(), "v1_coulomb_full_iq_", 2);
-    assert(matrix.nr == 2);
-    assert(matrix.nc == 2);
-    assert(std::abs(matrix(0, 0) - std::complex<double>(2.0, 0.0)) < 1.0e-15);
-    assert(std::abs(matrix(0, 1) - std::complex<double>(0.5, 0.25)) < 1.0e-15);
-    assert(std::abs(matrix(1, 0) - std::complex<double>(0.5, -0.25)) < 1.0e-15);
-    assert(std::abs(matrix(1, 1) - std::complex<double>(3.0, 0.0)) < 1.0e-15);
+    require_condition(matrix.nr == 2, "merged matrix row count");
+    require_condition(matrix.nc == 2, "merged matrix column count");
+    require_condition(std::abs(matrix(0, 0) - std::complex<double>(2.0, 0.0)) < 1.0e-15,
+                      "merged matrix first diagonal");
+    require_condition(std::abs(matrix(0, 1) - std::complex<double>(0.5, 0.25)) < 1.0e-15,
+                      "merged matrix upper off-diagonal");
+    require_condition(std::abs(matrix(1, 0) - std::complex<double>(0.5, -0.25)) < 1.0e-15,
+                      "merged matrix lower off-diagonal");
+    require_condition(std::abs(matrix(1, 1) - std::complex<double>(3.0, 0.0)) < 1.0e-15,
+                      "merged matrix second diagonal");
+}
+
+void test_reads_single_coulomb_v1_file()
+{
+    TempDirectory temp;
+    write_minimal_coulomb_v1(temp.path / "v1_coulomb_full_iq_2_rank0.dat", 2);
+    const auto matrix =
+        driver::read_coulomb_v1_full_matrix(temp.path.string(), "v1_coulomb_full_iq_", 2);
+    require_condition(matrix.nr == 1 && matrix.nc == 1, "single-file matrix dimensions");
+    require_condition(std::abs(matrix(0, 0) - std::complex<double>(1.0, 0.0)) < 1.0e-15,
+                      "single-file matrix value");
 }
 
 void test_rejects_duplicate_coulomb_block_across_rank_shards()
@@ -270,6 +307,102 @@ void test_rejects_missing_coulomb_block_across_rank_shards()
         "missing atom-pair block across Coulomb v1 shards");
 }
 
+void test_rejects_invalid_coulomb_payload_offset()
+{
+    TempDirectory temp;
+    const auto path = temp.path / "v1_coulomb_full_iq_2_rank0.dat";
+    write_minimal_coulomb_v1(path, 2);
+    constexpr std::streamoff offset_field =
+        7 * sizeof(std::int32_t) + sizeof(std::int32_t);
+    overwrite_binary(path, offset_field, std::int64_t{0});
+
+    require_throws(
+        [&]()
+        {
+            driver::validate_coulomb_v1_full_matrix_file(
+                temp.path.string(), "v1_coulomb_full_iq_", 2);
+        },
+        "invalid v1 byte offset");
+}
+
+void test_rejects_truncated_coulomb_payload()
+{
+    TempDirectory temp;
+    const auto path = temp.path / "v1_coulomb_full_iq_2_rank0.dat";
+    write_minimal_coulomb_v1(path, 2);
+    std::filesystem::resize_file(path, 40 + sizeof(double));
+
+    require_throws(
+        [&]()
+        {
+            driver::validate_coulomb_v1_full_matrix_file(
+                temp.path.string(), "v1_coulomb_full_iq_", 2);
+        },
+        "invalid v1 byte offset");
+}
+
+void test_rejects_overlapping_coulomb_payloads()
+{
+    TempDirectory temp;
+    const auto first = temp.path / "v1_coulomb_full_iq_2_rank0.dat";
+    write_two_atom_coulomb_v1_shard(first, 2,
+                                    {{0, {2.0, 0.0}}, {1, {0.5, 0.25}}});
+    write_two_atom_coulomb_v1_shard(temp.path / "v1_coulomb_full_iq_2_rank1.dat", 2,
+                                    {{2, {3.0, 0.0}}});
+    constexpr std::int64_t first_payload =
+        6 * sizeof(std::int32_t) + 2 * sizeof(std::int32_t) +
+        2 * (sizeof(std::int32_t) + sizeof(std::int64_t));
+    constexpr std::streamoff second_offset_field =
+        6 * sizeof(std::int32_t) + 2 * sizeof(std::int32_t) +
+        (sizeof(std::int32_t) + sizeof(std::int64_t)) + sizeof(std::int32_t);
+    overwrite_binary(first, second_offset_field, first_payload);
+
+    require_throws(
+        [&]()
+        {
+            driver::validate_coulomb_v1_full_matrix_file(
+                temp.path.string(), "v1_coulomb_full_iq_", 2);
+        },
+        "overlapping v1 atom-pair blocks");
+}
+
+void test_rejects_invalid_coulomb_pair_index()
+{
+    TempDirectory temp;
+    const auto path = temp.path / "v1_coulomb_full_iq_2_rank0.dat";
+    write_minimal_coulomb_v1(path, 2);
+    constexpr std::streamoff pair_index_field = 7 * sizeof(std::int32_t);
+    overwrite_binary(path, pair_index_field, std::int32_t{1});
+
+    require_throws(
+        [&]()
+        {
+            driver::validate_coulomb_v1_full_matrix_file(
+                temp.path.string(), "v1_coulomb_full_iq_", 2);
+        },
+        "invalid atom-pair index");
+}
+
+void test_rejects_inconsistent_coulomb_shard_metadata()
+{
+    TempDirectory temp;
+    write_two_atom_coulomb_v1_shard(temp.path / "v1_coulomb_full_iq_2_rank0.dat", 2,
+                                    {{0, {2.0, 0.0}}});
+    const auto second = temp.path / "v1_coulomb_full_iq_2_rank1.dat";
+    write_two_atom_coulomb_v1_shard(second, 2,
+                                    {{1, {0.5, 0.25}}, {2, {3.0, 0.0}}});
+    constexpr std::streamoff value_flag_field = 3 * sizeof(std::int32_t);
+    overwrite_binary(second, value_flag_field, std::int32_t{0});
+
+    require_throws(
+        [&]()
+        {
+            driver::validate_coulomb_v1_full_matrix_file(
+                temp.path.string(), "v1_coulomb_full_iq_", 2);
+        },
+        "Inconsistent metadata across Coulomb v1 shards");
+}
+
 }  // namespace
 
 int main()
@@ -282,7 +415,13 @@ int main()
     test_skips_missing_gamma_files_when_gamma_is_excluded();
     test_requires_gamma_manifest_row_when_gamma_is_excluded();
     test_merges_coulomb_atom_pair_blocks_across_rank_shards();
+    test_reads_single_coulomb_v1_file();
     test_rejects_duplicate_coulomb_block_across_rank_shards();
     test_rejects_missing_coulomb_block_across_rank_shards();
+    test_rejects_invalid_coulomb_payload_offset();
+    test_rejects_truncated_coulomb_payload();
+    test_rejects_overlapping_coulomb_payloads();
+    test_rejects_invalid_coulomb_pair_index();
+    test_rejects_inconsistent_coulomb_shard_metadata();
     return 0;
 }
