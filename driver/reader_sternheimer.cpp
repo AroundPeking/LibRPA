@@ -302,8 +302,8 @@ librpa_int::ComplexMatrix read_dense_blocked_matrix(const BlockedMatrixFile &fil
     return matrix;
 }
 
-BlockedMatrixFile find_single_coulomb_file(const std::string &dir_path, const std::string &prefix,
-                                           const int iq)
+std::vector<BlockedMatrixFile> find_coulomb_files(const std::string &dir_path,
+                                                  const std::string &prefix, const int iq)
 {
     const auto files = librpa_int::discover_files_with_prefix(dir_path, prefix);
     if (files.empty())
@@ -324,11 +324,84 @@ BlockedMatrixFile find_single_coulomb_file(const std::string &dir_path, const st
     {
         throw std::runtime_error("No Coulomb v1 file found for iq=" + std::to_string(iq));
     }
-    if (matches.size() > 1)
+
+    std::sort(matches.begin(), matches.end(),
+              [](const auto &lhs, const auto &rhs) { return lhs.path < rhs.path; });
+    const auto &reference = matches.front();
+    const auto npairs = static_cast<std::size_t>(reference.natoms) *
+                        (static_cast<std::size_t>(reference.natoms) + 1) / 2;
+    std::vector<int> block_owner(npairs, -1);
+    for (std::size_t ifile = 0; ifile != matches.size(); ++ifile)
     {
-        throw std::runtime_error("Multiple Coulomb v1 files found for iq=" + std::to_string(iq));
+        const auto &file = matches[ifile];
+        if (file.naux != reference.naux || file.value_flag != reference.value_flag ||
+            file.natoms != reference.natoms || file.atom_naux != reference.atom_naux)
+        {
+            throw std::runtime_error(
+                "Inconsistent metadata across Coulomb v1 shards for iq=" + std::to_string(iq));
+        }
+        for (const auto &block : file.blocks)
+        {
+            auto &owner = block_owner[static_cast<std::size_t>(block.pair_index)];
+            if (owner >= 0)
+            {
+                throw std::runtime_error(
+                    "duplicate atom-pair block across Coulomb v1 shards for iq=" +
+                    std::to_string(iq));
+            }
+            owner = static_cast<int>(ifile);
+        }
     }
-    return matches.front();
+    if (std::find(block_owner.begin(), block_owner.end(), -1) != block_owner.end())
+    {
+        throw std::runtime_error("missing atom-pair block across Coulomb v1 shards for iq=" +
+                                 std::to_string(iq));
+    }
+    return matches;
+}
+
+librpa_int::ComplexMatrix read_dense_blocked_matrix(
+    const std::vector<BlockedMatrixFile> &files)
+{
+    if (files.empty())
+    {
+        throw std::runtime_error("Cannot assemble a dense matrix from zero v1 shards");
+    }
+    const auto atom_pairs = make_atom_pairs(files.front().natoms);
+    const auto atom_offsets = make_atom_offsets(files.front().atom_naux);
+    librpa_int::ComplexMatrix matrix(files.front().naux, files.front().naux);
+    for (const auto &file : files)
+    {
+        std::ifstream input(file.path.c_str(), std::ios::binary);
+        for (const BlockRecord &block : file.blocks)
+        {
+            const auto [iatom, jatom] =
+                atom_pairs[static_cast<std::size_t>(block.pair_index)];
+            const int ioffset = atom_offsets[iatom];
+            const int joffset = atom_offsets[jatom];
+            const int inaux = file.atom_naux[iatom];
+            const int jnaux = file.atom_naux[jatom];
+            const auto nvalues = checked_matrix_size(inaux, jnaux, file.path);
+            const auto values = read_block_payload(input, file, block, nvalues);
+
+            for (int imu = 0; imu != inaux; ++imu)
+            {
+                for (int jmu = 0; jmu != jnaux; ++jmu)
+                {
+                    const auto value =
+                        values[static_cast<std::size_t>(imu) *
+                                   static_cast<std::size_t>(jnaux) +
+                               static_cast<std::size_t>(jmu)];
+                    matrix(ioffset + imu, joffset + jmu) = value;
+                    if (iatom != jatom)
+                    {
+                        matrix(joffset + jmu, ioffset + imu) = std::conj(value);
+                    }
+                }
+            }
+        }
+    }
+    return matrix;
 }
 
 std::vector<BlockedMatrixFile> find_sternheimer_files(const std::string &dir_path,
@@ -376,14 +449,13 @@ std::vector<BlockedMatrixFile> find_sternheimer_files(const std::string &dir_pat
 librpa_int::ComplexMatrix read_coulomb_v1_full_matrix(const std::string &dir_path,
                                                       const std::string &prefix, const int iq)
 {
-    const auto file = find_single_coulomb_file(dir_path, prefix, iq);
-    return read_dense_blocked_matrix(file);
+    return read_dense_blocked_matrix(find_coulomb_files(dir_path, prefix, iq));
 }
 
 void validate_coulomb_v1_full_matrix_file(const std::string &dir_path, const std::string &prefix,
                                           const int iq)
 {
-    static_cast<void>(find_single_coulomb_file(dir_path, prefix, iq));
+    static_cast<void>(find_coulomb_files(dir_path, prefix, iq));
 }
 
 SternheimerChi0V1Matrix read_sternheimer_chi0_v1_matrix_file(const std::string &path)
