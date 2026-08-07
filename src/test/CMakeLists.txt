@@ -45,6 +45,7 @@ foreach(target
     test_fitting
     test_io
     test_symmetry_context
+    test_task_helper
     test_arbitrary_float
     test_geometry
     test_lebedev_laikov
@@ -65,6 +66,8 @@ foreach(target
     )
   config_test(${target} 1)
 endforeach()
+
+target_sources(test_task_helper PRIVATE ../../driver/tasks/task_helper.cpp)
 
 # add 4-process tests
 foreach(target
