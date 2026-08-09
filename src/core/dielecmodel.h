@@ -158,16 +158,17 @@ private:
     std::vector<Vector3_Order<double>> g_enclosing_gamma;
     std::vector<double> q_gamma;
     double vol_gamma = 0.0;
-    double strict_2d_sheet_to_raw_scale_ = 0.0;
+    double strict_2d_pw_to_auxiliary_scale_ = 0.0;
 
 public:
     bool use_2d_dielectric = false;
     bool use_soc = false;
     bool debug = false;
 
-    void configure_strict_2d_coulomb_head(bool enabled, double raw_head_coefficient);
-    void set_strict_2d_coulomb_head_coefficient(double raw_head_coefficient);
-    double get_strict_2d_sheet_to_raw_scale() const;
+    void configure_strict_2d_coulomb_head(bool enabled);
+    void configure_strict_2d_coulomb_head(bool enabled,
+                                          double auxiliary_monopole_norm_squared);
+    double get_strict_2d_pw_to_auxiliary_scale() const;
 
     // Symmetry-aware head/wing switches. When use_symmetry is true and the
     // input symmetry context can restore the BZ from the IBZ k-grid, cal_head
@@ -404,9 +405,19 @@ matrix_m<std::complex<double>> strict_2d_average_wc_coulomb_basis(
 matrix_m<std::complex<double>> strict_2d_alpha_wc_average_coulomb_basis(
     double inverse_dielectric_alpha, const matrix_m<std::complex<double>> &regular_body_sqrt,
     const std::vector<double> &weights, const std::vector<double> &qmax, double gamma_area);
-double strict_2d_sheet_to_raw_scale(double raw_head_coefficient);
-matrix_m<std::complex<double>> strict_2d_transform_sheet_wc_to_raw_basis(
-    const matrix_m<std::complex<double>> &sheet_wc, double sheet_to_raw_scale);
+struct Strict2dCoulombHeadNormalization
+{
+    double inplane_area_bohr2 = 0.0;
+    double auxiliary_monopole_norm_squared = 0.0;
+    double auxiliary_head_coefficient = 0.0;
+    double pw_to_auxiliary_scale = 0.0;
+};
+
+double strict_2d_inplane_cell_area(const PeriodicBoundaryData &pbc);
+Strict2dCoulombHeadNormalization strict_2d_coulomb_head_normalization(
+    const PeriodicBoundaryData &pbc, double auxiliary_monopole_norm_squared);
+matrix_m<std::complex<double>> strict_2d_transform_pw_wc_to_auxiliary_basis(
+    const matrix_m<std::complex<double>> &pw_wc, double pw_to_auxiliary_scale);
 double strict_2d_bare_coulomb_gamma_average(const std::vector<double> &weights,
                                             const std::vector<double> &qmax, double gamma_area);
 

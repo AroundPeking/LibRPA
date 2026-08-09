@@ -210,7 +210,6 @@ module librpa_f03
       integer(c_int) :: replace_w_head
       integer(c_int) :: option_dielect_func
       integer(c_int) :: use_2d_dielectric
-      real(c_double) :: strict_2d_coulomb_head_coefficient
       integer(c_int) :: rpa_headwing_body_start
       integer(c_int) :: read_sigc_mat_rf
       character(kind=c_char, len=1) :: rpa_headwing_mode(LIBRPA_MAX_STRLEN)
@@ -355,8 +354,6 @@ module librpa_f03
       integer :: option_dielect_func
       !> Experimental: use the 2D dielectric-function branch where supported.
       logical :: use_2d_dielectric
-      !> Raw auxiliary-basis 2D Coulomb head coefficient A_lambda.
-      real(dp) :: strict_2d_coulomb_head_coefficient
       !> First regular Coulomb-eigenbasis channel used by RPA head/wing correction.
       integer :: rpa_headwing_body_start
       !> Experimental: read NAO correlation self-energy matrix in real-space/frequency form.
@@ -1171,8 +1168,6 @@ contains
       call sync_opt(opts%sf_sigc_omega_shift,     opts%opts_c%sf_sigc_omega_shift,     direction)
       call sync_opt(opts%option_dielect_func,     opts%opts_c%option_dielect_func,     direction)
       call sync_opt(opts%use_2d_dielectric,       opts%opts_c%use_2d_dielectric,       direction)
-      call sync_opt(opts%strict_2d_coulomb_head_coefficient, &
-                    opts%opts_c%strict_2d_coulomb_head_coefficient, direction)
       call sync_opt(opts%rpa_headwing_body_start, opts%opts_c%rpa_headwing_body_start, direction)
       call sync_opt(opts%read_sigc_mat_rf,        opts%opts_c%read_sigc_mat_rf,        direction)
       call sync_opt(opts%rpa_headwing_mode,       opts%opts_c%rpa_headwing_mode,       direction)

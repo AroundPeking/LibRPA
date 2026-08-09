@@ -861,50 +861,72 @@ matrix_m<std::complex<double>> strict_2d_alpha_wc_average_coulomb_basis(
     return average;
 }
 
-double strict_2d_sheet_to_raw_scale(const double raw_head_coefficient)
+double strict_2d_inplane_cell_area(const PeriodicBoundaryData &pbc)
 {
-    if (!(raw_head_coefficient > 0.0) || !std::isfinite(raw_head_coefficient))
-        throw std::logic_error(
-            "strict 2D raw Coulomb head coefficient must be positive and finite");
-    return std::sqrt(raw_head_coefficient / TWO_PI);
+    const auto &a = pbc.latvec;
+    const double cx = a.e12 * a.e23 - a.e13 * a.e22;
+    const double cy = a.e13 * a.e21 - a.e11 * a.e23;
+    const double cz = a.e11 * a.e22 - a.e12 * a.e21;
+    const double area = std::sqrt(cx * cx + cy * cy + cz * cz);
+    if (!(area > 0.0) || !std::isfinite(area))
+        throw std::logic_error("strict 2D head/wing requires a finite in-plane cell area");
+    return area;
 }
 
-matrix_m<std::complex<double>> strict_2d_transform_sheet_wc_to_raw_basis(
-    const matrix_m<std::complex<double>> &sheet_wc, const double sheet_to_raw_scale)
+Strict2dCoulombHeadNormalization strict_2d_coulomb_head_normalization(
+    const PeriodicBoundaryData &pbc, const double auxiliary_monopole_norm_squared)
 {
-    if (sheet_wc.nr() < 1 || sheet_wc.nr() != sheet_wc.nc() ||
-        !(sheet_to_raw_scale > 0.0) || !std::isfinite(sheet_to_raw_scale))
-        throw std::logic_error("strict 2D sheet-to-raw Wc transform is invalid");
+    if (!(auxiliary_monopole_norm_squared > 0.0) ||
+        !std::isfinite(auxiliary_monopole_norm_squared))
+        throw std::logic_error(
+            "strict 2D auxiliary-basis monopole norm must be positive and finite");
 
-    auto raw_wc = sheet_wc.copy();
-    raw_wc(0, 0) *= sheet_to_raw_scale * sheet_to_raw_scale;
-    for (int i = 1; i != raw_wc.nr(); ++i)
+    const double area = strict_2d_inplane_cell_area(pbc);
+    const double coefficient =
+        2.0 * TWO_PI * TWO_PI * auxiliary_monopole_norm_squared / area;
+    return {area, auxiliary_monopole_norm_squared, coefficient,
+            std::sqrt(coefficient / TWO_PI)};
+}
+
+matrix_m<std::complex<double>> strict_2d_transform_pw_wc_to_auxiliary_basis(
+    const matrix_m<std::complex<double>> &pw_wc, const double pw_to_auxiliary_scale)
+{
+    if (pw_wc.nr() < 1 || pw_wc.nr() != pw_wc.nc() ||
+        !(pw_to_auxiliary_scale > 0.0) || !std::isfinite(pw_to_auxiliary_scale))
+        throw std::logic_error("strict 2D PW-to-auxiliary Wc transform is invalid");
+
+    auto auxiliary_wc = pw_wc.copy();
+    auxiliary_wc(0, 0) *= pw_to_auxiliary_scale * pw_to_auxiliary_scale;
+    for (int i = 1; i != auxiliary_wc.nr(); ++i)
     {
-        raw_wc(0, i) *= sheet_to_raw_scale;
-        raw_wc(i, 0) *= sheet_to_raw_scale;
+        auxiliary_wc(0, i) *= pw_to_auxiliary_scale;
+        auxiliary_wc(i, 0) *= pw_to_auxiliary_scale;
     }
-    return raw_wc;
+    return auxiliary_wc;
 }
 
 void diele_func::configure_strict_2d_coulomb_head(const bool enabled,
-                                                  const double raw_head_coefficient)
+                                                  const double auxiliary_monopole_norm_squared)
+{
+    configure_strict_2d_coulomb_head(enabled);
+    if (enabled)
+        strict_2d_pw_to_auxiliary_scale_ = strict_2d_coulomb_head_normalization(
+            pbc_, auxiliary_monopole_norm_squared).pw_to_auxiliary_scale;
+}
+
+void diele_func::configure_strict_2d_coulomb_head(const bool enabled)
 {
     use_2d_dielectric = enabled;
-    if (enabled) set_strict_2d_coulomb_head_coefficient(raw_head_coefficient);
+    strict_2d_pw_to_auxiliary_scale_ = 0.0;
 }
 
-void diele_func::set_strict_2d_coulomb_head_coefficient(const double raw_head_coefficient)
+double diele_func::get_strict_2d_pw_to_auxiliary_scale() const
 {
-    strict_2d_sheet_to_raw_scale_ = strict_2d_sheet_to_raw_scale(raw_head_coefficient);
-}
-
-double diele_func::get_strict_2d_sheet_to_raw_scale() const
-{
-    if (!(strict_2d_sheet_to_raw_scale_ > 0.0) ||
-        !std::isfinite(strict_2d_sheet_to_raw_scale_))
+    if (!(strict_2d_pw_to_auxiliary_scale_ > 0.0) ||
+        !std::isfinite(strict_2d_pw_to_auxiliary_scale_))
         throw std::logic_error(
-            "strict 2D raw Coulomb head coefficient was not configured");
-    return strict_2d_sheet_to_raw_scale_;
+            "strict 2D auxiliary-basis monopole metadata was not configured");
+    return strict_2d_pw_to_auxiliary_scale_;
 }
 
 double strict_2d_bare_coulomb_gamma_average(const std::vector<double> &weights,
@@ -1355,8 +1377,7 @@ double diele_func::cal_factor(std::string name)
     const auto &latvec = pbc_.latvec;
     if (use_2d_dielectric)
     {
-        const double inplane_cell_area =
-            std::abs(latvec.e11 * latvec.e22 - latvec.e12 * latvec.e21);
+        const double inplane_cell_area = strict_2d_inplane_cell_area(pbc_);
         if (name == "head") return strict_2d_head_prefactor(inplane_cell_area);
         if (name == "wing") return strict_2d_wing_prefactor(inplane_cell_area);
         throw std::logic_error("Unsupported value for head/wing factor");
@@ -3067,7 +3088,7 @@ void diele_func::cal_strict_2d_wc(const int ifreq, ArrayDesc &desc_nabf_nabf_opt
 
     if (!use_2d_dielectric)
         throw std::logic_error("direct strict 2D Wc average requires use_2d_dielectric");
-    const double sheet_to_raw_scale = get_strict_2d_sheet_to_raw_scale();
+    const double pw_to_auxiliary_scale = get_strict_2d_pw_to_auxiliary_scale();
 
     profiler.start("cal_strict_2d_wc");
     const int nbody = as_int(n_nonsingular) - 1;
@@ -3108,7 +3129,8 @@ void diele_func::cal_strict_2d_wc(const int ifreq, ArrayDesc &desc_nabf_nabf_opt
         std::cout << "Number of angular grids for complete Wc average: " << nleb << std::endl;
         std::cout << "Angular quadrature accuracy for physical Gamma-cell area: " << numeric_area
                   << " (should be close to 1)" << std::endl;
-        std::cout << "Strict 2D sheet-to-raw Coulomb scale: " << sheet_to_raw_scale << std::endl;
+        std::cout << "Strict 2D PW-to-auxiliary Coulomb scale: "
+                  << pw_to_auxiliary_scale << std::endl;
     }
 
     auto body_average = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
@@ -3181,9 +3203,9 @@ void diele_func::cal_strict_2d_wc(const int ifreq, ArrayDesc &desc_nabf_nabf_opt
                                 desc_head_body.desc, regular_body_sqrt.ptr(), 1, 1, desc_body.desc,
                                 C_ZERO, wc_head_body.ptr(), 1, 1, desc_head_body.desc);
     for (std::size_t i = 0; i != wc_body_head.size(); ++i)
-        wc_body_head.ptr()[i] *= sheet_to_raw_scale;
+        wc_body_head.ptr()[i] *= pw_to_auxiliary_scale;
     for (std::size_t i = 0; i != wc_head_body.size(); ++i)
-        wc_head_body.ptr()[i] *= sheet_to_raw_scale;
+        wc_head_body.ptr()[i] *= pw_to_auxiliary_scale;
     ScalapackConnector::pgemr2d_f(nbody, 1, wc_body_head.ptr(), 1, 1, desc_body_head.desc,
                                   chi0.ptr(), 2, 1, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
     ScalapackConnector::pgemr2d_f(1, nbody, wc_head_body.ptr(), 1, 1, desc_head_body.desc,
@@ -3193,7 +3215,7 @@ void diele_func::cal_strict_2d_wc(const int ifreq, ArrayDesc &desc_nabf_nabf_opt
     const int jlo_head = desc_nabf_nabf_opt.indx_g2l_c(0);
     if (ilo_head >= 0 && jlo_head >= 0)
         chi0(ilo_head, jlo_head) =
-            sheet_to_raw_scale * sheet_to_raw_scale * wc_head;
+            pw_to_auxiliary_scale * pw_to_auxiliary_scale * wc_head;
 
     if (mpi_comm_global_h.is_root())
         std::cout << "* Success: calculate strict 2D complete Wc average no." << ifreq + 1 << "."
@@ -3211,7 +3233,7 @@ Strict2dFiniteQReference diele_func::get_strict_2d_finite_q_reference(const int 
         throw std::logic_error("strict 2D finite-q reference is unavailable for this frequency");
     auto reference =
         strict_2d_finite_q_reference(head[ifreq], strict_2d_lind_by_freq[ifreq], qx, qy);
-    const double scale = get_strict_2d_sheet_to_raw_scale();
+    const double scale = get_strict_2d_pw_to_auxiliary_scale();
     reference.wc_head_limit *= scale * scale;
     return reference;
 }
@@ -3223,7 +3245,7 @@ double diele_func::get_strict_2d_bare_coulomb_gamma_average() const
     std::vector<double> physical_qmax(q_gamma.size());
     for (std::size_t idir = 0; idir != q_gamma.size(); ++idir)
         physical_qmax[idir] = strict_2d_physical_q(q_gamma[idir]);
-    const double scale = get_strict_2d_sheet_to_raw_scale();
+    const double scale = get_strict_2d_pw_to_auxiliary_scale();
     return scale * scale * strict_2d_bare_coulomb_gamma_average(
                                qw_leb, physical_qmax,
                                strict_2d_physical_gamma_cell_area(vol_gamma));

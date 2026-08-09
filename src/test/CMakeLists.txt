@@ -59,6 +59,7 @@ foreach(target
     test_qpe_solver
     test_rsh
     test_rpa_headwing
+    test_strict_2d_coulomb_head_metadata
     test_symmetry
     test_timefreq
     test_vector3
@@ -68,6 +69,8 @@ foreach(target
 endforeach()
 
 target_sources(test_task_helper PRIVATE ../../driver/tasks/task_helper.cpp)
+target_sources(test_strict_2d_coulomb_head_metadata
+  PRIVATE ../../driver/reader_2d_coulomb_head.cpp)
 
 # add 4-process tests
 foreach(target

@@ -455,23 +455,14 @@ typedef struct
     //! With `replace_w_head=true` and `option_dielect_func=3`, the Gamma-cell average
     //! uses the 2D \f$2\pi/q\f$ asymptotics in the fixed full-Ewald Coulomb eigenbasis.
     //! Both dielectric screening and finite-q Wc use full 2D Ewald Coulomb; no cut
-    //! Coulomb matrix is used by this path.
+    //! Coulomb matrix is used by this path. The standalone reader-v1 driver obtains
+    //! the auxiliary-basis monopole norm from producer metadata and computes the
+    //! PW-to-auxiliary normalization internally; it is not a runtime parameter.
     //! @par Default
     //! false
     //! @par Status
     //! Experimental
     LibrpaSwitch use_2d_dielectric;
-
-    //! Coefficient A_lambda of the raw auxiliary-basis 2D Coulomb head,
-    //! lambda_head(q) = A_lambda / q + O(1), in LibRPA's physical-q convention.
-    //! The strict-2D path uses it to transform sheet-normalized analytic Wc back
-    //! to the raw Coulomb eigenbasis. A positive value is required when the
-    //! strict-2D analytic head/wing path is active.
-    //! @par Default
-    //! 0.0 (unset)
-    //! @par Status
-    //! Experimental
-    double strict_2d_coulomb_head_coefficient;
 
     //! First regular Coulomb-eigenbasis channel used by RPA head/wing correction.
     //! Zero uses channel 1 in the current analytic 3D/2D head/wing path.

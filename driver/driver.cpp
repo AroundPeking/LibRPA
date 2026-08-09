@@ -173,7 +173,6 @@ std::string format_runtime_options(const librpa::Options &opts) noexcept
             normal_pair(qpe_solver_damp_factor),
             normal_pair(sf_gf_omega_shift),
             normal_pair(sf_sigc_omega_shift),
-            normal_pair(strict_2d_coulomb_head_coefficient),
         };
 
     const std::vector<std::pair<std::string, int>> int_params

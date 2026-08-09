@@ -425,6 +425,35 @@ void test_strict_2d_headwing_prefactors_use_inplane_area()
                          2.0 * std::sqrt(librpa_int::TWO_PI / area), 1e-14);
 }
 
+void test_strict_2d_auxiliary_normalization_is_computed_from_basis_metadata()
+{
+    PeriodicBoundaryData pbc;
+    pbc.set_latvec({19.390653825130212, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 30.0});
+
+    constexpr double multipole_norm_squared = 2205.0673846924301;
+    const auto normalization = librpa_int::strict_2d_coulomb_head_normalization(
+        pbc, multipole_norm_squared);
+
+    require_double_close(normalization.inplane_area_bohr2, 19.390653825130212, 1e-13);
+    require_double_close(normalization.auxiliary_head_coefficient,
+                         8978.8175111265446, 1e-10);
+    require_double_close(normalization.pw_to_auxiliary_scale,
+                         37.802423070695596, 1e-12);
+
+    bool rejected = false;
+    try
+    {
+        (void)librpa_int::strict_2d_coulomb_head_normalization(pbc, 0.0);
+    }
+    catch (const std::logic_error &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
 void test_strict_2d_gamma_cell_uses_physical_reciprocal_measure()
 {
     constexpr double internal_q = 0.2;
@@ -613,32 +642,30 @@ void test_strict_2d_alpha_reference_averages_bare_coulomb()
     require_double_close(alpha_wc(1, 1).real(), (alpha - 1.0) * 4.0, 1e-13);
 }
 
-void test_strict_2d_sheet_wc_transforms_to_raw_coulomb_basis()
+void test_strict_2d_pw_wc_transforms_to_auxiliary_coulomb_basis()
 {
-    const double raw_head_coefficient = 50.0 * librpa_int::TWO_PI;
-    const double scale = librpa_int::strict_2d_sheet_to_raw_scale(raw_head_coefficient);
-    require_double_close(scale, std::sqrt(50.0), 1e-14);
+    constexpr double scale = 5.0;
 
-    matrix_m<std::complex<double>> sheet_wc(3, 3, MAJOR::COL);
-    sheet_wc(0, 0) = {2.0, -0.5};
-    sheet_wc(0, 1) = {3.0, 4.0};
-    sheet_wc(0, 2) = {-1.0, 0.25};
-    sheet_wc(1, 0) = std::conj(sheet_wc(0, 1));
-    sheet_wc(2, 0) = std::conj(sheet_wc(0, 2));
-    sheet_wc(1, 1) = {5.0, 0.0};
-    sheet_wc(1, 2) = {0.75, -0.2};
-    sheet_wc(2, 1) = std::conj(sheet_wc(1, 2));
-    sheet_wc(2, 2) = {7.0, 0.0};
+    matrix_m<std::complex<double>> pw_wc(3, 3, MAJOR::COL);
+    pw_wc(0, 0) = {2.0, -0.5};
+    pw_wc(0, 1) = {3.0, 4.0};
+    pw_wc(0, 2) = {-1.0, 0.25};
+    pw_wc(1, 0) = std::conj(pw_wc(0, 1));
+    pw_wc(2, 0) = std::conj(pw_wc(0, 2));
+    pw_wc(1, 1) = {5.0, 0.0};
+    pw_wc(1, 2) = {0.75, -0.2};
+    pw_wc(2, 1) = std::conj(pw_wc(1, 2));
+    pw_wc(2, 2) = {7.0, 0.0};
 
-    const auto raw_wc =
-        librpa_int::strict_2d_transform_sheet_wc_to_raw_basis(sheet_wc, scale);
-    assert_complex_close(raw_wc(0, 0), scale * scale * sheet_wc(0, 0), 1e-13);
+    const auto auxiliary_wc =
+        librpa_int::strict_2d_transform_pw_wc_to_auxiliary_basis(pw_wc, scale);
+    assert_complex_close(auxiliary_wc(0, 0), scale * scale * pw_wc(0, 0), 1e-13);
     for (int i = 1; i != 3; ++i)
     {
-        assert_complex_close(raw_wc(0, i), scale * sheet_wc(0, i), 1e-13);
-        assert_complex_close(raw_wc(i, 0), scale * sheet_wc(i, 0), 1e-13);
+        assert_complex_close(auxiliary_wc(0, i), scale * pw_wc(0, i), 1e-13);
+        assert_complex_close(auxiliary_wc(i, 0), scale * pw_wc(i, 0), 1e-13);
         for (int j = 1; j != 3; ++j)
-            assert_complex_close(raw_wc(i, j), sheet_wc(i, j), 1e-13);
+            assert_complex_close(auxiliary_wc(i, j), pw_wc(i, j), 1e-13);
     }
 }
 
@@ -1420,9 +1447,9 @@ void test_strict_2d_gamma_quadrature_is_ready_after_wing_initialization(
 
     diele_func df(mf, velocity, kfrac, basis_wfc, basis_abf, omega, 1, 2, 1, 1, pbc,
                   librpa_int::global::mpi_comm_global_h, blacs_h);
-    df.configure_strict_2d_coulomb_head(true, librpa_int::TWO_PI);
+    df.configure_strict_2d_coulomb_head(true, 1.0 / (4.0 * librpa_int::PI));
     assert(df.use_2d_dielectric);
-    require_double_close(df.get_strict_2d_sheet_to_raw_scale(), 1.0, 1e-14);
+    require_double_close(df.get_strict_2d_pw_to_auxiliary_scale(), 1.0, 1e-14);
     df.init_wing(0.0, empty_vq);
 
     const double average = df.get_strict_2d_bare_coulomb_gamma_average();
@@ -1840,6 +1867,7 @@ int main(int argc, char *argv[])
         test_rpa_headwing_regular_body_start_channel();
         test_rpa_headwing_gamma_cell_volume_uses_reciprocal_lattice();
         test_strict_2d_headwing_prefactors_use_inplane_area();
+        test_strict_2d_auxiliary_normalization_is_computed_from_basis_metadata();
         test_strict_2d_gamma_cell_uses_physical_reciprocal_measure();
         test_strict_2d_radial_integrals_match_analytic_values();
         test_strict_2d_radial_integrals_are_stable_at_zero_and_small_a();
@@ -1850,7 +1878,7 @@ int main(int argc, char *argv[])
         test_strict_2d_gw_uses_full_coulomb_at_all_q();
         test_strict_2d_block_metrics_separate_head_wings_and_body();
         test_strict_2d_alpha_reference_averages_bare_coulomb();
-        test_strict_2d_sheet_wc_transforms_to_raw_coulomb_basis();
+        test_strict_2d_pw_wc_transforms_to_auxiliary_coulomb_basis();
         test_strict_2d_wc_blocks_match_dense_finite_q_inverse();
         test_strict_2d_wc_cell_average_matches_anisotropic_radial_quadrature();
         test_strict_2d_wc_blocks_have_finite_small_q_limits();

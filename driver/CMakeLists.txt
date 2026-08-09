@@ -16,6 +16,7 @@ list(APPEND exe_sources
   reader_structure.cpp
   reader_lri.cpp
   reader_coulomb.cpp
+  reader_2d_coulomb_head.cpp
   task.cpp
   # Specific task implementations
   tasks/task_helper.cpp

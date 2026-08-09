@@ -369,8 +369,7 @@ void initialize_ds_headwing(Dataset &ds, const LibrpaOptions &opts, const bool n
         mf.get_n_spins(), headwing_basis_aux.nb_total, ds.pbc, ds.comm_h, ds.blacs_h,
         &ds.scfk_blacs_ctxt);
     ds.p_headwing->configure_strict_2d_coulomb_head(
-        opts.use_2d_dielectric == LIBRPA_SWITCH_ON,
-        opts.strict_2d_coulomb_head_coefficient);
+        opts.use_2d_dielectric == LIBRPA_SWITCH_ON);
     ds.p_headwing->use_soc = mf.get_n_spinor() > 1;
     ds.p_headwing->debug = global::should_output(LIBRPA_VERBOSE_DEBUG);
     if (ds.symmetry_context.available && !ds.symmetry_context.kstars.empty())
