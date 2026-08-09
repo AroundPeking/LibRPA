@@ -236,6 +236,8 @@ module librpa_f03
       integer :: option_dielect_func
       !> Experimental: use the 2D dielectric-function branch where supported.
       logical :: use_2d_dielectric
+      !> Raw auxiliary-basis 2D Coulomb head coefficient A_lambda.
+      real(dp) :: strict_2d_coulomb_head_coefficient
       !> First regular Coulomb-eigenbasis channel used by RPA head/wing correction.
       integer :: rpa_headwing_body_start
       !> Experimental: read NAO correlation self-energy matrix in real-space/frequency form.
@@ -274,6 +276,8 @@ module librpa_f03
       logical :: output_wc_rf
       !> Experimental: output \f$W^c(R,i\omega)\f$ as atom-pair block files.
       logical :: output_wc_rf_atom_pair
+      !> Experimental: output strict-2D finite-q head projection diagnostics.
+      logical :: output_2d_finite_q_diagnostics
       !> First zero-based \f$W^c\f$ frequency index to output.
       integer :: ifreq_output_wc_start
       !> Half-open \f$W^c\f$ frequency output end index; negative means all remaining frequencies.

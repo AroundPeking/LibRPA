@@ -157,12 +157,17 @@ typedef struct
     //! false
     LibrpaSwitch use_fullcoul_exx;
 
-    //! Switch of using full Coulomb interaction in \f$\varepsilon = 1 - v \chi^0\f$
+    //! Switch of using full Coulomb interaction in \f$\varepsilon = 1 - v \chi^0\f$.
+    //! The strict 2D analytic head/wing path requires this switch to be true so that
+    //! the fixed Gamma Coulomb eigenbasis is defined by the full Ewald matrix.
     //! @par Default
     //! true
     LibrpaSwitch use_fullcoul_eps;
 
     //! Switch of using full Coulomb interaction in \f$W^c = (\varepsilon^{-1} - 1) v\f$.
+    //! The strict 2D analytic head/wing path requires this switch to be true. It uses
+    //! the full 2D Ewald interaction at every finite q and analytically replaces the
+    //! singular Gamma head/wing of the complete Wc matrix.
     //! @par Default
     //! false
     LibrpaSwitch use_fullcoul_wc;
@@ -446,12 +451,27 @@ typedef struct
      */
     int option_dielect_func;
 
-    //! Switch of using 2D dielectric function.
+    //! Switch of using the strict 2D analytic dielectric function.
+    //! With `replace_w_head=true` and `option_dielect_func=3`, the Gamma-cell average
+    //! uses the 2D \f$2\pi/q\f$ asymptotics in the fixed full-Ewald Coulomb eigenbasis.
+    //! Both dielectric screening and finite-q Wc use full 2D Ewald Coulomb; no cut
+    //! Coulomb matrix is used by this path.
     //! @par Default
     //! false
     //! @par Status
     //! Experimental
     LibrpaSwitch use_2d_dielectric;
+
+    //! Coefficient A_lambda of the raw auxiliary-basis 2D Coulomb head,
+    //! lambda_head(q) = A_lambda / q + O(1), in LibRPA's physical-q convention.
+    //! The strict-2D path uses it to transform sheet-normalized analytic Wc back
+    //! to the raw Coulomb eigenbasis. A positive value is required when the
+    //! strict-2D analytic head/wing path is active.
+    //! @par Default
+    //! 0.0 (unset)
+    //! @par Status
+    //! Experimental
+    double strict_2d_coulomb_head_coefficient;
 
     //! First regular Coulomb-eigenbasis channel used by RPA head/wing correction.
     //! Zero uses channel 1 in the current analytic 3D/2D head/wing path.
@@ -569,6 +589,17 @@ typedef struct
     //! @par Status
     //! Experimental
     LibrpaSwitch output_wc_rf_atom_pair;
+
+    //! Output strict-2D diagnostics in the fixed Gamma full-Ewald Coulomb basis.
+    //! `strict2d_finite_q_scaling.csv` contains static P and Wc head, wing, body,
+    //! q weights, and the epsilon^-1=0.25 alpha reference for every finite q.
+    //! `strict2d_gamma_wc_blocks.csv` contains the analytically averaged Gamma Wc
+    //! blocks and alpha reference for every imaginary frequency.
+    //! @par Default
+    //! false
+    //! @par Status
+    //! Experimental
+    LibrpaSwitch output_2d_finite_q_diagnostics;
 
     //! First zero-based Wc frequency index to output.
     //! @par Default

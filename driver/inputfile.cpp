@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <cmath>
 #include <cstring>
 #include <regex>
 #include <sstream>
@@ -268,6 +269,25 @@ void parse_inputfile_to_params(const std::string &fn)
     _parse_switch(opts, replace_w_head);
     _parse_int(opts, option_dielect_func);
     _parse_switch(opts, use_2d_dielectric);
+    _parse_double(opts, strict_2d_coulomb_head_coefficient);
+    if (opts.use_2d_dielectric == LIBRPA_SWITCH_ON
+        && (!(opts.strict_2d_coulomb_head_coefficient > 0.0)
+            || !std::isfinite(opts.strict_2d_coulomb_head_coefficient)))
+    {
+        const std::string head_filename =
+            driver_params.input_dir + "librpa_2d_coulomb_head.dat";
+        InputFile head_input;
+        auto head_parser = head_input.load(head_filename, true);
+        head_parser.parse_double("strict_2d_coulomb_head_coefficient",
+                                 opts.strict_2d_coulomb_head_coefficient, flag);
+        if (flag != 0 || !(opts.strict_2d_coulomb_head_coefficient > 0.0)
+            || !std::isfinite(opts.strict_2d_coulomb_head_coefficient))
+        {
+            throw std::runtime_error(
+                "librpa_2d_coulomb_head.dat does not contain a positive finite "
+                "strict_2d_coulomb_head_coefficient");
+        }
+    }
     _parse_switch(opts, output_gw_sigc_ks_kf);
     if (flag != 0)  // backward-compatible
     {
@@ -296,6 +316,7 @@ void parse_inputfile_to_params(const std::string &fn)
     _parse_switch(opts, output_gw_sigc_mat_rf);
     _parse_switch(opts, output_wc_rf);
     _parse_switch(opts, output_wc_rf_atom_pair);
+    _parse_switch(opts, output_2d_finite_q_diagnostics);
     _parse_int(opts, ifreq_output_wc_start);
     _parse_int(opts, ifreq_output_wc_end);
     {  // backward-compatible
