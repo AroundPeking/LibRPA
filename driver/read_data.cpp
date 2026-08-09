@@ -670,6 +670,10 @@ void read_headwing_input(const string &dir_path, bool need_wing)
         pds->blacs_h, use_kpara_eigvec, &pds->scfk_blacs_ctxt,
         &(pds->eigvecs_kpara_2d_ready() ? pds->desc_wfc_kb : pds->desc_wfc_kb_full));
     pds->p_headwing->use_2d_dielectric = driver::get_bool(driver::opts.use_2d_dielectric);
+        pds->blacs_h, &pds->scfk_blacs_ctxt);
+    pds->p_headwing->configure_strict_2d_coulomb_head(
+        driver::get_bool(driver::opts.use_2d_dielectric),
+        driver::opts.strict_2d_coulomb_head_coefficient);
     pds->p_headwing->use_soc = mf.get_n_spinor() > 1;
     pds->p_headwing->debug = librpa_int::global::should_output(LIBRPA_VERBOSE_DEBUG);
     // Symmetry-aware head/wing uses the same active k-list as the main LibRPA
