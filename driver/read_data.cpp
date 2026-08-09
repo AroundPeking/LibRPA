@@ -62,6 +62,8 @@ librpa::reader::ReaderContext driver_reader_context()
     params.prefix_lri_coeff = driver::driver_params.prefix_lri_coeff;
     params.prefix_lri_coeff_shrink = driver::driver_params.prefix_lri_coeff_shrink;
     params.use_spinor_wfc = driver::driver_params.use_spinor_wfc;
+    params.sternheimer_partial_input =
+        !driver::driver_params.fn_sternheimer_partial_manifest.empty();
     return {driver::h, driver::reader_state, params, driver::opts,
             librpa_int::global::mpi_comm_global_h};
 }

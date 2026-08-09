@@ -241,7 +241,8 @@ ComplexMatrix reconstruct_sternheimer_fixed_q_response(
     const Vector3_Order<double> &q,
     const std::vector<SternheimerFixedQKOrbit> &orbits,
     const std::map<int, ComplexMatrix> &representative_responses,
-    const int lmax)
+    const int lmax,
+    std::vector<SternheimerFixedQKResponse> *kresolved_responses)
 {
     if (orbits.empty())
     {
@@ -251,6 +252,7 @@ ComplexMatrix reconstruct_sternheimer_fixed_q_response(
     std::set<int> used_representatives;
     ComplexMatrix reconstructed;
     bool initialized = false;
+    std::vector<SternheimerFixedQKResponse> kresolved;
     for (const auto &orbit : orbits)
     {
         if (!used_representatives.insert(orbit.representative_ik_full).second)
@@ -279,13 +281,17 @@ ComplexMatrix reconstruct_sternheimer_fixed_q_response(
         }
         for (const auto &member : orbit.members)
         {
-            reconstructed += rotate_sternheimer_partial_response(symmetry,
-                                                                  layouts,
-                                                                  atom_nabf,
-                                                                  member.inverse_route,
-                                                                  q,
-                                                                  response_iter->second,
-                                                                  lmax);
+            SternheimerFixedQKResponse response;
+            response.ik_full = member.ik_full;
+            response.matrix = rotate_sternheimer_partial_response(symmetry,
+                                                                   layouts,
+                                                                   atom_nabf,
+                                                                   member.inverse_route,
+                                                                   q,
+                                                                   response_iter->second,
+                                                                   lmax);
+            reconstructed += response.matrix;
+            kresolved.push_back(std::move(response));
         }
     }
     if (representative_responses.size() != used_representatives.size())
@@ -293,6 +299,20 @@ ComplexMatrix reconstruct_sternheimer_fixed_q_response(
         throw std::runtime_error("Fixed-q reconstruction received unused partial responses");
     }
     require_hermitian_response(reconstructed, "Reconstructed fixed-q Sternheimer response");
+    std::sort(kresolved.begin(), kresolved.end(), [](const auto &lhs, const auto &rhs) {
+        return lhs.ik_full < rhs.ik_full;
+    });
+    for (std::size_t index = 1; index != kresolved.size(); ++index)
+    {
+        if (kresolved[index - 1].ik_full == kresolved[index].ik_full)
+        {
+            throw std::runtime_error("Fixed-q reconstruction produced duplicate k-resolved responses");
+        }
+    }
+    if (kresolved_responses != nullptr)
+    {
+        *kresolved_responses = std::move(kresolved);
+    }
     return reconstructed;
 }
 

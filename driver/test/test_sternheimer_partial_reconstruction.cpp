@@ -1,5 +1,7 @@
 #include <cassert>
 #include <complex>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -117,6 +119,15 @@ void test_reconstructs_all_frequencies_and_reports_orbit_counts()
     assert(reconstructed[0].little_group_order == 1);
     assert(std::abs(reconstructed[0].matrix(0, 0) - std::complex<double>(-3.0, 0.0))
            < 1.0e-12);
+    assert(reconstructed[0].kresolved_responses.size() == 2);
+    assert(reconstructed[0].kresolved_responses[0].ik_full == 0);
+    assert(std::abs(reconstructed[0].kresolved_responses[0].matrix(0, 0)
+                    - std::complex<double>(-1.0, 0.0))
+           < 1.0e-12);
+    assert(reconstructed[0].kresolved_responses[1].ik_full == 1);
+    assert(std::abs(reconstructed[0].kresolved_responses[1].matrix(0, 0)
+                    - std::complex<double>(-2.0, 0.0))
+           < 1.0e-12);
     assert(reconstructed[0].qstar_responses.size() == 2);
     assert(std::abs(reconstructed[1].matrix(0, 0) - std::complex<double>(-9.0, 0.0))
            < 1.0e-12);
@@ -152,6 +163,109 @@ void test_boundary_q_time_reversal_reduces_two_kpoints_to_one_representative()
     assert(reconstructed[0].full_k_count == 2);
     assert(std::abs(reconstructed[0].matrix(0, 0) - std::complex<double>(-4.0, 0.0))
            < 1.0e-12);
+}
+
+void test_explicit_routes_can_retain_two_discrete_hamiltonian_orbits()
+{
+    const Vector3_Order<double> q{0.0, 0.0, 0.0};
+    const auto context = make_one_atom_context(q);
+    const std::vector<Vector3_Order<double>> full_kpoints{{0.25, 0.0, 0.0},
+                                                          {0.75, 0.0, 0.0}};
+    const std::vector<driver::SternheimerFixedQRouteRecord> routes{
+        {1, 0, 0, {0, false, {0, 0, 0}}},
+        {1, 1, 1, {0, false, {0, 0, 0}}},
+    };
+
+    const auto orbits = driver::build_sternheimer_fixed_q_k_orbits_from_routes(
+        context.rspace_operations, full_kpoints, q, routes);
+
+    assert(orbits.size() == 2);
+    assert(orbits[0].representative_ik_full == 0);
+    assert(orbits[0].members.size() == 1);
+    assert(orbits[0].members[0].ik_full == 0);
+    assert(orbits[1].representative_ik_full == 1);
+    assert(orbits[1].members.size() == 1);
+    assert(orbits[1].members[0].ik_full == 1);
+
+    auto wrong_fold = routes;
+    wrong_fold[1].inverse_route.fold_G = {1, 0, 0};
+    require_throws(
+        [&]() {
+            driver::build_sternheimer_fixed_q_k_orbits_from_routes(
+                context.rspace_operations, full_kpoints, q, wrong_fold);
+        },
+        "reciprocal fold disagrees");
+}
+
+void test_matrix_only_reconstructs_one_q_without_claiming_full_q_coverage()
+{
+    const Vector3_Order<double> q{0.0, 0.0, 0.0};
+    const auto context = make_one_atom_context(q);
+    const std::vector<SpeciesBasisLayout> layouts{make_s_layout()};
+    const std::map<atom_t, std::size_t> atom_nabf{{0, 1}};
+    const std::vector<Vector3_Order<double>> full_kpoints{{0.25, 0.0, 0.0},
+                                                          {0.75, 0.0, 0.0}};
+    const std::vector<driver::SternheimerQPoint> qpoints{{1, {0.0, 0.0, 0.0}, 1.0}};
+    driver::SternheimerPartialResponseGroups groups;
+    groups.emplace(std::make_pair(1, 1),
+                   make_group(1, 1, 0.5, 0.125,
+                              {{0, scalar_matrix(-1.0)}, {1, scalar_matrix(-2.0)}}));
+    const std::vector<driver::SternheimerFixedQRouteRecord> routes{
+        {1, 0, 0, {0, false, {0, 0, 0}}},
+        {1, 1, 1, {0, false, {0, 0, 0}}},
+    };
+
+    const auto reconstructed = driver::reconstruct_sternheimer_partial_responses(
+        context, layouts, atom_nabf, full_kpoints, qpoints, groups, 1, true, 0,
+        &routes, true);
+
+    assert(reconstructed.size() == 1);
+    assert(reconstructed[0].representative_k_count == 2);
+    assert(reconstructed[0].kresolved_responses.size() == 2);
+    assert(reconstructed[0].qstar_responses.empty());
+    assert(reconstructed[0].q_weight == 0.0);
+    assert(std::abs(reconstructed[0].matrix(0, 0) - std::complex<double>(-3.0, 0.0))
+           < 1.0e-12);
+}
+
+void test_fixed_q_symmetry_diagnostic_reports_route_and_transform()
+{
+    auto context = make_one_atom_context({0.0, 0.0, 0.0});
+    const std::vector<SpeciesBasisLayout> layouts{make_s_layout()};
+    const std::map<atom_t, std::size_t> atom_nabf{{0, 1}};
+    const std::vector<Vector3_Order<double>> full_kpoints{{0.0, 0.0, 0.0}};
+
+    const auto diagnostics = driver::build_sternheimer_fixed_q_symmetry_diagnostics(
+        context, layouts, atom_nabf, full_kpoints, {0.0, 0.0, 0.0}, 0);
+
+    assert(diagnostics.size() == 1);
+    assert(diagnostics[0].representative_ik_full == 0);
+    assert(diagnostics[0].member_ik_full == 0);
+    assert(diagnostics[0].inverse_route.spatial_isym == 0);
+    assert(!diagnostics[0].inverse_route.time_reversal);
+    assert(std::abs(diagnostics[0].transform(0, 0) - std::complex<double>(1.0, 0.0))
+           < 1.0e-12);
+}
+
+void test_fixed_q_symmetry_diagnostic_writer_records_route_and_transform()
+{
+    driver::SternheimerFixedQSymmetryDiagnostic diagnostic;
+    diagnostic.representative_ik_full = 1;
+    diagnostic.member_ik_full = 4;
+    diagnostic.inverse_route = {3, true, {1, -1, 0}};
+    diagnostic.transform = scalar_matrix(2.0);
+    const auto path = std::filesystem::temp_directory_path()
+                      / "librpa_sternheimer_fixed_q_symmetry_diagnostic_test.dat";
+
+    driver::write_sternheimer_fixed_q_symmetry_diagnostics(path.string(), 2, {diagnostic});
+
+    std::ifstream input(path);
+    const std::string text((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
+    assert(text.find("route 2 1 4 3 1 1 -1 0") != std::string::npos);
+    assert(text.find("matrix 1 1") != std::string::npos);
+    assert(text.find("0 0 2") != std::string::npos);
+    std::filesystem::remove(path);
 }
 
 void test_derives_qweight_from_qstar_without_overwriting_frequency_weight()
@@ -267,6 +381,105 @@ void test_qstar_rpa_audit_uses_internal_weight_and_checks_every_member()
         "q-star trace-log invariance");
 }
 
+void test_default_qstar_tolerance_accepts_dense_linear_algebra_noise()
+{
+    driver::SternheimerReconstructedResponse response;
+    response.iq = 2;
+    response.ifreq = 1;
+    response.omega = 0.5;
+    response.weight = 0.125;
+    response.q_weight = 1.0;
+    response.matrix = scalar_matrix(-0.4);
+    response.qstar_responses = {
+        {0, 0, 0, false, {0.25, 0.0, 0.0}, scalar_matrix(-0.4)},
+        {0, 1, 0, true, {0.75, 0.0, 0.0}, scalar_matrix(-0.4)}};
+    const std::vector<SternheimerQStarResponse> coulomb_qstar{
+        {0, 0, 0, false, {0.25, 0.0, 0.0}, scalar_matrix(2.0)},
+        {0, 1, 0, true, {0.75, 0.0, 0.0}, scalar_matrix(2.00000002)}};
+
+    const auto audit = driver::compute_sternheimer_qstar_rpa_frequency(
+        response, coulomb_qstar, 1.0e-10);
+    assert(audit.max_integrand_difference > 1.0e-10);
+    assert(audit.max_integrand_difference < 1.0e-8);
+}
+
+void test_recovers_target_q_coulomb_from_ibz_representative()
+{
+    const Vector3_Order<double> q_ibz{0.25, 0.0, 0.0};
+    const Vector3_Order<double> q_target{0.75, 0.0, 0.0};
+    auto context = make_one_atom_context(q_ibz);
+    context.kstars.front().members.push_back(build_symmetry_kspace_operation_member(
+        context, 0, true, q_target, q_ibz, 0));
+    const std::vector<SpeciesBasisLayout> layouts{make_s_layout()};
+    const std::map<atom_t, std::size_t> atom_nabf{{0, 1}};
+
+    const auto recovered = driver::reconstruct_sternheimer_full_q_matrices_from_ibz(
+        context,
+        layouts,
+        atom_nabf,
+        {q_ibz},
+        {scalar_matrix(2.0)},
+        0);
+    assert(recovered.size() == 2);
+    const auto target = std::find_if(recovered.cbegin(), recovered.cend(), [&](const auto &member) {
+        return same_fractional_kpoint(member.q, q_target, 1.0e-8);
+    });
+    assert(target != recovered.cend());
+    assert(std::abs(target->matrix(0, 0) - std::complex<double>(2.0, 0.0)) < 1.0e-12);
+}
+
+void test_explicit_discrete_qstar_routes_define_coverage_and_weights()
+{
+    const auto context = make_one_atom_context({0.0, 0.0, 0.0});
+    const std::vector<SpeciesBasisLayout> layouts{make_s_layout()};
+    const std::map<atom_t, std::size_t> atom_nabf{{0, 1}};
+    const std::vector<Vector3_Order<double>> full_kpoints{{0.0, 0.0, 0.0},
+                                                          {0.5, 0.0, 0.0}};
+    const std::vector<driver::SternheimerQPoint> qpoints{{1, {0.0, 0.0, 0.0}, 0.5},
+                                                         {2, {0.5, 0.0, 0.0}, 0.5}};
+    driver::SternheimerPartialResponseGroups groups;
+    groups.emplace(std::make_pair(1, 1),
+                   make_group(1, 1, 0.5, 0.125,
+                              {{0, scalar_matrix(-1.0)}, {1, scalar_matrix(-2.0)}}));
+    groups.emplace(std::make_pair(2, 1),
+                   make_group(2, 1, 0.5, 0.125,
+                              {{0, scalar_matrix(-3.0)}, {1, scalar_matrix(-4.0)}}));
+    const std::vector<driver::SternheimerFixedQRouteRecord> fixed_q_routes{
+        {1, 0, 0, {0, false, {0, 0, 0}}},
+        {1, 1, 1, {0, false, {0, 0, 0}}},
+        {2, 0, 0, {0, false, {0, 0, 0}}},
+        {2, 1, 1, {0, false, {0, 0, 0}}},
+    };
+    const std::vector<driver::SternheimerQStarRouteRecord> qstar_routes{
+        {1, 1, {0, false, {0, 0, 0}}},
+        {2, 2, {0, false, {0, 0, 0}}},
+    };
+
+    const auto reconstructed = driver::reconstruct_sternheimer_partial_responses(
+        context, layouts, atom_nabf, full_kpoints, qpoints, groups, 1, true, 0,
+        &fixed_q_routes, false, &qstar_routes);
+
+    assert(reconstructed.size() == 2);
+    assert(reconstructed[0].qstar_responses.size() == 1);
+    assert(reconstructed[1].qstar_responses.size() == 1);
+    assert(std::abs(reconstructed[0].q_weight - 0.5) < 1.0e-15);
+    assert(std::abs(reconstructed[1].q_weight - 0.5) < 1.0e-15);
+    assert(std::abs(reconstructed[0].matrix(0, 0) - std::complex<double>(-3.0, 0.0))
+           < 1.0e-12);
+    assert(std::abs(reconstructed[1].matrix(0, 0) - std::complex<double>(-7.0, 0.0))
+           < 1.0e-12);
+
+    auto wrong_fold = qstar_routes;
+    wrong_fold[1].inverse_route.fold_G = {1, 0, 0};
+    require_throws(
+        [&]() {
+            driver::reconstruct_sternheimer_partial_responses(
+                context, layouts, atom_nabf, full_kpoints, qpoints, groups, 1, true, 0,
+                &fixed_q_routes, false, &wrong_fold);
+        },
+        "q-star route reciprocal fold disagrees");
+}
+
 void test_rejects_missing_representative_and_frequency()
 {
     const Vector3_Order<double> q{0.0, 0.0, 0.0};
@@ -308,10 +521,17 @@ int main()
 {
     test_reconstructs_all_frequencies_and_reports_orbit_counts();
     test_boundary_q_time_reversal_reduces_two_kpoints_to_one_representative();
+    test_explicit_routes_can_retain_two_discrete_hamiltonian_orbits();
+    test_matrix_only_reconstructs_one_q_without_claiming_full_q_coverage();
+    test_fixed_q_symmetry_diagnostic_reports_route_and_transform();
+    test_fixed_q_symmetry_diagnostic_writer_records_route_and_transform();
     test_derives_qweight_from_qstar_without_overwriting_frequency_weight();
     test_rejects_normalized_manifest_weights_that_disagree_with_qstars();
     test_rejects_qstars_that_do_not_cover_the_full_q_grid();
     test_qstar_rpa_audit_uses_internal_weight_and_checks_every_member();
+    test_default_qstar_tolerance_accepts_dense_linear_algebra_noise();
+    test_recovers_target_q_coulomb_from_ibz_representative();
+    test_explicit_discrete_qstar_routes_define_coverage_and_weights();
     test_rejects_missing_representative_and_frequency();
     return 0;
 }

@@ -42,6 +42,12 @@ struct SternheimerFixedQKOrbit
     std::vector<SternheimerFixedQKOrbitMember> members;
 };
 
+struct SternheimerFixedQKResponse
+{
+    int ik_full = -1;
+    ComplexMatrix matrix;
+};
+
 struct SternheimerQStarResponse
 {
     int star_index = -1;
@@ -79,7 +85,8 @@ ComplexMatrix reconstruct_sternheimer_fixed_q_response(
     const Vector3_Order<double> &q,
     const std::vector<SternheimerFixedQKOrbit> &orbits,
     const std::map<int, ComplexMatrix> &representative_responses,
-    int lmax);
+    int lmax,
+    std::vector<SternheimerFixedQKResponse> *kresolved_responses = nullptr);
 
 std::vector<SternheimerQStarResponse> reconstruct_sternheimer_qstar_responses(
     const SymmetryContext &symmetry,
