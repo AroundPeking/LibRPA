@@ -75,6 +75,7 @@ foreach(target
   test_base_mpi
   test_blacs
   test_dataset
+  test_libcomm_bounded_exchange
   test_matrix_m_mpi
   test_meanfield_mpi
   test_kpoint_blacs_parallel_context

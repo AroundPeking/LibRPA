@@ -13,6 +13,10 @@
 #include <string>
 #include <stdexcept>
 #include <cassert>
+#include <algorithm>
+#include <cstdlib>
+#include <iostream>
+#include <limits>
 
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/tuple.hpp>
@@ -64,6 +68,28 @@ Comm_Trans<Tkey,Tvalue,Tdatas_isend,Tdatas_recv>::Comm_Trans(const Comm_Trans &c
 
 template<typename Tkey, typename Tvalue, typename Tdatas_isend, typename Tdatas_recv>
 void Comm_Trans<Tkey,Tvalue,Tdatas_isend,Tdatas_recv>::communicate(
+	const Tdatas_isend &datas_isend,
+	Tdatas_recv &datas_recv)
+{
+	const char *mode_env = std::getenv("LIBCOMM_TRANS_MODE");
+	const std::string mode = mode_env == nullptr ? "nonblocking" : mode_env;
+	if(mode.empty() || mode == "nonblocking")
+	{
+		this->communicate_nonblocking(datas_isend, datas_recv);
+	}
+	else if(mode == "sendrecv_ring")
+	{
+		this->communicate_sendrecv_ring(datas_isend, datas_recv);
+	}
+	else
+	{
+		throw std::invalid_argument("Unknown LIBCOMM_TRANS_MODE: " + mode);
+	}
+}
+
+
+template<typename Tkey, typename Tvalue, typename Tdatas_isend, typename Tdatas_recv>
+void Comm_Trans<Tkey,Tvalue,Tdatas_isend,Tdatas_recv>::communicate_nonblocking(
 	const Tdatas_isend &datas_isend,
 	Tdatas_recv &datas_recv)
 {
@@ -170,6 +196,154 @@ void Comm_Trans<Tkey,Tvalue,Tdatas_isend,Tdatas_recv>::communicate(
 			else {break;}
 		}
 	}
+}
+
+
+template<typename Tkey, typename Tvalue, typename Tdatas_isend, typename Tdatas_recv>
+std::string Comm_Trans<Tkey,Tvalue,Tdatas_isend,Tdatas_recv>::serialize_for_rank(
+	const int rank_isend,
+	const Tdatas_isend &datas_isend) const
+{
+	std::stringstream stream;
+	{
+		cereal::BinaryOutputArchive archive(stream);
+		std::size_t size_item = 0;
+		archive(size_item);
+		std::function<void(const Tkey&, const Tvalue&)> archive_data = [&archive, &size_item](
+			const Tkey &key, const Tvalue &value)
+		{
+			archive(key, value);
+			++size_item;
+		};
+		this->traverse_isend(datas_isend, rank_isend, archive_data);
+		stream.rdbuf()->pubseekpos(0);
+		archive(size_item);
+	}
+	return stream.str();
+}
+
+
+template<typename Tkey, typename Tvalue, typename Tdatas_isend, typename Tdatas_recv>
+void Comm_Trans<Tkey,Tvalue,Tdatas_isend,Tdatas_recv>::deserialize_from_rank(
+	const int rank_recv,
+	const std::vector<char> &buffer_recv,
+	Tdatas_recv &datas_recv) const
+{
+	const std::string serialized(buffer_recv.begin(), buffer_recv.end());
+	std::istringstream stream(serialized, std::ios::binary);
+	cereal::BinaryInputArchive archive(stream);
+	std::size_t size_item = 0;
+	archive(size_item);
+
+	if(this->flag_lock_set_value == Comm_Tools::Lock_Type::Copy_merge)
+	{
+		Tdatas_recv datas_local = this->init_datas_local(rank_recv);
+		for(std::size_t i = 0; i != size_item; ++i)
+		{
+			Tkey key;
+			Tvalue value;
+			archive(key, value);
+			this->set_value_recv(std::move(key), std::move(value), datas_local);
+		}
+		this->add_datas(std::move(datas_local), datas_recv);
+		return;
+	}
+
+	if(this->flag_lock_set_value != Comm_Tools::Lock_Type::Lock_free &&
+	   this->flag_lock_set_value != Comm_Tools::Lock_Type::Lock_item &&
+	   this->flag_lock_set_value != Comm_Tools::Lock_Type::Lock_Process)
+	{
+		throw std::invalid_argument(
+			"Unknown flag_lock_set_value on rank " + std::to_string(this->rank_mine));
+	}
+
+	// The ring backend deserializes one peer at a time on the calling thread.
+	for(std::size_t i = 0; i != size_item; ++i)
+	{
+		Tkey key;
+		Tvalue value;
+		archive(key, value);
+		this->set_value_recv(std::move(key), std::move(value), datas_recv);
+	}
+}
+
+
+template<typename Tkey, typename Tvalue, typename Tdatas_isend, typename Tdatas_recv>
+void Comm_Trans<Tkey,Tvalue,Tdatas_isend,Tdatas_recv>::communicate_sendrecv_ring(
+	const Tdatas_isend &datas_isend,
+	Tdatas_recv &datas_recv)
+{
+	// Keep only one peer's serialized send/receive buffers live at a time.  The
+	// duplicated communicator isolates the ring's size and payload messages.
+	std::size_t chunk_bytes = std::size_t{64} << 20;
+	if(const char *chunk_env = std::getenv("LIBCOMM_TRANS_CHUNK_BYTES"))
+		chunk_bytes = std::stoull(chunk_env);
+	chunk_bytes = std::max<std::size_t>(1, std::min<std::size_t>(
+		chunk_bytes, static_cast<std::size_t>(std::numeric_limits<int>::max())));
+	const bool trace = []()
+	{
+		const char *trace_env = std::getenv("LIBCOMM_TRANS_TRACE");
+		return trace_env != nullptr && std::string(trace_env) != "0";
+	}();
+
+	MPI_Comm ring_comm = MPI_COMM_NULL;
+	MPI_CHECK(MPI_Comm_dup(this->mpi_comm, &ring_comm));
+	constexpr int tag_size = 0;
+	constexpr int tag_payload = 1;
+
+	for(int step = 0; step != this->comm_size; ++step)
+	{
+		const int rank_isend = (this->rank_mine + step) % this->comm_size;
+		const int rank_recv = (this->rank_mine - step + this->comm_size) % this->comm_size;
+		const std::string buffer_isend = this->serialize_for_rank(rank_isend, datas_isend);
+		const unsigned long long size_isend = buffer_isend.size();
+		unsigned long long size_recv = 0;
+		MPI_CHECK(MPI_Sendrecv(
+			&size_isend, 1, MPI_UNSIGNED_LONG_LONG, rank_isend, tag_size,
+			&size_recv, 1, MPI_UNSIGNED_LONG_LONG, rank_recv, tag_size,
+			ring_comm, MPI_STATUS_IGNORE));
+
+		std::vector<char> buffer_recv(static_cast<std::size_t>(size_recv));
+		const std::size_t send_rounds =
+			(buffer_isend.size() + chunk_bytes - 1) / chunk_bytes;
+		const std::size_t recv_rounds =
+			(buffer_recv.size() + chunk_bytes - 1) / chunk_bytes;
+		unsigned long long local_rounds = std::max(send_rounds, recv_rounds);
+		unsigned long long global_rounds = 0;
+		MPI_CHECK(MPI_Allreduce(
+			&local_rounds, &global_rounds, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, ring_comm));
+
+		if(trace)
+		{
+			std::cerr << "LIBCOMM_TRANS_RING rank=" << this->rank_mine
+			          << " step=" << step
+			          << " send_rank=" << rank_isend
+			          << " recv_rank=" << rank_recv
+			          << " send_bytes=" << size_isend
+			          << " recv_bytes=" << size_recv
+			          << " rounds=" << global_rounds << std::endl;
+		}
+
+		for(std::size_t round = 0; round != static_cast<std::size_t>(global_rounds); ++round)
+		{
+			const std::size_t send_offset = std::min(round * chunk_bytes, buffer_isend.size());
+			const std::size_t recv_offset = std::min(round * chunk_bytes, buffer_recv.size());
+			const int send_count = static_cast<int>(std::min(
+				chunk_bytes, buffer_isend.size() - send_offset));
+			const int recv_count = static_cast<int>(std::min(
+				chunk_bytes, buffer_recv.size() - recv_offset));
+			const char *send_ptr = send_count == 0 ? nullptr : buffer_isend.data() + send_offset;
+			char *recv_ptr = recv_count == 0 ? nullptr : buffer_recv.data() + recv_offset;
+			MPI_CHECK(MPI_Sendrecv(
+				send_ptr, send_count, MPI_BYTE, rank_isend, tag_payload,
+				recv_ptr, recv_count, MPI_BYTE, rank_recv, tag_payload,
+				ring_comm, MPI_STATUS_IGNORE));
+		}
+
+		this->deserialize_from_rank(rank_recv, buffer_recv, datas_recv);
+	}
+
+	MPI_CHECK(MPI_Comm_free(&ring_comm));
 }
 
 
