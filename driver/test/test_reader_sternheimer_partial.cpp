@@ -196,9 +196,127 @@ void test_rejects_empty_manifest()
 void test_partial_task_requires_explicit_qpoint_manifest()
 {
     driver::validate_sternheimer_partial_task_contract("qpoints.dat", "partial.dat");
+    driver::validate_sternheimer_partial_task_contract(
+        "qpoints.dat", "partial.dat", "routes.dat");
     driver::validate_sternheimer_partial_task_contract("", "");
     require_throws([]() { driver::validate_sternheimer_partial_task_contract("", "partial.dat"); },
                    "requires fn_sternheimer_qpoints");
+    require_throws(
+        []() { driver::validate_sternheimer_partial_task_contract("qpoints.dat", "", "routes.dat"); },
+        "requires fn_sternheimer_partial_manifest");
+}
+
+void test_reads_full_kpoint_manifest_in_abacus_index_order()
+{
+    TempDirectory temp;
+    const auto manifest = temp.path / "v1_sternheimer_full_kpoints.dat";
+    write_text(manifest,
+               "# ik_full kx ky kz\n"
+               "2 0 0.5 0\n"
+               "0 0 0 0\n"
+               "1 0.5 0 0\n");
+
+    const auto points = driver::read_sternheimer_full_kpoint_manifest(manifest.string());
+    assert(points.size() == 3);
+    assert(points[0].ik_full == 0);
+    assert((points[0].k == std::array<double, 3>{0.0, 0.0, 0.0}));
+    assert(points[1].ik_full == 1);
+    assert((points[1].k == std::array<double, 3>{0.5, 0.0, 0.0}));
+    assert(points[2].ik_full == 2);
+    assert((points[2].k == std::array<double, 3>{0.0, 0.5, 0.0}));
+}
+
+void test_rejects_noncontiguous_full_kpoint_manifest()
+{
+    TempDirectory temp;
+    const auto manifest = temp.path / "v1_sternheimer_full_kpoints.dat";
+    write_text(manifest, "0 0 0 0\n2 0.5 0 0\n");
+    require_throws(
+        [&]() { driver::read_sternheimer_full_kpoint_manifest(manifest.string()); },
+        "indices are not contiguous from zero");
+}
+
+void test_reads_versioned_fixed_q_inverse_routes()
+{
+    TempDirectory temp;
+    const auto manifest = temp.path / "v1_sternheimer_symmetry_routes.dat";
+    write_text(manifest,
+               "version 1\n"
+               "# iq representative_ik member_ik spatial_isym time_reversal fold_Gx fold_Gy fold_Gz\n"
+               "1 3 6 2 1 0 -1 0\n"
+               "1 0 0 0 0 0 0 0\n"
+               "4 1 1 0 0 0 0 0\n");
+
+    const auto routes = driver::read_sternheimer_fixed_q_route_manifest(manifest.string());
+    assert(routes.size() == 3);
+    assert(routes[0].iq == 1);
+    assert(routes[0].representative_ik_full == 0);
+    assert(routes[0].member_ik_full == 0);
+    assert(routes[0].inverse_route.spatial_isym == 0);
+    assert(!routes[0].inverse_route.time_reversal);
+    assert(routes[1].iq == 1);
+    assert(routes[1].representative_ik_full == 3);
+    assert(routes[1].member_ik_full == 6);
+    assert(routes[1].inverse_route.spatial_isym == 2);
+    assert(routes[1].inverse_route.time_reversal);
+    assert(routes[1].inverse_route.fold_G.x == 0);
+    assert(routes[1].inverse_route.fold_G.y == -1);
+    assert(routes[1].inverse_route.fold_G.z == 0);
+    assert(routes[2].iq == 4);
+}
+
+void test_rejects_route_version_and_duplicate_q_member()
+{
+    TempDirectory temp;
+    const auto bad_version = temp.path / "bad_version.dat";
+    write_text(bad_version, "version 2\n1 0 0 0 0 0 0 0\n");
+    require_throws(
+        [&]() { driver::read_sternheimer_fixed_q_route_manifest(bad_version.string()); },
+        "unsupported Sternheimer fixed-q route version");
+
+    const auto duplicate = temp.path / "duplicate.dat";
+    write_text(duplicate,
+               "version 1\n"
+               "1 0 0 0 0 0 0 0\n"
+               "1 1 0 0 0 0 0 0\n");
+    require_throws(
+        [&]() { driver::read_sternheimer_fixed_q_route_manifest(duplicate.string()); },
+        "duplicate (iq, member_ik)");
+}
+
+void test_reads_versioned_discrete_qstar_inverse_routes()
+{
+    TempDirectory temp;
+    const auto manifest = temp.path / "v1_sternheimer_qstar_routes.dat";
+    write_text(manifest,
+               "version 1\n"
+               "# representative_iq member_iq spatial_isym time_reversal fold_Gx fold_Gy fold_Gz\n"
+               "1 1 0 0 0 0 0\n"
+               "2 2 0 0 0 0 0\n"
+               "2 3 4 1 1 -1 0\n");
+
+    const auto routes = driver::read_sternheimer_qstar_route_manifest(manifest.string());
+    assert(routes.size() == 3);
+    assert(routes[0].representative_iq == 1);
+    assert(routes[0].member_iq == 1);
+    assert(routes[1].representative_iq == 2);
+    assert(routes[1].member_iq == 2);
+    assert(routes[2].representative_iq == 2);
+    assert(routes[2].member_iq == 3);
+    assert(routes[2].inverse_route.spatial_isym == 4);
+    assert(routes[2].inverse_route.time_reversal);
+    assert(routes[2].inverse_route.fold_G.x == 1);
+    assert(routes[2].inverse_route.fold_G.y == -1);
+    assert(routes[2].inverse_route.fold_G.z == 0);
+
+    const auto duplicate = temp.path / "duplicate_qstar.dat";
+    write_text(duplicate,
+               "version 1\n"
+               "1 1 0 0 0 0 0\n"
+               "2 1 0 0 0 0 0\n");
+    require_throws(
+        [&]() { driver::read_sternheimer_qstar_route_manifest(duplicate.string()); },
+        "duplicate member_iq");
 }
 
 void test_groups_explicit_response_files_by_q_and_frequency()
@@ -325,6 +443,11 @@ int main()
     test_rejects_missing_response_file();
     test_rejects_empty_manifest();
     test_partial_task_requires_explicit_qpoint_manifest();
+    test_reads_full_kpoint_manifest_in_abacus_index_order();
+    test_rejects_noncontiguous_full_kpoint_manifest();
+    test_reads_versioned_fixed_q_inverse_routes();
+    test_rejects_route_version_and_duplicate_q_member();
+    test_reads_versioned_discrete_qstar_inverse_routes();
     test_groups_explicit_response_files_by_q_and_frequency();
     test_grouping_rejects_binary_header_and_frequency_metadata_mismatch();
     test_sternheimer_v1_writer_round_trips_complex_atom_blocks();
