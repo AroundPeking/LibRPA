@@ -236,8 +236,6 @@ module librpa_f03
       integer :: option_dielect_func
       !> Experimental: use the 2D dielectric-function branch where supported.
       logical :: use_2d_dielectric
-      !> Raw auxiliary-basis 2D Coulomb head coefficient A_lambda.
-      real(dp) :: strict_2d_coulomb_head_coefficient
       !> First regular Coulomb-eigenbasis channel used by RPA head/wing correction.
       integer :: rpa_headwing_body_start
       !> Experimental: read NAO correlation self-energy matrix in real-space/frequency form.

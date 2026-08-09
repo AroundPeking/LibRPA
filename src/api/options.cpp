@@ -119,7 +119,6 @@ void librpa_init_options(LibrpaOptions *opts)
     opts->replace_w_head = LIBRPA_SWITCH_OFF;
     opts->option_dielect_func = 0;
     opts->use_2d_dielectric = LIBRPA_SWITCH_OFF;
-    opts->strict_2d_coulomb_head_coefficient = 0.0;
     opts->rpa_headwing_body_start = 0;
     opts->rpa_headwing_mode[0] = '\0';
     std::strncpy(opts->rpa_headwing_mode, "qavg", LIBRPA_MAX_STRLEN);
