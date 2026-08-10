@@ -21,6 +21,7 @@
 #include "../math/lapack_connector.h"
 #include "../math/matrix.h"
 #include "../math/scalapack_connector.h"
+#include "../math/shrink_local_blas.h"
 #include "../math/utils_matrix_mpi.h"
 #include "../math/utils_matrix_m_mpi.h"
 #include "../mpi/base_blacs.h"
@@ -1790,34 +1791,6 @@ static void shrink_abfs_chi0(
     int natom = abf_large.n_atoms;
 
     const complex<double> CONE{1.0, 0.0};
-    auto shrink_layout = make_shrink_scalapack_layout(
-        blacs_ctxt_h, all_mu, all_mu_s, SHRINK_SCALAPACK_BLOCK_SIZE);
-    const auto &desc_nabf_nabf_ll = shrink_layout.large_large;
-    const auto &desc_nabf_nabf_sl = shrink_layout.small_large;
-    const auto &desc_nabf_nabf_ss = shrink_layout.small_small;
-    const auto set_IJ_nabf_nabf =
-        get_necessary_IJ_from_block_2D_sy('U', abf_large, desc_nabf_nabf_ll);
-    const auto s0_s1 = get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf);
-    auto chi0_block = init_local_mat<complex<double>>(desc_nabf_nabf_ll, MAJOR::COL);
-    auto chi0ss_block = init_local_mat<complex<double>>(desc_nabf_nabf_ss, MAJOR::COL);
-    auto u_block = init_local_mat<complex<double>>(desc_nabf_nabf_sl, MAJOR::COL);
-    auto u_chi0 = init_local_mat<complex<double>>(desc_nabf_nabf_sl, MAJOR::COL);
-    // for 2D->IJ
-    int I, iI;
-    map<int, vector<int>> map_lor_v;
-    map<int, vector<int>> map_loc_v;
-    for (int i_lo = 0; i_lo != desc_nabf_nabf_ss.m_loc(); i_lo++)
-    {
-        int i_glo = desc_nabf_nabf_ss.indx_l2g_r(i_lo);
-        abf_small.get_local_index(i_glo, I, iI);
-        map_lor_v[I].push_back(iI);
-    }
-    for (int i_lo = 0; i_lo != desc_nabf_nabf_ss.n_loc(); i_lo++)
-    {
-        int i_glo = desc_nabf_nabf_ss.indx_l2g_c(i_lo);
-        abf_small.get_local_index(i_glo, I, iI);
-        map_loc_v[I].push_back(iI);
-    }
     // IJ pair of shrinked chi0 to be returned
     std::pair<std::set<int>, std::set<int>> Iset_Jset_c;
     const auto atpair_local = dispatch_upper_triangular_tasks(
@@ -1830,8 +1803,8 @@ static void shrink_abfs_chi0(
     }
     const bool verbose_progress = global::should_output(LIBRPA_VERBOSE_DEBUG);
     global::lib_printf_root(
-        "SHRINK_CHI0_LAYOUT large=%d small=%d block=%d ranks=%d grid=%dx%d nq=%zu\n",
-        all_mu, all_mu_s, SHRINK_SCALAPACK_BLOCK_SIZE, comm_h.nprocs,
+        "SHRINK_CHI0_LAYOUT mode=q_owner_local_blas large=%d small=%d ranks=%d grid=%dx%d nq=%zu\n",
+        all_mu, all_mu_s, comm_h.nprocs,
         blacs_ctxt_h.nprows, blacs_ctxt_h.npcols, qlist.size());
     for (std::size_t iq = 0; iq < qlist.size(); iq++)
     {
@@ -1845,11 +1818,26 @@ static void shrink_abfs_chi0(
         const auto &q = qlist[iq];
         std::array<double, 3> qa = {q.x, q.y, q.z};
         const auto &U = sinvS.at(q);
+        const int owner_rank = shrink_q_owner(iq, comm_h.nprocs);
+        auto owner_layout = make_shrink_owner_layout(
+            blacs_ctxt_h, all_mu, all_mu_s, owner_rank);
+        const auto &desc_nabf_nabf_ll = owner_layout.large_large;
+        const auto &desc_nabf_nabf_sl = owner_layout.small_large;
+        const auto &desc_nabf_nabf_ss = owner_layout.small_small;
+        const auto set_IJ_nabf_nabf =
+            get_necessary_IJ_from_block_2D_sy('U', abf_large,
+                                              desc_nabf_nabf_ll);
+        const auto s0_s1 =
+            get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf);
+        auto chi0_block =
+            init_local_mat<complex<double>>(desc_nabf_nabf_ll, MAJOR::COL);
+        auto chi0ss_block =
+            init_local_mat<complex<double>>(desc_nabf_nabf_ss, MAJOR::COL);
+        auto u_block =
+            init_local_mat<complex<double>>(desc_nabf_nabf_sl, MAJOR::COL);
+        auto u_chi0 =
+            init_local_mat<complex<double>>(desc_nabf_nabf_sl, MAJOR::COL);
         // profiler.start("shrink_prepare_chi0_2d", "Prepare Chi0 2D block for shrink");
-        chi0_block.zero_out();
-        chi0ss_block.zero_out();
-        u_block.zero_out();
-        u_chi0.zero_out();
         const double input_start = MPI_Wtime();
         {
             std::map<int,
@@ -1900,39 +1888,48 @@ static void shrink_abfs_chi0(
                 u_block(ilo, jlo) = U(ir, ic);
             }
         }
-        const double input_seconds = MPI_Wtime() - input_start;
+        const double input_seconds_local = MPI_Wtime() - input_start;
+        double input_seconds = 0.0;
+        MPI_Allreduce(&input_seconds_local, &input_seconds, 1, MPI_DOUBLE,
+                      MPI_MAX, comm_h.comm);
         if (report_progress)
             global::lib_printf_root(
-                "SHRINK_CHI0_PROGRESS iq=%zu/%zu phase=input_done elapsed_s=%.6f\n",
-                iq + 1, qlist.size(), input_seconds);
-        // Shape of u_block is N_small x N_large
-        const double gemm1_start = MPI_Wtime();
-        ScalapackConnector::pgemm_f('N', 'N', all_mu_s, all_mu, all_mu, 1.0, u_block.ptr(), 1, 1,
-                                    desc_nabf_nabf_sl.desc, chi0_block.ptr(), 1, 1,
-                                    desc_nabf_nabf_ll.desc, 0.0, u_chi0.ptr(), 1, 1,
-                                    desc_nabf_nabf_sl.desc);
-        const double gemm1_seconds = MPI_Wtime() - gemm1_start;
+                "SHRINK_CHI0_PROGRESS iq=%zu/%zu owner=%d phase=input_done elapsed_s=%.6f\n",
+                iq + 1, qlist.size(), owner_rank, input_seconds);
+        double gemm1_seconds_local = 0.0;
+        double gemm2_seconds_local = 0.0;
+        if (comm_h.myid == owner_rank)
+        {
+            validate_shrink_local_blas_shapes(
+                u_block, chi0_block, u_chi0, chi0ss_block);
+            const double gemm1_start = MPI_Wtime();
+            shrink_local_blas_left(u_block, chi0_block, u_chi0);
+            gemm1_seconds_local = MPI_Wtime() - gemm1_start;
+            const double gemm2_start = MPI_Wtime();
+            shrink_local_blas_right(u_block, u_chi0, chi0ss_block);
+            gemm2_seconds_local = MPI_Wtime() - gemm2_start;
+        }
+        double gemm1_seconds = 0.0;
+        double gemm2_seconds = 0.0;
+        MPI_Allreduce(&gemm1_seconds_local, &gemm1_seconds, 1, MPI_DOUBLE,
+                      MPI_MAX, comm_h.comm);
         if (report_progress)
             global::lib_printf_root(
-                "SHRINK_CHI0_PROGRESS iq=%zu/%zu phase=gemm1_done elapsed_s=%.6f\n",
-                iq + 1, qlist.size(), gemm1_seconds);
-        const double gemm2_start = MPI_Wtime();
-        ScalapackConnector::pgemm_f('N', 'C', all_mu_s, all_mu_s, all_mu, 1.0, u_chi0.ptr(), 1, 1,
-                                    desc_nabf_nabf_sl.desc, u_block.ptr(), 1, 1,
-                                    desc_nabf_nabf_sl.desc, 0.0, chi0ss_block.ptr(), 1, 1,
-                                    desc_nabf_nabf_ss.desc);
-        const double gemm2_seconds = MPI_Wtime() - gemm2_start;
+                "SHRINK_CHI0_PROGRESS iq=%zu/%zu owner=%d phase=gemm1_done elapsed_s=%.6f\n",
+                iq + 1, qlist.size(), owner_rank, gemm1_seconds);
+        MPI_Allreduce(&gemm2_seconds_local, &gemm2_seconds, 1, MPI_DOUBLE,
+                      MPI_MAX, comm_h.comm);
         if (report_progress)
             global::lib_printf_root(
-                "SHRINK_CHI0_PROGRESS iq=%zu/%zu phase=gemm2_done elapsed_s=%.6f\n",
-                iq + 1, qlist.size(), gemm2_seconds);
+                "SHRINK_CHI0_PROGRESS iq=%zu/%zu owner=%d phase=gemm2_done elapsed_s=%.6f\n",
+                iq + 1, qlist.size(), owner_rank, gemm2_seconds);
 
         // shrinked_chi0 = U * large_chi0 * transpose(U, true);
 
         const double output_start = MPI_Wtime();
         map<int, map<int, matrix_m<complex<double>>>> chi0s_MNmap;
-        map_block_to_IJ_storage_new(chi0s_MNmap, abf_small, map_lor_v, map_loc_v,
-                                    chi0ss_block, desc_nabf_nabf_ss, MAJOR::ROW);
+        map_block_to_IJ_storage(chi0s_MNmap, abf_small, abf_small,
+                                chi0ss_block, desc_nabf_nabf_ss, MAJOR::ROW);
 
         std::map<int, std::map<std::pair<int, std::array<double, 3>>, RI::Tensor<complex<double>>>>
             shrinked_chi0_libri;
@@ -1990,12 +1987,19 @@ static void shrink_abfs_chi0(
                 }
             }
         }
-        const double output_seconds = MPI_Wtime() - output_start;
+        const double output_seconds_local = MPI_Wtime() - output_start;
+        double output_seconds = 0.0;
+        MPI_Allreduce(&output_seconds_local, &output_seconds, 1, MPI_DOUBLE,
+                      MPI_MAX, comm_h.comm);
+        const double total_seconds_local = MPI_Wtime() - q_start;
+        double total_seconds = 0.0;
+        MPI_Allreduce(&total_seconds_local, &total_seconds, 1, MPI_DOUBLE,
+                      MPI_MAX, comm_h.comm);
         if (report_progress)
             global::lib_printf_root(
-                "SHRINK_CHI0_PROGRESS iq=%zu/%zu phase=complete input_s=%.6f gemm1_s=%.6f gemm2_s=%.6f output_s=%.6f total_s=%.6f\n",
-                iq + 1, qlist.size(), input_seconds, gemm1_seconds,
-                gemm2_seconds, output_seconds, MPI_Wtime() - q_start);
+                "SHRINK_CHI0_PROGRESS iq=%zu/%zu owner=%d phase=complete input_s=%.6f gemm1_s=%.6f gemm2_s=%.6f output_s=%.6f total_s=%.6f\n",
+                iq + 1, qlist.size(), owner_rank, input_seconds,
+                gemm1_seconds, gemm2_seconds, output_seconds, total_seconds);
     }
 }
 #endif

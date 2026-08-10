@@ -154,3 +154,28 @@ The work is complete only when:
 - the full MnF2 calculation reports `libRPA finished successfully` and writes
   all six expected 310-line KS/EXX/GW band files;
 - the final GW band figure and quantitative summary are generated.
+
+## Measured df_dcu block-size result (2026-08-10)
+
+The production-shape benchmark was built from commit `b50ef7aa` with Intel
+MPI/MKL 2021.3 and run with the TCP provider that had passed the earlier MPI
+initialization gate.  The one-rank 1884-to-1078 benchmark completed for block
+sizes 64, 128, 256, and the previous coarse layout with relative error
+`1.0833e-16` and Hermiticity residual `5.5781e-19`.
+
+On four nodes, however, none of block 64, 128, 256, or the previous coarse
+layout completed a single q-point two-GEMM benchmark within the three-minute
+runtime gate.  The jobs were canceled after preserving stacks.  All sampled
+layouts were inside `pzgemm` (`PB_CpgemmAB` or `PB_CpgemmBC`), with BLACS/MPI
+receive frames where present.  Each rank created 30 threads but consumed only
+about one CPU core in aggregate.  Therefore the block-size hypothesis is
+rejected for the matched TCP runtime; a different block size does not make the
+formal calculation viable.
+
+Following the predeclared Stage 4 fallback, the shrink transformation is now
+being changed to rotate q-point ownership among MPI ranks.  The owner gathers
+the Hermitian full q matrix, evaluates the unchanged two products with
+node-local threaded BLAS, and redistributes the small atom-pair blocks through
+the existing LibRI communication path.  Later Wc and self-energy ScaLAPACK
+operations remain unchanged until the reduced-frequency downstream gate shows
+whether they also require an owner-local path.

@@ -1,5 +1,6 @@
 #include "../mpi/global_mpi.h"
 #include "../mpi/shrink_scalapack_layout.h"
+#include "../math/shrink_local_blas.h"
 #include "../math/scalapack_connector.h"
 #include "../math/utils_matrix_m_mpi.h"
 
@@ -212,6 +213,52 @@ int main(int argc, char *argv[])
     assert(layout.small_large.nb() == 128);
     assert(layout.small_small.mb() == 128);
     assert(layout.small_small.nb() == 128);
+    assert(shrink_q_owner(0, 4) == 0);
+    assert(shrink_q_owner(3, 4) == 3);
+    assert(shrink_q_owner(4, 4) == 0);
+    const int owner_rank = size_global > 1 ? 1 : 0;
+    const auto owner_layout =
+        make_shrink_owner_layout(blacs_h, 1884, 1078, owner_rank);
+    int owner_sources_local = owner_layout.large_large.is_src() ? 1 : 0;
+    int owner_sources_total = 0;
+    MPI_Allreduce(&owner_sources_local, &owner_sources_total, 1, MPI_INT,
+                  MPI_SUM, blacs_h.comm());
+    assert(owner_sources_total == 1);
+    if (myid_global == owner_rank)
+    {
+        assert(owner_layout.large_large.m_loc() == 1884);
+        assert(owner_layout.large_large.n_loc() == 1884);
+        assert(owner_layout.small_large.m_loc() == 1078);
+        assert(owner_layout.small_large.n_loc() == 1884);
+        assert(owner_layout.small_small.m_loc() == 1078);
+        assert(owner_layout.small_small.n_loc() == 1078);
+    }
+    else
+    {
+        assert(owner_layout.large_large.m_loc() == 0 ||
+               owner_layout.large_large.n_loc() == 0);
+        assert(owner_layout.small_small.m_loc() == 0 ||
+               owner_layout.small_small.n_loc() == 0);
+    }
+
+    matrix_m<Complex> local_chi0(7, 7, MAJOR::COL);
+    matrix_m<Complex> local_u(4, 7, MAJOR::COL);
+    matrix_m<Complex> local_tmp(4, 7, MAJOR::COL);
+    matrix_m<Complex> local_result(4, 4, MAJOR::COL);
+    for (int j = 0; j < 7; ++j)
+        for (int i = 0; i < 7; ++i)
+            local_chi0(i, j) = hermitian_element(i, j, 7);
+    local_u.zero_out();
+    for (int i = 0; i < 4; ++i)
+        local_u(i, i) = row_scale(i);
+    shrink_local_blas(local_u, local_chi0, local_tmp, local_result);
+    for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < 4; ++i)
+        {
+            const Complex reference =
+                row_scale(i) * hermitian_element(i, j, 7) * row_scale(j);
+            assert(std::abs(local_result(i, j) - reference) <= 1.0e-12);
+        }
     assert(should_report_shrink_qpoint(0, 65, false));
     assert(!should_report_shrink_qpoint(1, 65, false));
     assert(should_report_shrink_qpoint(9, 65, false));
