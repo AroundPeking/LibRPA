@@ -59,6 +59,27 @@ commits.
 | `strict2d-rawnorm-qshell-diag-20260728` | `4181ded77c847860eacca1f13f95fc7ba3be9fbfcd445ec29d326659a6feba43` | `c282619cb10baaaa265a9d40b6349937a9801eae1cdf1ae539d2dd6fd19352d8` | Diagnostic shell labels only. |
 | `strict2d-omega0-override-20260801` | `2190ac45ef36d6061f5e7edd11eb619452bcb1228acc138c1a8e82138f65b6de` | `d803ffd6485c0eee375576eea2127318f1c5a028aeeffcfffc11138d7518ee8f` | Diagnostic response overrides and dumps; not production behavior. |
 
+## Branch Reconciliation
+
+The following branch-tip audit prevents a historical worktree from becoming
+an implicit second production line.  "Present" means that the behavior is in
+the active lineage or in its `master_ghj` base; it does not require retaining
+the old commit hash when the change was ported or superseded.
+
+| Historical branch | Production behavior checked | Active-line evidence | Disposition |
+|---|---|---|---|
+| `codex/headwing-activek-master-ghj` | active k list for PyATB and reader-v1 data | `12ea0beb` plus current reader-v1 tests | Present; the old branch is not selected. |
+| `codex/rpa-headwing-sym-ibz-regression` | full-BZ Gamma-cell measure, symmetry atom/k-star parsing, k-parallel head/wing restoration | `a033ec4c`, `133a6061`, `84a62bfc`, and current symmetry/headwing tests | Present through equivalent or later ports. |
+| `codex/headwing-sym` | q-average/head-only controls, symmetry-expanded head and wings, shrink and k-parallel support | `17bc7828`, `c34961c8`, `4c302ffa`, `12ea0beb`, and inherited reader/shrink support | Present; old optimization and regression commits are references. |
+| `codex/rpa-headwing-qavg` | RPA q-average trace-log correction and head/wing response replacement | current `rpa_headwing_mode`, q-average code, and focused tests | Present; the old epsilon-average GW route is superseded by direct complete-`Wc`. |
+| `codex/2d-gamma-headwing-stageA` | early analytic 2D formulas and tests | `c3e2152d` followed by the stricter `6c498441` route | Superseded; do not build from this old base. |
+| `codex/2d-gw-headwing-cut-masterghj-20260720` | experimental cut-Coulomb GW path | no commits unique relative to the active lineage | Not a production feature; strict 2D rejects cut Coulomb. |
+| dated omega-zero, alpha, q-shell, and finite-q dump snapshots | observability and limiting controls | opt-in 37/19-column diagnostics and post-processing | Diagnostics only; no environment override changes production physics. |
+
+Every production behavior in this table is also represented in the gate table
+above.  A future branch is merged only after adding its behavior, focused test,
+runtime evidence, and disposition to this manifest.
+
 ## Required Calculation Identity
 
 A strict-2D production result is admissible only when all of the following are
