@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <complex>
@@ -628,6 +629,80 @@ void test_strict_2d_gw_routes_gamma_through_complete_wc_average()
                   "missing head/wing data must keep the standard route");
 }
 
+void test_strict_2d_gw_fails_closed_for_incomplete_runtime_configuration()
+{
+    const auto require_condition = [](const bool condition, const char *message)
+    {
+        if (!condition)
+        {
+            std::cerr << message << std::endl;
+            std::abort();
+        }
+    };
+    require_condition(librpa_int::strict_2d_complete_wc_requested(true, 3, true),
+                      "strict 2D complete-Wc request was not recognized");
+    require_condition(!librpa_int::strict_2d_complete_wc_requested(false, 3, true),
+                      "disabled replacement was classified as strict 2D");
+    require_condition(!librpa_int::strict_2d_complete_wc_requested(true, 2, true),
+                      "non-head/wing dielectric mode was classified as strict 2D");
+    require_condition(!librpa_int::strict_2d_complete_wc_requested(true, 3, false),
+                      "3D dielectric mode was classified as strict 2D");
+
+    librpa_int::validate_strict_2d_complete_wc_runtime(false, false, false);
+    librpa_int::validate_strict_2d_complete_wc_runtime(true, true, true);
+
+    bool rejected_missing_data = false;
+    try
+    {
+        librpa_int::validate_strict_2d_complete_wc_runtime(true, false, true);
+    }
+    catch (const std::logic_error &)
+    {
+        rejected_missing_data = true;
+    }
+    require_condition(rejected_missing_data,
+                      "strict 2D GW silently accepted missing analytic head/wing data");
+
+    bool rejected_dense_wc = false;
+    try
+    {
+        librpa_int::validate_strict_2d_complete_wc_runtime(true, true, false);
+    }
+    catch (const std::logic_error &)
+    {
+        rejected_dense_wc = true;
+    }
+    require_condition(rejected_dense_wc,
+                      "strict 2D GW silently accepted a path without complete-Wc support");
+}
+
+void test_strict_2d_diagnostic_schema_and_qpoint_order_are_stable()
+{
+    const auto count_columns = [](const std::string &header)
+    { return 1 + static_cast<int>(std::count(header.begin(), header.end(), ',')); };
+    if (count_columns(librpa_int::strict_2d_finite_q_diagnostics_header()) != 37 ||
+        count_columns(librpa_int::strict_2d_gamma_wc_diagnostics_header()) != 19)
+    {
+        std::cerr << "strict 2D diagnostic CSV schema changed unexpectedly" << std::endl;
+        std::abort();
+    }
+
+    const std::vector<Vector3_Order<double>> qpoints{
+        {0.1, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.1, 0.0}};
+    const auto unchanged = librpa_int::strict_2d_diagnostic_qpoint_order(qpoints, false);
+    if (!(unchanged == qpoints))
+    {
+        std::cerr << "disabled strict 2D diagnostics changed q-point order" << std::endl;
+        std::abort();
+    }
+    const auto ordered = librpa_int::strict_2d_diagnostic_qpoint_order(qpoints, true);
+    if (!librpa_int::is_gamma_point(ordered.front()) || ordered.size() != qpoints.size())
+    {
+        std::cerr << "strict 2D diagnostics did not place Gamma first" << std::endl;
+        std::abort();
+    }
+}
+
 void test_strict_2d_block_metrics_separate_head_wings_and_body()
 {
     librpa_int::Strict2dBlockMetricSums sums;
@@ -690,6 +765,27 @@ void test_strict_2d_pw_wc_transforms_to_auxiliary_coulomb_basis()
         for (int j = 1; j != 3; ++j)
             assert_complex_close(auxiliary_wc(i, j), pw_wc(i, j), 1e-13);
     }
+}
+
+void test_strict_2d_regular_coulomb_legs_are_projected_to_the_gamma_basis()
+{
+    constexpr double inverse_sqrt_two = 0.70710678118654752440;
+    matrix_m<std::complex<double>> coulomb_sqrt(2, 2, MAJOR::COL);
+    coulomb_sqrt(0, 0) = 4.0;
+    coulomb_sqrt(1, 1) = 1.0;
+
+    matrix_m<std::complex<double>> eigenvectors(2, 2, MAJOR::COL);
+    eigenvectors(0, 0) = inverse_sqrt_two;
+    eigenvectors(0, 1) = inverse_sqrt_two;
+    eigenvectors(1, 0) = inverse_sqrt_two;
+    eigenvectors(1, 1) = -inverse_sqrt_two;
+
+    const auto projected =
+        librpa_int::strict_2d_project_operator_to_coulomb_basis(coulomb_sqrt, eigenvectors);
+    require_double_close(projected(0, 0).real(), 2.5, 1e-14);
+    require_double_close(projected(0, 1).real(), 1.5, 1e-14);
+    require_double_close(projected(1, 0).real(), 1.5, 1e-14);
+    require_double_close(projected(1, 1).real(), 2.5, 1e-14);
 }
 
 void test_strict_2d_wc_blocks_match_dense_finite_q_inverse()
@@ -788,6 +884,245 @@ void test_strict_2d_wc_cell_average_matches_anisotropic_radial_quadrature()
         for (int j = 0; j != 2; ++j) assert_complex_close(analytic(i, j), numeric(i, j), 2e-11);
     assert(std::abs(analytic(0, 1)) < 1e-13);
     assert(std::abs(analytic(1, 0)) < 1e-13);
+}
+
+struct Point2d
+{
+    double x;
+    double y;
+};
+
+double dot(const Point2d &point, const Point2d &normal)
+{
+    return point.x * normal.x + point.y * normal.y;
+}
+
+double cross(const Point2d &left, const Point2d &right)
+{
+    return left.x * right.y - left.y * right.x;
+}
+
+std::vector<Point2d> clip_polygon_halfplane(const std::vector<Point2d> &polygon,
+                                            const Point2d &normal, const double bound)
+{
+    std::vector<Point2d> clipped;
+    if (polygon.empty()) return clipped;
+    Point2d previous = polygon.back();
+    double previous_distance = dot(previous, normal) - bound;
+    for (const auto &current : polygon)
+    {
+        const double current_distance = dot(current, normal) - bound;
+        const bool previous_inside = previous_distance <= 1e-14;
+        const bool current_inside = current_distance <= 1e-14;
+        if (previous_inside != current_inside)
+        {
+            const double denominator = previous_distance - current_distance;
+            if (std::abs(denominator) < 1e-18) std::abort();
+            const double fraction = previous_distance / denominator;
+            clipped.push_back({previous.x + fraction * (current.x - previous.x),
+                               previous.y + fraction * (current.y - previous.y)});
+        }
+        if (current_inside) clipped.push_back(current);
+        previous = current;
+        previous_distance = current_distance;
+    }
+    return clipped;
+}
+
+std::pair<double, Point2d> polygon_area_centroid(const std::vector<Point2d> &polygon)
+{
+    if (polygon.size() < 3) return {0.0, {0.0, 0.0}};
+    double twice_area = 0.0;
+    Point2d weighted{0.0, 0.0};
+    for (std::size_t i = 0; i != polygon.size(); ++i)
+    {
+        const auto &left = polygon[i];
+        const auto &right = polygon[(i + 1) % polygon.size()];
+        const double edge_cross = cross(left, right);
+        twice_area += edge_cross;
+        weighted.x += (left.x + right.x) * edge_cross;
+        weighted.y += (left.y + right.y) * edge_cross;
+    }
+    if (!(twice_area > 0.0)) std::abort();
+    return {0.5 * twice_area, {weighted.x / (3.0 * twice_area), weighted.y / (3.0 * twice_area)}};
+}
+
+std::vector<Point2d> gamma_cell_neighbors(const Point2d &g1, const Point2d &g2)
+{
+    std::vector<Point2d> neighbors;
+    for (int i = -1; i <= 1; ++i)
+        for (int j = -1; j <= 1; ++j)
+            if (i != 0 || j != 0) neighbors.push_back({i * g1.x + j * g2.x, i * g1.y + j * g2.y});
+    return neighbors;
+}
+
+std::vector<Point2d> gamma_voronoi_polygon(const Point2d &g1, const Point2d &g2)
+{
+    const double extent = 4.0 * std::max(std::hypot(g1.x, g1.y), std::hypot(g2.x, g2.y));
+    std::vector<Point2d> polygon{
+        {-extent, -extent}, {extent, -extent}, {extent, extent}, {-extent, extent}};
+    for (const auto &neighbor : gamma_cell_neighbors(g1, g2))
+        polygon = clip_polygon_halfplane(polygon, neighbor, 0.5 * dot(neighbor, neighbor));
+    return polygon;
+}
+
+double gamma_cell_boundary(const Point2d &direction, const std::vector<Point2d> &neighbors)
+{
+    double qmax = std::numeric_limits<double>::infinity();
+    for (const auto &neighbor : neighbors)
+    {
+        const double denominator = dot(direction, neighbor);
+        if (denominator > 1e-14) qmax = std::min(qmax, 0.5 * dot(neighbor, neighbor) / denominator);
+    }
+    if (!(qmax > 0.0) || !std::isfinite(qmax)) std::abort();
+    return qmax;
+}
+
+matrix_m<std::complex<double>> cartesian_gamma_subgrid_average(
+    const matrix_m<std::complex<double>> &body_inv, const matrix_m<std::complex<double>> &bw_cart,
+    const matrix_m<std::complex<double>> &wb_cart, const matrix_m<std::complex<double>> &lind,
+    const matrix_m<std::complex<double>> &regular_body_sqrt, const std::vector<Point2d> &polygon,
+    const int subdivisions, double &covered_area)
+{
+    if (subdivisions < 2) std::abort();
+    double xmin = polygon.front().x, xmax = polygon.front().x;
+    double ymin = polygon.front().y, ymax = polygon.front().y;
+    for (const auto &point : polygon)
+    {
+        xmin = std::min(xmin, point.x);
+        xmax = std::max(xmax, point.x);
+        ymin = std::min(ymin, point.y);
+        ymax = std::max(ymax, point.y);
+    }
+    const double dx = (xmax - xmin) / subdivisions;
+    const double dy = (ymax - ymin) / subdivisions;
+    const double gamma_area = polygon_area_centroid(polygon).first;
+    matrix_m<std::complex<double>> average(body_inv.nr() + 1, body_inv.nc() + 1, MAJOR::COL);
+    covered_area = 0.0;
+
+    for (int ix = 0; ix != subdivisions; ++ix)
+        for (int iy = 0; iy != subdivisions; ++iy)
+        {
+            const double xlo = xmin + ix * dx;
+            const double xhi = xlo + dx;
+            const double ylo = ymin + iy * dy;
+            const double yhi = ylo + dy;
+            auto cell = clip_polygon_halfplane(polygon, {1.0, 0.0}, xhi);
+            cell = clip_polygon_halfplane(cell, {-1.0, 0.0}, -xlo);
+            cell = clip_polygon_halfplane(cell, {0.0, 1.0}, yhi);
+            cell = clip_polygon_halfplane(cell, {0.0, -1.0}, -ylo);
+            const auto area_centroid = polygon_area_centroid(cell);
+            const double area = area_centroid.first;
+            const auto centroid = area_centroid.second;
+            if (area == 0.0) continue;
+            const double q = std::hypot(centroid.x, centroid.y);
+            if (!(q > 1e-14)) std::abort();
+            const double qx = centroid.x / q;
+            const double qy = centroid.y / q;
+            matrix_m<std::complex<double>> bw_direction(body_inv.nr(), 1, MAJOR::COL);
+            matrix_m<std::complex<double>> wb_direction(1, body_inv.nc(), MAJOR::COL);
+            for (int i = 0; i != body_inv.nr(); ++i)
+            {
+                bw_direction(i, 0) = bw_cart(i, 0) * qx + bw_cart(i, 1) * qy;
+                wb_direction(0, i) = wb_cart(0, i) * qx + wb_cart(1, i) * qy;
+            }
+            const auto a = librpa_int::strict_2d_schur_coefficient(lind, qx, qy);
+            const auto point = librpa_int::strict_2d_wc_blocks_at_q(
+                body_inv, bw_direction, wb_direction, a, regular_body_sqrt, q);
+            for (int i = 0; i != average.nr(); ++i)
+                for (int j = 0; j != average.nc(); ++j)
+                    average(i, j) += area * point(i, j) / gamma_area;
+            covered_area += area;
+        }
+    return average;
+}
+
+double submatrix_frobenius(const matrix_m<std::complex<double>> &matrix, const int row_start,
+                           const int column_start)
+{
+    double squared = 0.0;
+    for (int i = row_start; i != matrix.nr(); ++i)
+        for (int j = column_start; j != matrix.nc(); ++j) squared += std::norm(matrix(i, j));
+    return std::sqrt(squared);
+}
+
+double matrix_hermiticity_residual(const matrix_m<std::complex<double>> &matrix)
+{
+    double residual = 0.0;
+    for (int i = 0; i != matrix.nr(); ++i)
+        for (int j = 0; j != matrix.nc(); ++j)
+            residual = std::max(residual, std::abs(matrix(i, j) - std::conj(matrix(j, i))));
+    return residual;
+}
+
+double wing_frobenius(const matrix_m<std::complex<double>> &matrix, const bool head_body)
+{
+    double squared = 0.0;
+    for (int i = 1; i != matrix.nr(); ++i)
+        squared += head_body ? std::norm(matrix(0, i)) : std::norm(matrix(i, 0));
+    return std::sqrt(squared);
+}
+
+void test_strict_2d_wc_cell_average_matches_cartesian_voronoi_subgrid()
+{
+    matrix_m<std::complex<double>> body_inv(2, 2, MAJOR::COL);
+    matrix_m<std::complex<double>> bw_cart(2, 3, MAJOR::COL);
+    matrix_m<std::complex<double>> wb_cart(3, 2, MAJOR::COL);
+    matrix_m<std::complex<double>> lind(3, 3, MAJOR::COL);
+    matrix_m<std::complex<double>> regular_body_sqrt(2, 2, MAJOR::COL);
+    body_inv(0, 0) = 0.72;
+    body_inv(0, 1) = {0.03, 0.01};
+    body_inv(1, 0) = std::conj(body_inv(0, 1));
+    body_inv(1, 1) = 0.81;
+    bw_cart(0, 0) = {0.18, 0.03};
+    bw_cart(0, 1) = {-0.07, 0.02};
+    bw_cart(1, 0) = {0.09, -0.01};
+    bw_cart(1, 1) = {0.11, 0.04};
+    wb_cart = bw_cart.get_transpose(true);
+    lind(0, 0) = 1.55;
+    lind(0, 1) = 0.08;
+    lind(1, 0) = 0.08;
+    lind(1, 1) = 1.25;
+    lind(2, 2) = 1.0;
+    regular_body_sqrt(0, 0) = 1.4;
+    regular_body_sqrt(0, 1) = 0.05;
+    regular_body_sqrt(1, 0) = 0.05;
+    regular_body_sqrt(1, 1) = 1.1;
+
+    const Point2d g1{0.08702149160639744, 0.05024962446042246};
+    const Point2d g2{0.0, 0.1004992489208449};
+    const auto neighbors = gamma_cell_neighbors(g1, g2);
+    const auto polygon = gamma_voronoi_polygon(g1, g2);
+    const double gamma_area = polygon_area_centroid(polygon).first;
+    require_double_close(gamma_area, std::abs(cross(g1, g2)), 1e-14);
+
+    constexpr int nangle = 5000;
+    std::vector<double> qx(nangle), qy(nangle), weights(nangle), qmax(nangle);
+    for (int i = 0; i != nangle; ++i)
+    {
+        const double angle = librpa_int::TWO_PI * i / nangle;
+        qx[i] = std::cos(angle);
+        qy[i] = std::sin(angle);
+        weights[i] = librpa_int::TWO_PI / nangle;
+        qmax[i] = gamma_cell_boundary({qx[i], qy[i]}, neighbors);
+    }
+    const auto analytic = librpa_int::strict_2d_average_wc_coulomb_basis(
+        body_inv, bw_cart, wb_cart, lind, regular_body_sqrt, qx, qy, weights, qmax, gamma_area);
+
+    double covered_area = 0.0;
+    const auto grid80 = cartesian_gamma_subgrid_average(
+        body_inv, bw_cart, wb_cart, lind, regular_body_sqrt, polygon, 80, covered_area);
+    require_double_close(covered_area, gamma_area, 1e-14);
+    if (matrix_hermiticity_residual(analytic) >= 1e-12 ||
+        matrix_hermiticity_residual(grid80) >= 1e-12)
+        std::abort();
+
+    const double head_relative = std::abs(grid80(0, 0) - analytic(0, 0)) / std::abs(analytic(0, 0));
+    const double body_relative =
+        submatrix_frobenius(grid80 - analytic, 1, 1) / submatrix_frobenius(analytic, 1, 1);
+    const double wing_absolute =
+        std::max(wing_frobenius(grid80, true), wing_frobenius(grid80, false));
+    if (head_relative >= 1e-4 || body_relative >= 1e-4 || wing_absolute >= 1e-10) std::abort();
 }
 
 void test_strict_2d_wc_blocks_have_finite_small_q_limits()
@@ -1900,11 +2235,15 @@ int main(int argc, char *argv[])
         test_strict_2d_screening_denominator_must_stay_on_physical_branch();
         test_strict_2d_gw_uses_full_coulomb_at_all_q();
         test_strict_2d_gw_routes_gamma_through_complete_wc_average();
+        test_strict_2d_gw_fails_closed_for_incomplete_runtime_configuration();
+        test_strict_2d_diagnostic_schema_and_qpoint_order_are_stable();
         test_strict_2d_block_metrics_separate_head_wings_and_body();
         test_strict_2d_alpha_reference_averages_bare_coulomb();
         test_strict_2d_pw_wc_transforms_to_auxiliary_coulomb_basis();
+        test_strict_2d_regular_coulomb_legs_are_projected_to_the_gamma_basis();
         test_strict_2d_wc_blocks_match_dense_finite_q_inverse();
         test_strict_2d_wc_cell_average_matches_anisotropic_radial_quadrature();
+        test_strict_2d_wc_cell_average_matches_cartesian_voronoi_subgrid();
         test_strict_2d_wc_blocks_have_finite_small_q_limits();
         test_strict_2d_wc_average_is_covariant_under_regular_body_rotation();
         test_strict_2d_wc_average_is_bounded_as_gamma_cell_shrinks();

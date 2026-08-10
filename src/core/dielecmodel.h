@@ -418,6 +418,9 @@ Strict2dCoulombHeadNormalization strict_2d_coulomb_head_normalization(
     const PeriodicBoundaryData &pbc, double auxiliary_monopole_norm_squared);
 matrix_m<std::complex<double>> strict_2d_transform_pw_wc_to_auxiliary_basis(
     const matrix_m<std::complex<double>> &pw_wc, double pw_to_auxiliary_scale);
+matrix_m<std::complex<double>> strict_2d_project_operator_to_coulomb_basis(
+    const matrix_m<std::complex<double>> &operator_matrix,
+    const matrix_m<std::complex<double>> &coulomb_eigenvectors);
 double strict_2d_bare_coulomb_gamma_average(const std::vector<double> &weights,
                                             const std::vector<double> &qmax, double gamma_area);
 

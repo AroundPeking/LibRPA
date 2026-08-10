@@ -905,6 +905,26 @@ matrix_m<std::complex<double>> strict_2d_transform_pw_wc_to_auxiliary_basis(
     return auxiliary_wc;
 }
 
+matrix_m<std::complex<double>> strict_2d_project_operator_to_coulomb_basis(
+    const matrix_m<std::complex<double>> &operator_matrix,
+    const matrix_m<std::complex<double>> &coulomb_eigenvectors)
+{
+    if (operator_matrix.nr() < 1 || operator_matrix.nr() != operator_matrix.nc() ||
+        coulomb_eigenvectors.nr() != operator_matrix.nr() ||
+        coulomb_eigenvectors.nc() != operator_matrix.nc())
+        throw std::logic_error("strict 2D Coulomb-basis projection dimensions are invalid");
+
+    matrix_m<std::complex<double>> projected(operator_matrix.nr(), operator_matrix.nc(),
+                                             MAJOR::COL);
+    for (int i = 0; i != projected.nr(); ++i)
+        for (int j = 0; j != projected.nc(); ++j)
+            for (int k = 0; k != projected.nr(); ++k)
+                for (int l = 0; l != projected.nc(); ++l)
+                    projected(i, j) += std::conj(coulomb_eigenvectors(k, i)) *
+                                       operator_matrix(k, l) * coulomb_eigenvectors(l, j);
+    return projected;
+}
+
 void diele_func::configure_strict_2d_coulomb_head(const bool enabled,
                                                   const double auxiliary_monopole_norm_squared)
 {
