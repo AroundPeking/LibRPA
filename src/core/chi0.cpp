@@ -24,6 +24,7 @@
 #include "../math/utils_matrix_mpi.h"
 #include "../math/utils_matrix_m_mpi.h"
 #include "../mpi/base_blacs.h"
+#include "../mpi/shrink_scalapack_layout.h"
 #include "../mpi/two_level_parallel_context.h"
 #include "../utils/base_utility.h"
 #include "../utils/constants.h"
@@ -52,8 +53,6 @@ namespace librpa_int {
 using std::map;
 using std::pair;
 using std::vector;
-
-constexpr int SHRINK_SCALAPACK_BLOCK_CAP = 2048;
 
 using Chi0CollectKey = std::pair<int, std::array<int, 3>>;
 using Chi0BlockKey = Chi0CollectKey;
@@ -1791,12 +1790,11 @@ static void shrink_abfs_chi0(
     int natom = abf_large.n_atoms;
 
     const complex<double> CONE{1.0, 0.0};
-    ArrayDesc desc_nabf_nabf_ll(blacs_ctxt_h);
-    ArrayDesc desc_nabf_nabf_sl(blacs_ctxt_h);
-    ArrayDesc desc_nabf_nabf_ss(blacs_ctxt_h);
-    desc_nabf_nabf_ll.init_square_blk_capped(all_mu, all_mu, SHRINK_SCALAPACK_BLOCK_CAP, 0, 0);
-    desc_nabf_nabf_sl.init_square_blk_capped(all_mu_s, all_mu, SHRINK_SCALAPACK_BLOCK_CAP, 0, 0);
-    desc_nabf_nabf_ss.init_square_blk_capped(all_mu_s, all_mu_s, SHRINK_SCALAPACK_BLOCK_CAP, 0, 0);
+    auto shrink_layout = make_shrink_scalapack_layout(
+        blacs_ctxt_h, all_mu, all_mu_s, SHRINK_SCALAPACK_BLOCK_SIZE);
+    const auto &desc_nabf_nabf_ll = shrink_layout.large_large;
+    const auto &desc_nabf_nabf_sl = shrink_layout.small_large;
+    const auto &desc_nabf_nabf_ss = shrink_layout.small_small;
     const auto set_IJ_nabf_nabf =
         get_necessary_IJ_from_block_2D_sy('U', abf_large, desc_nabf_nabf_ll);
     const auto s0_s1 = get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf);
@@ -1830,8 +1828,20 @@ static void shrink_abfs_chi0(
         Iset_Jset_c.first.insert(ap.first);
         Iset_Jset_c.second.insert(ap.second);
     }
+    const bool verbose_progress = global::should_output(LIBRPA_VERBOSE_DEBUG);
+    global::lib_printf_root(
+        "SHRINK_CHI0_LAYOUT large=%d small=%d block=%d ranks=%d grid=%dx%d nq=%zu\n",
+        all_mu, all_mu_s, SHRINK_SCALAPACK_BLOCK_SIZE, comm_h.nprocs,
+        blacs_ctxt_h.nprows, blacs_ctxt_h.npcols, qlist.size());
     for (std::size_t iq = 0; iq < qlist.size(); iq++)
     {
+        const bool report_progress =
+            should_report_shrink_qpoint(iq, qlist.size(), verbose_progress);
+        const double q_start = MPI_Wtime();
+        if (report_progress)
+            global::lib_printf_root(
+                "SHRINK_CHI0_PROGRESS iq=%zu/%zu phase=start\n",
+                iq + 1, qlist.size());
         const auto &q = qlist[iq];
         std::array<double, 3> qa = {q.x, q.y, q.z};
         const auto &U = sinvS.at(q);
@@ -1840,6 +1850,7 @@ static void shrink_abfs_chi0(
         chi0ss_block.zero_out();
         u_block.zero_out();
         u_chi0.zero_out();
+        const double input_start = MPI_Wtime();
         {
             std::map<int,
                      std::map<std::pair<int, std::array<double, 3>>, RI::Tensor<complex<double>>>>
@@ -1889,18 +1900,36 @@ static void shrink_abfs_chi0(
                 u_block(ilo, jlo) = U(ir, ic);
             }
         }
+        const double input_seconds = MPI_Wtime() - input_start;
+        if (report_progress)
+            global::lib_printf_root(
+                "SHRINK_CHI0_PROGRESS iq=%zu/%zu phase=input_done elapsed_s=%.6f\n",
+                iq + 1, qlist.size(), input_seconds);
         // Shape of u_block is N_small x N_large
+        const double gemm1_start = MPI_Wtime();
         ScalapackConnector::pgemm_f('N', 'N', all_mu_s, all_mu, all_mu, 1.0, u_block.ptr(), 1, 1,
                                     desc_nabf_nabf_sl.desc, chi0_block.ptr(), 1, 1,
                                     desc_nabf_nabf_ll.desc, 0.0, u_chi0.ptr(), 1, 1,
                                     desc_nabf_nabf_sl.desc);
+        const double gemm1_seconds = MPI_Wtime() - gemm1_start;
+        if (report_progress)
+            global::lib_printf_root(
+                "SHRINK_CHI0_PROGRESS iq=%zu/%zu phase=gemm1_done elapsed_s=%.6f\n",
+                iq + 1, qlist.size(), gemm1_seconds);
+        const double gemm2_start = MPI_Wtime();
         ScalapackConnector::pgemm_f('N', 'C', all_mu_s, all_mu_s, all_mu, 1.0, u_chi0.ptr(), 1, 1,
                                     desc_nabf_nabf_sl.desc, u_block.ptr(), 1, 1,
                                     desc_nabf_nabf_sl.desc, 0.0, chi0ss_block.ptr(), 1, 1,
                                     desc_nabf_nabf_ss.desc);
+        const double gemm2_seconds = MPI_Wtime() - gemm2_start;
+        if (report_progress)
+            global::lib_printf_root(
+                "SHRINK_CHI0_PROGRESS iq=%zu/%zu phase=gemm2_done elapsed_s=%.6f\n",
+                iq + 1, qlist.size(), gemm2_seconds);
 
         // shrinked_chi0 = U * large_chi0 * transpose(U, true);
 
+        const double output_start = MPI_Wtime();
         map<int, map<int, matrix_m<complex<double>>>> chi0s_MNmap;
         map_block_to_IJ_storage_new(chi0s_MNmap, abf_small, map_lor_v, map_loc_v,
                                     chi0ss_block, desc_nabf_nabf_ss, MAJOR::ROW);
@@ -1961,6 +1990,12 @@ static void shrink_abfs_chi0(
                 }
             }
         }
+        const double output_seconds = MPI_Wtime() - output_start;
+        if (report_progress)
+            global::lib_printf_root(
+                "SHRINK_CHI0_PROGRESS iq=%zu/%zu phase=complete input_s=%.6f gemm1_s=%.6f gemm2_s=%.6f output_s=%.6f total_s=%.6f\n",
+                iq + 1, qlist.size(), input_seconds, gemm1_seconds,
+                gemm2_seconds, output_seconds, MPI_Wtime() - q_start);
     }
 }
 #endif
@@ -3452,12 +3487,11 @@ void Chi0::unfold_abfs_Wc_q(
     assert(natom == as_int(atbasis_abf.n_atoms));
 
     const complex<double> CONE{1.0, 0.0};
-    ArrayDesc desc_nabf_nabf_ll(blacs_ctxt_h);
-    ArrayDesc desc_nabf_nabf_ss(blacs_ctxt_h);
-    ArrayDesc desc_nabf_nabf_sl(blacs_ctxt_h);
-    desc_nabf_nabf_ll.init_square_blk_capped(all_mu, all_mu, SHRINK_SCALAPACK_BLOCK_CAP, 0, 0);
-    desc_nabf_nabf_ss.init_square_blk_capped(all_mu_s, all_mu_s, SHRINK_SCALAPACK_BLOCK_CAP, 0, 0);
-    desc_nabf_nabf_sl.init_square_blk_capped(all_mu_s, all_mu, SHRINK_SCALAPACK_BLOCK_CAP, 0, 0);
+    auto shrink_layout = make_shrink_scalapack_layout(
+        blacs_ctxt_h, all_mu, all_mu_s, SHRINK_SCALAPACK_BLOCK_SIZE);
+    const auto &desc_nabf_nabf_ll = shrink_layout.large_large;
+    const auto &desc_nabf_nabf_ss = shrink_layout.small_small;
+    const auto &desc_nabf_nabf_sl = shrink_layout.small_large;
     const auto set_IJ_nabf_nabf = get_necessary_IJ_from_block_2D_sy(
         'U', this->atbasis_abf, desc_nabf_nabf_ss);
     const auto s0_s1 = get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf);

@@ -212,6 +212,13 @@ int main(int argc, char *argv[])
     assert(layout.small_large.nb() == 128);
     assert(layout.small_small.mb() == 128);
     assert(layout.small_small.nb() == 128);
+    assert(should_report_shrink_qpoint(0, 65, false));
+    assert(!should_report_shrink_qpoint(1, 65, false));
+    assert(should_report_shrink_qpoint(9, 65, false));
+    assert(should_report_shrink_qpoint(19, 65, false));
+    assert(should_report_shrink_qpoint(64, 65, false));
+    for (std::size_t iq = 0; iq < 65; ++iq)
+        assert(should_report_shrink_qpoint(iq, 65, true));
 
     bool invalid_layout_rejected = false;
     try

@@ -2,9 +2,19 @@
 
 #include "base_blacs.h"
 
+#include <cstddef>
 #include <stdexcept>
 
 namespace librpa_int {
+
+constexpr int SHRINK_SCALAPACK_BLOCK_SIZE = 128;
+
+inline bool should_report_shrink_qpoint(const std::size_t iq,
+                                        const std::size_t nq,
+                                        const bool verbose)
+{
+    return verbose || iq == 0 || iq + 1 == nq || (iq + 1) % 10 == 0;
+}
 
 struct ShrinkScalapackLayout
 {
