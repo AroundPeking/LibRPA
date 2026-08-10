@@ -14,6 +14,12 @@ for new calculations.
 | Analytic head/wing introduction | `c3e2152d` |
 | Internal PW-to-auxiliary normalization | `f87f2f2a` |
 | Direct complete-`Wc` Gamma route | `6c7e8e97` |
+| Final fixed-Gamma-basis integration | `6c498441` |
+
+Only `6c498441` (or a later commit that contains it and passes the same gates)
+is an admissible production source.  The earlier commits in this table are
+lineage checkpoints: `6c7e8e97` routed the production call but did not yet
+project the numerical Ewald external legs into the fixed Gamma Coulomb basis.
 
 The internal normalization commit reads the in-plane cell area and the
 constant auxiliary-basis moment from producer metadata. The resulting scale is
