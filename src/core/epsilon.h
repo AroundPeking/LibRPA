@@ -17,6 +17,10 @@
 
 namespace librpa_int {
 
+bool use_strict_2d_complete_wc_gamma_route(bool replace_w_head, int option_dielect_func,
+                                           bool use_2d_dielectric, bool gamma_point,
+                                           bool headwing_data_available);
+
 struct CorrEnergy
 {
     enum type { RPA, MP2 };
