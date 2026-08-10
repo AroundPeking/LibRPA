@@ -51,6 +51,16 @@ using std::vector;
 
 namespace librpa_int {
 
+bool use_strict_2d_complete_wc_gamma_route(const bool replace_w_head,
+                                           const int option_dielect_func,
+                                           const bool use_2d_dielectric,
+                                           const bool gamma_point,
+                                           const bool headwing_data_available)
+{
+    return replace_w_head && option_dielect_func == 3 && use_2d_dielectric && gamma_point
+           && headwing_data_available;
+}
+
 using abf_qspace_complex_block_map_t =
     atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old;
 using abf_rspace_complex_block_map_t =
@@ -2728,6 +2738,10 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         }
         librpa_int::global::lib_printf_root("Computing Wc(q), %d / %d, q=(%f, %f, %f)\n", iq + 1,
                                             qpts.size(), qf.x, qf.y, qf.z);
+        const bool strict_2d_complete_wc_gamma = use_strict_2d_complete_wc_gamma_route(
+            replace_w_head, option_dielect_func,
+            df_headwing != nullptr && df_headwing->use_2d_dielectric, is_gamma_point(q),
+            !epsmac_LF_imagfreq.empty());
         const bool debug_output = global::should_output(LIBRPA_VERBOSE_DEBUG);
         coul_block.zero_out();
         coulwc_block.zero_out();
@@ -3088,7 +3102,11 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                     // TODO: check location of "head" term
                     if (df_headwing == nullptr)
                         throw LIBRPA_RUNTIME_ERROR("Head/wing dielectric function is not initialized");
-                    df_headwing->rewrite_eps(chi0_block, ifreq, desc_nabf_nabf_opt);
+                    if (strict_2d_complete_wc_gamma)
+                        df_headwing->rewrite_strict_2d_wc(chi0_block, ifreq,
+                                                          desc_nabf_nabf_opt, coulwc_block);
+                    else
+                        df_headwing->rewrite_eps(chi0_block, ifreq, desc_nabf_nabf_opt);
                     
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
                 if (use_gpu_replace_scalapack)
@@ -3212,7 +3230,16 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                                     desc_nabf_nabf_opt, "", 1e-10);
 
             global::profiler.start("epsilon_to_wc");
-            if (epsmac_LF_imagfreq.size() > 0 && is_gamma_point(q) && option_dielect_func == 3)
+            if (strict_2d_complete_wc_gamma)
+            {
+                if (ifreq == 0 && comm_h.is_root())
+                    std::cout << "Skipping factorized q=0 Coulomb multiplication because the "
+                                 "strict 2D branch already contains the complete Gamma-cell Wc "
+                                 "average."
+                              << std::endl;
+            }
+            else if (epsmac_LF_imagfreq.size() > 0 && is_gamma_point(q)
+                     && option_dielect_func == 3)
             {
                 // Dielectric matrix is already inverted, only multiply by square root coulwc from both sides
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)

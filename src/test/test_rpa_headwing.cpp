@@ -605,6 +605,29 @@ void test_strict_2d_gw_uses_full_coulomb_at_all_q()
     }
 }
 
+void test_strict_2d_gw_routes_gamma_through_complete_wc_average()
+{
+    const auto require_route = [](const bool condition, const char *message) {
+        if (!condition)
+        {
+            std::cerr << message << std::endl;
+            std::abort();
+        }
+    };
+    require_route(librpa_int::use_strict_2d_complete_wc_gamma_route(true, 3, true, true, true),
+                  "strict 2D Gamma must use the complete-Wc route");
+    require_route(!librpa_int::use_strict_2d_complete_wc_gamma_route(false, 3, true, true, true),
+                  "disabled head/wing replacement must keep the standard route");
+    require_route(!librpa_int::use_strict_2d_complete_wc_gamma_route(true, 2, true, true, true),
+                  "non-full head/wing dielectric mode must keep the standard route");
+    require_route(!librpa_int::use_strict_2d_complete_wc_gamma_route(true, 3, false, true, true),
+                  "3D dielectric calculations must keep the standard route");
+    require_route(!librpa_int::use_strict_2d_complete_wc_gamma_route(true, 3, true, false, true),
+                  "finite q must keep the standard route");
+    require_route(!librpa_int::use_strict_2d_complete_wc_gamma_route(true, 3, true, true, false),
+                  "missing head/wing data must keep the standard route");
+}
+
 void test_strict_2d_block_metrics_separate_head_wings_and_body()
 {
     librpa_int::Strict2dBlockMetricSums sums;
@@ -1876,6 +1899,7 @@ int main(int argc, char *argv[])
         test_strict_2d_schur_coefficient_removes_identity();
         test_strict_2d_screening_denominator_must_stay_on_physical_branch();
         test_strict_2d_gw_uses_full_coulomb_at_all_q();
+        test_strict_2d_gw_routes_gamma_through_complete_wc_average();
         test_strict_2d_block_metrics_separate_head_wings_and_body();
         test_strict_2d_alpha_reference_averages_bare_coulomb();
         test_strict_2d_pw_wc_transforms_to_auxiliary_coulomb_basis();
