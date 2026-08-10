@@ -179,3 +179,43 @@ node-local threaded BLAS, and redistributes the small atom-pair blocks through
 the existing LibRI communication path.  Later Wc and self-energy ScaLAPACK
 operations remain unchanged until the reduced-frequency downstream gate shows
 whether they also require an owner-local path.
+
+## Four-rank q-owner validation (2026-08-10)
+
+Commit `e097c60b0d5ebf9ec3d064b7c3808d2573dc52c4` was built on df_dcu with
+Intel MPI/MKL 2021.3.  The resulting `chi0_main.exe` SHA256 was
+`d39baf4c1ff9264f7494fec715ec3f151cf607b92b53763b9b6e2eba49b97627`.
+The targeted local and remote tests for the q-owner layout, local BLAS
+products, BLACS, and MPI matrix helpers all passed.
+
+A reduced-frequency MnF2 gate (Slurm `21568779`) kept the complete Dojo
+pseudopotential, 6 x 6 x 9 k mesh, PyATB head and wing, symmetry, shrink,
+reader-v1, and GW inputs.  Only `nfreq` was reduced from 16 to the supported
+six-point minimax grid.  It used four nodes, one MPI rank and 30 OpenMP/MKL
+threads per node, the TCP provider, and the bounded LibComm ring exchange.
+Direct process inspection during the chi0 contraction found 30 active threads
+on every node, with sampled thread utilization between 92 and 98 percent.
+
+The first time-point shrink used the production dimensions and completed all
+65 q points:
+
+```text
+SHRINK_CHI0_LAYOUT mode=q_owner_local_blas large=1884 small=1078 ranks=4 grid=2x2 nq=65
+iq=1:  input 31.785 s, GEMM1 0.319 s, GEMM2 0.214 s, total 32.520 s
+iq=10: input  0.193 s, GEMM1 0.353 s, GEMM2 0.198 s, total  0.935 s
+iq=65: input  0.199 s, GEMM1 0.358 s, GEMM2 0.208 s, total  0.954 s
+```
+
+The complete `shrink_chi0_abfs` call took 62.696 seconds, including the
+one-time first-q input collection.  This crosses the point where the previous
+distributed `pzgemm` path had remained in BLACS/MPI progress for more than
+eight hours.  The four-rank job was deliberately canceled after it started the
+second time point because six time points at that rank count would make the
+downstream gate unnecessarily slow.  Its logs are preserved under
+`librpa_qowner_nfreq6_gate_e097c60b_20260810`.
+
+The byte-identical six-frequency input has been staged as a 16-node gate in
+`librpa_qowner_nfreq6_gate16_e097c60b_20260810` (Slurm `21568937`).  That job
+is the next gate for all six chi0/shrink calls, Wc, and at least one self-energy
+step.  It does not authorize the full 16-frequency production run until these
+downstream stages pass.
