@@ -203,6 +203,10 @@ int main(int argc, char *argv[])
     int provided = MPI_THREAD_SINGLE;
     MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
     init_global_mpi(MPI_COMM_WORLD);
+#ifdef LIBRPA_USE_ELPA
+    if (elpa_init(ELPA_API_VERSION) != ELPA_OK)
+        throw std::runtime_error("elpa_init failure");
+#endif
 
     const int grid_size = static_cast<int>(std::sqrt(size_global));
     if (grid_size * grid_size != size_global)
@@ -243,6 +247,12 @@ int main(int argc, char *argv[])
                   << " status=PASS" << std::endl;
     }
 
+#ifdef LIBRPA_USE_ELPA
+    int elpa_error = ELPA_OK;
+    elpa_uninit(&elpa_error);
+    if (elpa_error != ELPA_OK)
+        throw std::runtime_error("elpa_uninit failure");
+#endif
     blacs_h.exit();
     finalize_global_mpi();
     MPI_Finalize();

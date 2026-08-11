@@ -297,7 +297,7 @@ Require cache entries `LIBRPA_USE_BUNDLED_ELPA:BOOL=ON`,
 `test_wc_sqrt_solver` and `chi0_main.exe`; run `ldd` and confirm an ELPA library
 is linked; record both SHA256 values and the CMake configure log.
 
-- [ ] **Step 5: Run a small four-rank remote smoke**
+- [x] **Step 5: Run a small four-rank remote smoke**
 
 Run `n=32`, block 8 for ScaLAPACK and ELPA on one allocated node. Both must
 print `status=PASS`; otherwise stop before production-dimension jobs.

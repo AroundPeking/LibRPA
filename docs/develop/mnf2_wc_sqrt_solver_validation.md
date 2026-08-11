@@ -108,6 +108,27 @@ rank log. The report may link to large files in the preserved run directory.
 | Minimal correction | Change only `target_link_libraries(rpa_lib PRIVATE ${LIBRPA_ELPA_TARGET})` to `PUBLIC`, with an explanatory comment. |
 | Verification after correction | Reconfigure completed; `test_wc_sqrt_solver`, `test_rpa_headwing`, and `rpa_exe` built; a subsequent all-target build completed with exit 0. |
 
+## Attempt B1: ELPA-enabled build verification and small solver smoke
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-08-11 |
+| Purpose / changed variable | Verify that ELPA is actually compiled and linked, then compare small ScaLAPACK and ELPA square roots |
+| Remote source/build | Same B0 source/build directory; source content was commit `5e0a9556` plus the subsequently committed public-ELPA-interface and test-lifecycle corrections |
+| Build result | Full all-target build completed with exit 0 after the public ELPA dependency correction |
+| Cache verification | `LIBRPA_USE_BUNDLED_ELPA=ON`, `LIBRPA_BUNDLED_ELPA_OPENMP=ON`, `LIBRPA_USE_EXTERNAL_ELPA=OFF`, `LIBRPA_USE_LIBRI=ON`, tests and driver ON |
+| Static-link verification | Driver and test link commands contain `thirdparty/ELPA/install/lib64/libelpa_openmp.a`; `chi0_main.exe` defines `elpa_allocate`; runtime libraries resolve after sourcing the Intel 2021.3 environment |
+| Driver SHA256 | `6a45e0c70eb2cf868f9d57226b50fdf05de7407d2dff6239f747befd55286fe7` |
+| Test SHA256 | `874479a89450be13d309d7a1b7c721ca789e22a59b55994956a6a5fde45d3aee` |
+| First ELPA smoke result | Failed before diagonalization because the standalone test had not called `elpa_init`; `elpa_allocate()` reported the missing initialization and MPI exited 255 |
+| Test-lifecycle correction | Mirror `librpa_init_global`/`librpa_finalize_global`: call `elpa_init(ELPA_API_VERSION)` after MPI global setup and `elpa_uninit` after benchmark descriptors have been destroyed |
+| Final ScaLAPACK smoke | `n=32`, block 8, four ranks: `sqrt_s=0.112807448953`, `relres=3.17641173216e-15`, `herm=3.11443271155e-17`, PASS |
+| Final ELPA smoke | `n=32`, block 8, four ranks: `sqrt_s=0.135418489575`, `relres=3.19423304128e-15`, `herm=3.19668095988e-17`, PASS |
+| Execution location | df_dcu login node, four ranks, `I_MPI_FABRICS=shm`, one OpenMP/MKL thread per rank; only the small smoke used the login node |
+| Retained logs | `reconfigure-elpa-public.log`, `build-elpa-public-targets.log`, `build-elpa-full-after-public.log`, `build-elpa-test-init.log`, `smoke-scalapack-login-2.log`, `smoke-elpa-login-2.log` |
+| Evidence-bounded conclusion | Both dispatch backends produce accurate small-matrix square roots in the genuinely ELPA-enabled build. Inter-node dimension-1078 behavior and provider effects remain untested. |
+| Next action | Commit the ELPA lifecycle test correction, verify source-content identity, then submit the three 1078-dimensional Slurm lanes. |
+
 ## Workflow correction: all builds and tests run on df_dcu
 
 On 2026-08-11 an initial local configure attempt stopped before compiling the
