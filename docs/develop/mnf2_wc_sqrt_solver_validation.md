@@ -197,3 +197,41 @@ the compiler, MPI runtime, network fabric, and nodes differ.
 | 4-node auxiliary lane | Initial p1 job `2546964` was cancelled before start because the scheduler estimate was not useful; replacement `2546970` uses `48cp2`, four nodes/ranks, grid `2x2`, 30 OpenMP/MKL threads, native `shm:ofi` |
 | Evidence boundary | The 4-node lane only checks distributed solver viability on a `2x2` process grid. The 16-node lane is required for the original `4x4` topology. Neither job had produced a solver result when this entry was written. |
 | Next action | Require scheduler completion, per-lane zero return code, `finite=1 status=PASS`, relative square residual, and Hermiticity residual before interpreting either lane. |
+
+### D1 completion evidence
+
+Both df jobs subsequently completed with scheduler exit code `0:0`, empty
+Slurm stderr, and their explicit success markers.  The results below append to,
+rather than replace, the submission-time entry above.
+
+| Lane | Scheduler / topology | Solver timing and numerical gates |
+| --- | --- | --- |
+| 16-node ScaLAPACK | `2546962`, `48cp3`, 16 ranks, `4x4` grid, elapsed 13 s | square root 0.414806973189 s; residual GEMM 0.00859190896153 s; filtered eigenvalues 0; relative square residual `1.58883180821e-14`; Hermiticity residual `9.9739763519e-17`; finite and PASS |
+| 16-node ELPA | Same allocation and matrix | square root 0.427972257137 s; residual GEMM 0.0104215219617 s; relative square residual `7.58900512989e-15`; Hermiticity residual `1.00973375722e-16`; finite and PASS |
+| 4-node ScaLAPACK | `2546970`, `48cp2`, 4 ranks, `2x2` grid, elapsed 7 s | square root 0.786326792091 s; relative square residual `1.57971250978e-14`; Hermiticity residual `1.0137565138e-16`; finite and PASS |
+| 4-node ELPA | Same allocation and matrix | square root 0.471174085513 s; relative square residual `7.71735221763e-15`; Hermiticity residual `9.94868616626e-17`; finite and PASS |
+
+The 32-dimensional ScaLAPACK and ELPA pre-gates also passed in the 16-node
+job.  The retained terminal markers are `WC_SQRT_DF_OK` and
+`WC_SQRT_DF_4N_OK`.
+
+**Evidence-bounded conclusion.**  A deterministic positive-definite matrix of
+the observed active MnF2 Wc dimension, using block size 128 and the original
+16-rank `4x4` process grid, is numerically routine with either ScaLAPACK or
+ELPA on df.  Therefore matrix dimension 1078 and ScaLAPACK alone cannot explain
+the df_dcu physical-run stall.  This result does not yet test the actual Wc
+spectrum, the earlier LibRI redistribution, or the df_dcu MPI fabric.
+
+## Attempt D2: real MnF2 k6x6x9 producer on df
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-08-11 |
+| Purpose / changed variable | Generate the real validated k6x6x9 reader-v1 input on df, avoiding a roughly 14 GB relay from df_dcu and the df_dcu queue |
+| Remote root | `/data/home/df_iopcas_ghj/gw/altermagnet/20260811-alpha-MnF2-dojo-tzdp10-abfs-shrink-sym-headwing-k6x6x9-gw-wc739-df` |
+| Physical input identity | `INPUT`, `STRU`, pseudopotentials, NAOs, and ABFS hashes are byte-identical to the passed df_dcu k6x6x9 producer; `KPT` SHA256 is `552e8bb4cc8a772302369c271c6d81cb62b62242776d7c5c0f4f1758a298d791` |
+| ABACUS identity | Commit `31ad8d2db354853249969e50a377881929eaf2fa`, df executable SHA256 `e4f5d72941488fde811e070b890075d7bec573a4c6dc63277c03c9e285e646f4`; this is the same source commit as the passed df_dcu producer |
+| Runtime topology | `48cp2`, 16 nodes/ranks, one MPI rank per node, 48 OpenMP threads per rank, MKL one thread, native `I_MPI_FABRICS=shm:ofi`, atomic starting density |
+| Submission | `sbatch --test-only` accepted the script; formal job `2546979` submitted |
+| Required gate | SCF convergence and Finish/Total Time; nonempty reader-v1 Cs/shrink/sinvS files; matching full/cut q counts; raw auxiliary 1884; finite active auxiliary no larger than raw; `PRODUCER_OK` |
+| Next action | Monitor without duplicate submission.  Only after `PRODUCER_OK` stage band, PyATB, and Coulomb audit, then run the actual nfreq=6 Wc/Sigma calculation with the D1-tested LibRPA build. |
