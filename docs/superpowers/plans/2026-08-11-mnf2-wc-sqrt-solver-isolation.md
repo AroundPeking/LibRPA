@@ -179,8 +179,11 @@ runtime error rather than silently falling back to ScaLAPACK.
 
 - [ ] **Step 4: Compute independent numerical gates**
 
-Gather the square root to source rank 0. Compute `S*S` with explicit
-double-precision loops, then calculate:
+Keep a distributed copy of the original matrix. Compute `S*S` with
+`ScalapackConnector::pgemm_f` into a separate distributed matrix; do not use a
+root-rank cubic loop. Each rank accumulates the squared norm of its local
+residual block, and `MPI_Allreduce` produces the global Frobenius residual.
+Gather `S` only for the quadratic Hermiticity check, then calculate:
 
 ```text
 relative_residual = ||S*S-A||F / ||A||F
@@ -189,14 +192,15 @@ hermiticity_residual = ||S-S^H||F / ||S||F
 
 Broadcast the result structure fields. Require finite values, zero filtered
 eigenvalues, relative residual at most `1e-9`, and Hermiticity residual at most
-`1e-12`.
+`1e-12`. Report the square-root and residual-multiplication times separately so
+the validation work is not mistaken for eigensolver time.
 
 - [ ] **Step 5: Emit one parseable root-rank line**
 
 Print exactly one summary line beginning:
 
 ```text
-WC_SQRT_BENCH solver=scalapack|elpa n=... block=... ranks=... grid=... time_s=... filtered=... relres=... herm=... finite=1 status=PASS
+WC_SQRT_BENCH solver=scalapack|elpa n=... block=... ranks=... grid=... sqrt_s=... residual_gemm_s=... filtered=... relres=... herm=... finite=1 status=PASS
 ```
 
 - [ ] **Step 6: Run the green local test**
