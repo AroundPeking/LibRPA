@@ -160,3 +160,17 @@ and downloaded-result inspection.
 | Completion evidence required | `DIAGNOSTIC_COMPLETE`, per-lane return codes, parseable `WC_SQRT_BENCH`, finite output, PASS, relative square residual, Hermiticity residual, and scheduler exit code |
 | Evidence-bounded conclusion | No solver result exists yet because the job has not started. A pending job is not evidence of a hang. |
 | Next action | Monitor `21578141`; interpret MPI-init failures separately from eigensolver timeouts, then use the passing backend/provider for the reduced-frequency GW gate. |
+
+### T3 scheduling refinement (no numerical change)
+
+Job `21578141` remained pending for priority and was cancelled before start;
+its scheduler record is `CANCELLED`, elapsed `00:00:00`, and it produced no
+solver evidence. The 70-minute request was too long for the visible backfill
+window. The replacement keeps the same source, executable, 16-node topology,
+matrix, block size, provider lanes, and solver lanes. Only the diagnostic stop
+rule was tightened: each network smoke is limited to 60 seconds, each 1078
+square-root lane to 240 seconds, and the Slurm request to 20 minutes. A healthy
+1078 eigensolve should finish well inside four minutes; exceeding that bound is
+already sufficient for this bounded hang diagnosis. The replacement formal job
+is `21578160` in `normal`, initially pending. The original and replacement
+submission scripts are both retained in the remote T3 run directory.
