@@ -235,3 +235,32 @@ spectrum, the earlier LibRI redistribution, or the df_dcu MPI fabric.
 | Submission | `sbatch --test-only` accepted the script; formal job `2546979` submitted |
 | Required gate | SCF convergence and Finish/Total Time; nonempty reader-v1 Cs/shrink/sinvS files; matching full/cut q counts; raw auxiliary 1884; finite active auxiliary no larger than raw; `PRODUCER_OK` |
 | Next action | Monitor without duplicate submission.  Only after `PRODUCER_OK` stage band, PyATB, and Coulomb audit, then run the actual nfreq=6 Wc/Sigma calculation with the D1-tested LibRPA build. |
+
+### D2 live progression and guarded continuation
+
+At an elapsed time of about 52 minutes, job `2546979` remained `RUNNING`
+without an ABACUS or scheduler error.  The SCF had converged in 20 iterations
+with a PBE gap of 2.3281425975 eV.  The producer had completed the cut-Coulomb
+path, full-basis radial tables, `cal_large_Vs`, `cal_large_Cs`, and writing the
+16 raw `Cs` rank files, and had entered `out_abfs_overlap_v1`.  Direct node
+inspection showed 49 threads per ABACUS rank.  Earlier radial-table phases used
+roughly 28--36 cores per rank; the overlap-output phase temporarily used about
+one core per rank.  This is recorded as a producer-stage performance property,
+not as evidence that the later LibRPA Wc communication failure has recurred.
+
+The guarded login-node continuation is
+`run_login_postprocess.sh`, executed by `watch_and_launch_nfreq6.sh`.  The
+watcher PID is recorded in remote `WATCHER_PID`, with its audit trail in
+`watch_and_launch_nfreq6.log`.  It has the following stop gates:
+
+1. require producer scheduler state `COMPLETED`, exit `0:0`, and `PRODUCER_OK`;
+2. run band preprocessing, PyATB, and reader-v1 Coulomb audit sequentially on
+   the df login node, requiring `BAND_OK`, `PYATB_OK`, and
+   `COULOMB_GATE_OK`;
+3. run `sbatch --test-only` and submit exactly one nfreq=6 LibRPA job, recording
+   it in `librpa_nfreq6/FORMAL_JOB_ID`;
+4. stop on any failed gate rather than deleting partial data or resubmitting.
+
+This entry is intentionally interim.  Producer completion evidence, exact
+reader counts and auxiliary dimensions, postprocessing results, and the actual
+nfreq=6 Wc/Sigma result must be appended from final artifacts.
