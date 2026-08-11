@@ -89,6 +89,25 @@ rank log. The report may link to large files in the preserved run directory.
 | Evidence-bounded conclusion | The new test and existing ScaLAPACK/shrink tests pass on df_dcu for the small four-rank case. This does not validate dimension 1078, inter-node communication, TCP, or ELPA. |
 | Next action | Commit the green test, build the same feature branch with bundled CPU ELPA and LibRI enabled, then run the controlled production-dimension lanes through Slurm. |
 
+## Attempt B0: first bundled-ELPA full build
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-08-11 |
+| Purpose / changed variable | Build the committed feature branch with bundled CPU ELPA, OpenMP, LibRI, tests, and driver enabled |
+| Remote source/build | `/work1/ghj/app/src/librpa_mnf2_wc_sqrt_5e0a9556_20260811/LibRPA`; `build_df_dcu_intel2021_wc_elpa` |
+| Source commit | Clean archive of `5e0a9556df3de82738c81d0e9d038a54bd4fa2a3` before the CMake correction |
+| Toolchain | `mpiicc`, `mpiicpc`, `mpiifort` from Intel MPI/compiler 2021.3; Release |
+| Dependency settings | LibRI ON using bundled LibRI `e978e96`; bundled LibComm `12457e7+bounded-exchange`; bundled ELPA 2026.02.001 ON with OpenMP; external ELPA OFF; `MPI_THREAD_MULTIPLE` |
+| Configure result | Completed with bundled ELPA and OpenMP explicitly reported ON |
+| Build result | Bundled ELPA and `rpa_lib` completed; full build exited 2 when driver and `test_rpa_headwing` included public LibRPA headers |
+| First relevant error | `mpi/base_blacs.h: cannot open source file "elpa/elpa.h"` in targets consuming `rpa_lib` |
+| Root cause | `rpa_lib` linked the ELPA CMake target as `PRIVATE`, although public header `base_blacs.h` includes `elpa/elpa.h`; ELPA include/link requirements were not propagated to consumers |
+| Retained logs | Remote `configure-elpa.log` and `build-elpa.log` |
+| Evidence-bounded conclusion | ELPA itself compiled. The failure was a CMake target-interface defect before any ELPA numerical test or GW execution. |
+| Minimal correction | Change only `target_link_libraries(rpa_lib PRIVATE ${LIBRPA_ELPA_TARGET})` to `PUBLIC`, with an explanatory comment. |
+| Verification after correction | Reconfigure completed; `test_wc_sqrt_solver`, `test_rpa_headwing`, and `rpa_exe` built; a subsequent all-target build completed with exit 0. |
+
 ## Workflow correction: all builds and tests run on df_dcu
 
 On 2026-08-11 an initial local configure attempt stopped before compiling the

@@ -250,7 +250,7 @@ git commit -m 'test: benchmark distributed Wc square root'
 - Create: versioned remote source/build directory under `/work1/ghj/app/src/`
 - Modify: `docs/develop/mnf2_wc_sqrt_solver_validation.md`
 
-- [ ] **Step 1: Verify the local source state without building locally**
+- [x] **Step 1: Verify the local source state without building locally**
 
 ```bash
 git status --short
@@ -265,14 +265,14 @@ No LibRPA configure, compile, MPI test, or calculation is run on the local
 workstation. Local actions are limited to source/document editing, Git checks,
 packaging, and inspection of downloaded artifacts.
 
-- [ ] **Step 2: Stage without Git metadata or build outputs**
+- [x] **Step 2: Stage without Git metadata or build outputs**
 
 Set `commit=$(git rev-parse --short=12 HEAD)` and stage to
 `/work1/ghj/app/src/librpa_mnf2_wc_sqrt_${commit}_20260811/LibRPA` using a tar
 stream that excludes `.git`, `build-*`, and `.DS_Store`. Write the full commit
 to `CODEX_SOURCE_COMMIT` in the remote source root.
 
-- [ ] **Step 3: Configure the ELPA-enabled build**
+- [x] **Step 3: Configure the ELPA-enabled build**
 
 In the same remote shell source
 `/public/home/ghj/app/src/env_60_245_intel2021.sh`, then run:
@@ -290,7 +290,7 @@ cmake -S . -B build_df_dcu_intel2021_wc_elpa \
 cmake --build build_df_dcu_intel2021_wc_elpa -j16
 ```
 
-- [ ] **Step 4: Verify the build instead of trusting configuration intent**
+- [x] **Step 4: Verify the build instead of trusting configuration intent**
 
 Require cache entries `LIBRPA_USE_BUNDLED_ELPA:BOOL=ON`,
 `LIBRPA_BUNDLED_ELPA_OPENMP:BOOL=ON`, `LIBRPA_USE_LIBRI:BOOL=ON`; require

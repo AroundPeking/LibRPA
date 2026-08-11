@@ -26,8 +26,10 @@ target_include_directories(rpa_lib PRIVATE
 )
 
 if(LIBRPA_ELPA_TARGET)
-  # Link either the external ELPA target or the bundled imported target.
-  target_link_libraries(rpa_lib PRIVATE ${LIBRPA_ELPA_TARGET})
+  # Public headers such as mpi/base_blacs.h include ELPA headers when the
+  # backend is enabled. Propagate the ELPA include and link interface to
+  # driver and test targets that consume rpa_lib.
+  target_link_libraries(rpa_lib PUBLIC ${LIBRPA_ELPA_TARGET})
 endif()
 if(LIBRPA_BUNDLED_ELPA_PROJECT_TARGET)
   # Bundled ELPA is built by ExternalProject_Add, so keep its build step
