@@ -24,7 +24,7 @@
 
 - Create: `docs/develop/mnf2_wc_sqrt_solver_validation.md`
 
-- [ ] **Step 1: Record the preserved failure boundary**
+- [x] **Step 1: Record the preserved failure boundary**
 
 Create the report with the exact job `21568982`, source commit
 `e097c60b0d5ebf9ec3d064b7c3808d2573dc52c4`, executable SHA256
@@ -33,7 +33,7 @@ Create the report with the exact job `21568982`, source commit
 `epsilon_prepare_coulwc_sqrt_4 -> power_hemat_blacs_real -> pdsyev` for
 `n=1078`, block 128, grid `4x4`, forced TCP.
 
-- [ ] **Step 2: Add the per-attempt template**
+- [x] **Step 2: Add the per-attempt template**
 
 Use this table for every attempt:
 
@@ -54,7 +54,7 @@ Use this table for every attempt:
 | Next action | |
 ```
 
-- [ ] **Step 3: Verify and commit the record skeleton**
+- [x] **Step 3: Verify and commit the record skeleton**
 
 Run:
 
@@ -83,12 +83,12 @@ git commit -m 'docs: start MnF2 Wc solver validation log'
 - Create: `src/test/test_wc_sqrt_solver.cpp`
 - Modify: `src/test/CMakeLists.txt`
 
-- [ ] **Step 1: Register the test target**
+- [x] **Step 1: Register the test target**
 
 Add `test_wc_sqrt_solver` to the existing four-process `foreach(target ...)`
 list in `src/test/CMakeLists.txt`.
 
-- [ ] **Step 2: Write the red test against missing benchmark functions**
+- [x] **Step 2: Write the red test against missing benchmark functions**
 
 Create `src/test/test_wc_sqrt_solver.cpp` with MPI initialization identical to
 `test_shrink_scalapack.cpp`, a square BLACS grid, environment parsing for
@@ -106,21 +106,28 @@ assert(result.relative_residual <= 1.0e-9);
 assert(result.hermiticity_residual <= 1.0e-12);
 ```
 
-- [ ] **Step 3: Run the red build**
+- [x] **Step 3: Run the red build on df_dcu**
 
-Run in a fresh build directory:
+Transfer the uncommitted red-test source snapshot to a temporary versioned
+directory under `/work1/ghj/app/src/` on df_dcu. In the same remote shell,
+source `/public/home/ghj/app/src/env_60_245_intel2021.sh`, then run:
 
 ```bash
-cmake -S . -B build-mnf2-wc-red \
-  -DLIBRPA_ENABLE_TEST=ON -DLIBRPA_ENABLE_DRIVER=OFF
-cmake --build build-mnf2-wc-red --target test_wc_sqrt_solver -j8
+cmake -S . -B build_mnf2_wc_red \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER=mpiicpc \
+  -DCMAKE_Fortran_COMPILER=mpiifort \
+  -DLIBRPA_USE_LIBRI=OFF \
+  -DLIBRPA_ENABLE_TEST=ON \
+  -DLIBRPA_ENABLE_DRIVER=OFF
+cmake --build build_mnf2_wc_red --target test_wc_sqrt_solver -j16
 ```
 
 Expected: compilation fails because `run_wc_sqrt_benchmark`,
 `env_positive_int`, `env_flag`, and `WcSqrtBenchmarkResult` are not defined.
 Record the first compiler error in the validation report.
 
-- [ ] **Step 4: Commit the red test**
+- [x] **Step 4: Commit the red test**
 
 ```bash
 git add src/test/CMakeLists.txt src/test/test_wc_sqrt_solver.cpp \
@@ -203,21 +210,22 @@ Print exactly one summary line beginning:
 WC_SQRT_BENCH solver=scalapack|elpa n=... block=... ranks=... grid=... sqrt_s=... residual_gemm_s=... filtered=... relres=... herm=... finite=1 status=PASS
 ```
 
-- [ ] **Step 6: Run the green local test**
+- [ ] **Step 6: Run the green df_dcu test**
 
 ```bash
-cmake --build build-mnf2-wc-red --target test_wc_sqrt_solver -j8
-ctest --test-dir build-mnf2-wc-red -R '^test_wc_sqrt_solver$' \
+cmake --build build_mnf2_wc_green --target test_wc_sqrt_solver -j16
+ctest --test-dir build_mnf2_wc_green -R '^test_wc_sqrt_solver$' \
   --output-on-failure
 ```
 
-Expected: four-rank ScaLAPACK default case prints `WC_SQRT_BENCH ... status=PASS`
-and CTest reports `100% tests passed`.
+Run this command on df_dcu, not on the local workstation. Expected: four-rank
+ScaLAPACK default case prints `WC_SQRT_BENCH ... status=PASS` and CTest reports
+`100% tests passed`.
 
 - [ ] **Step 7: Run nearby regression tests**
 
 ```bash
-ctest --test-dir build-mnf2-wc-red \
+ctest --test-dir build_mnf2_wc_green \
   -R '^(test_matrix_m_mpi|test_shrink_scalapack|test_wc_sqrt_solver)$' \
   --output-on-failure
 ```
@@ -242,7 +250,7 @@ git commit -m 'test: benchmark distributed Wc square root'
 - Create: versioned remote source/build directory under `/work1/ghj/app/src/`
 - Modify: `docs/develop/mnf2_wc_sqrt_solver_validation.md`
 
-- [ ] **Step 1: Verify the local source state**
+- [ ] **Step 1: Verify the local source state without building locally**
 
 ```bash
 git status --short
@@ -252,6 +260,10 @@ git log -1 --format='%H %an <%ae> / %cn <%ce> / %s'
 
 Expected: only the already-known untracked build directories, `.DS_Store`, and
 preserved developer summary remain; tracked files are clean.
+
+No LibRPA configure, compile, MPI test, or calculation is run on the local
+workstation. Local actions are limited to source/document editing, Git checks,
+packaging, and inspection of downloaded artifacts.
 
 - [ ] **Step 2: Stage without Git metadata or build outputs**
 

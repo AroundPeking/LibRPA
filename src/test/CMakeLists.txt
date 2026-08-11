@@ -81,6 +81,7 @@ foreach(target
   test_kpoint_blacs_parallel_context
   test_shared_memory_mpi
   test_shrink_scalapack
+  test_wc_sqrt_solver
   )
   config_test(${target} 4)
 endforeach()

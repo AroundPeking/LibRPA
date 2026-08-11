@@ -53,3 +53,30 @@ older attempt to make a later interpretation appear retroactive.
 For remote attempts retain the submission script, exact input, environment
 dump, CMake cache, executable hash, `sacct` result, standard output/error, and
 rank log. The report may link to large files in the preserved run directory.
+
+## Attempt T1: red build of the Wc square-root test
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-08-11 |
+| Purpose / changed variable | Prove that the newly registered MPI test fails specifically because the benchmark API has not yet been implemented |
+| Local and remote directory | Local worktree `mnf2-libcomm-bounded-exchange`; remote `/work1/ghj/app/src/librpa_mnf2_wc_sqrt_red_20260811_01/LibRPA` |
+| Source commit / dirty state | Local HEAD `2d595abe` plus uncommitted red-test additions to `src/test/CMakeLists.txt` and `src/test/test_wc_sqrt_solver.cpp`; recorded remotely in `CODEX_SOURCE_STATE` |
+| Build settings | Intel C++/Fortran 2021.3; Release; `LIBRPA_USE_LIBRI=OFF`; tests ON; driver OFF; bundled/external ELPA OFF |
+| Build location | df_dcu login shell after sourcing `/public/home/ghj/app/src/env_60_245_intel2021.sh`; no local compilation |
+| Result | CMake configuration and `rpa_lib` completed; `test_wc_sqrt_solver.cpp` compilation exited with code 2 |
+| First relevant errors | `env_positive_int` undefined; `env_flag` undefined; `run_wc_sqrt_benchmark` undefined |
+| Evidence-bounded conclusion | The test target reaches its source compile under the intended df_dcu compiler environment and fails for the intended missing implementation. No matrix solver ran and this is not a solver failure. |
+| Retained logs | Remote `configure-red.log` and `build-red.log` |
+| Next action | Commit the red test, implement only the deterministic benchmark and numerical gates, then rebuild on df_dcu. |
+
+## Workflow correction: all builds and tests run on df_dcu
+
+On 2026-08-11 an initial local configure attempt stopped before compiling the
+new test because AppleClang did not automatically locate Homebrew OpenMP. A
+second local configure supplied the known `libomp` paths, but it was terminated
+before completion when the user clarified that LibRPA builds and tests must run
+on the server. Neither local attempt reached the Wc test and neither provides a
+solver result. All subsequent configure, compile, MPI-test, and GW work is
+performed on df_dcu; the local worktree is used only for source, Git, reports,
+and downloaded-result inspection.
