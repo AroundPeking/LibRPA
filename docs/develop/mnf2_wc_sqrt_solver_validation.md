@@ -264,3 +264,30 @@ watcher PID is recorded in remote `WATCHER_PID`, with its audit trail in
 This entry is intentionally interim.  Producer completion evidence, exact
 reader counts and auxiliary dimensions, postprocessing results, and the actual
 nfreq=6 Wc/Sigma result must be appended from final artifacts.
+
+### D2 producer completion and band-topology correction
+
+Producer job `2546979` completed with scheduler state `COMPLETED`, exit `0:0`,
+and elapsed time `01:27:54`.  ABACUS reported SCF convergence, finish/total time
+(`1 h 27 min 40 s`), 65 full and 65 cut q blocks, 1884 raw auxiliary functions,
+1078 active shrink functions, 16 raw `Cs`, 16 shrink `Cs`, 16 inverse-overlap
+rank files, and `PRODUCER_OK`.  The largest producer component was
+`out_abfs_overlap_v1` at 2171.93 s; this explains the earlier long, mostly
+quiet post-SCF interval.
+
+The first login-node band attempt used one MPI rank and requested 30 OpenMP
+threads although the selected login node exposed 16 CPUs.  ABACUS warned about
+the oversubscription, and direct process sampling showed the diagonalization
+using approximately one CPU.  After about 11 minutes it had advanced only a
+small fraction of the 620 spin-k points.  This attempt was deliberately stopped
+as a performance correction, not a physics or numerical failure.  Its complete
+partial output is retained under
+`band/attempt_login_mpi1_omp30_20260811_134203`.
+
+The replacement keeps the same input, charge density, 310-point path, ABACUS
+executable, and postprocessing gate.  Only the login-node runtime topology is
+changed to 16 MPI ranks and one OpenMP thread per rank so that ABACUS can
+distribute the spin-k points across the 16 available CPUs.  The replacement
+script is `band/run_band_login16.slurm`; it is run by the guarded continuation
+before PyATB and Coulomb audit.  No nfreq=6 LibRPA job is submitted until all
+three postprocessing markers pass.
