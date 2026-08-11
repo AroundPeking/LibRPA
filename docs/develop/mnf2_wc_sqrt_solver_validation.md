@@ -70,6 +70,25 @@ rank log. The report may link to large files in the preserved run directory.
 | Retained logs | Remote `configure-red.log` and `build-red.log` |
 | Next action | Commit the red test, implement only the deterministic benchmark and numerical gates, then rebuild on df_dcu. |
 
+## Attempt T2: green ScaLAPACK test and nearby regressions
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-08-11 |
+| Purpose / changed variable | Implement the deterministic dense SPD matrix, call the production `power_hemat_la_real` dispatcher, and verify distributed residuals |
+| Local and remote directory | Local worktree `mnf2-libcomm-bounded-exchange`; remote `/work1/ghj/app/src/librpa_mnf2_wc_sqrt_red_20260811_01/LibRPA` |
+| Source commit / dirty state | Local HEAD `dba19be4` plus the uncommitted green implementation; remote `CODEX_SOURCE_STATE` identifies the snapshot |
+| Test executable SHA256 | `c2ba0d769f2f56f9e3836926df5af3924716b03c573d3b88ccf55720588c9a7f` |
+| Build settings | Intel C++/Fortran 2021.3; Release; LibRI OFF; bundled/external ELPA OFF; tests ON; driver OFF |
+| First green compile correction | The first green compile exposed missing declarations for `init_local_mat` and `power_hemat_blacs_real`; including `utils_matrix_m_mpi.h` before `la_connector.h` resolved the test-only include dependency |
+| MPI execution | df_dcu login node, four MPI ranks, `I_MPI_FABRICS=shm`, one OpenMP/MKL thread per rank; matrix `n=32`, block 8, grid `2x2` |
+| Result | `WC_SQRT_BENCH solver=scalapack ... sqrt_s=0.0853893570602 residual_gemm_s=0.000558719038963 filtered=0 relres=3.17641173216e-15 herm=3.11443271155e-17 finite=1 status=PASS` in the three-test regression run |
+| Nearby regressions | `test_matrix_m_mpi`, `test_shrink_scalapack`, and `test_wc_sqrt_solver`: 3/3 passed, total 3.08 s |
+| Retained logs | Remote `build-green.log`, `build-green-2.log`, `ctest-green-login.log`, `build-nearby-tests.log`, and `ctest-nearby-login.log` |
+| Scheduler attempts | `21577991` (`debug`) and `21578004` (`normal`) were cancelled before starting. The debug reason was maintained/reserved nodes; the tiny 32x32 smoke was then run on the df_dcu login node. |
+| Evidence-bounded conclusion | The new test and existing ScaLAPACK/shrink tests pass on df_dcu for the small four-rank case. This does not validate dimension 1078, inter-node communication, TCP, or ELPA. |
+| Next action | Commit the green test, build the same feature branch with bundled CPU ELPA and LibRI enabled, then run the controlled production-dimension lanes through Slurm. |
+
 ## Workflow correction: all builds and tests run on df_dcu
 
 On 2026-08-11 an initial local configure attempt stopped before compiling the

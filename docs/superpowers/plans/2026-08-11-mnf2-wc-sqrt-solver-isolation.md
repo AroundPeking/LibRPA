@@ -145,13 +145,13 @@ git commit -m 'test: define MnF2 Wc square-root gate'
 - Modify: `src/test/test_wc_sqrt_solver.cpp`
 - Modify: `docs/develop/mnf2_wc_sqrt_solver_validation.md`
 
-- [ ] **Step 1: Implement strict environment parsing**
+- [x] **Step 1: Implement strict environment parsing**
 
 Add `env_positive_int` and `env_flag`. Accept flag values `0`, `1`, `false`,
 and `true`; throw `std::invalid_argument` for any other value. Reject a block
 larger than the matrix dimension.
 
-- [ ] **Step 2: Construct a deterministic dense SPD matrix**
+- [x] **Step 2: Construct a deterministic dense SPD matrix**
 
 On BLACS source rank 0 fill the matrix with:
 
@@ -169,7 +169,7 @@ Store it as `matrix_m<std::complex<double>>`, distribute it with
 The diagonal dominance keeps the matrix positive definite while the nonzero
 off-diagonal terms exercise eigenvector communication.
 
-- [ ] **Step 3: Call the production Wc square-root dispatcher**
+- [x] **Step 3: Call the production Wc square-root dispatcher**
 
 Initialize distributed A/Z descriptors with the requested block. When ELPA is
 requested and `LIBRPA_USE_ELPA` is defined, call
@@ -184,7 +184,7 @@ LaConnector::power_hemat_la_real<double>(
 When ELPA is requested in a build without `LIBRPA_USE_ELPA`, throw a clear
 runtime error rather than silently falling back to ScaLAPACK.
 
-- [ ] **Step 4: Compute independent numerical gates**
+- [x] **Step 4: Compute independent numerical gates**
 
 Keep a distributed copy of the original matrix. Compute `S*S` with
 `ScalapackConnector::pgemm_f` into a separate distributed matrix; do not use a
@@ -202,7 +202,7 @@ eigenvalues, relative residual at most `1e-9`, and Hermiticity residual at most
 `1e-12`. Report the square-root and residual-multiplication times separately so
 the validation work is not mistaken for eigensolver time.
 
-- [ ] **Step 5: Emit one parseable root-rank line**
+- [x] **Step 5: Emit one parseable root-rank line**
 
 Print exactly one summary line beginning:
 
@@ -210,7 +210,7 @@ Print exactly one summary line beginning:
 WC_SQRT_BENCH solver=scalapack|elpa n=... block=... ranks=... grid=... sqrt_s=... residual_gemm_s=... filtered=... relres=... herm=... finite=1 status=PASS
 ```
 
-- [ ] **Step 6: Run the green df_dcu test**
+- [x] **Step 6: Run the green df_dcu test**
 
 ```bash
 cmake --build build_mnf2_wc_green --target test_wc_sqrt_solver -j16
@@ -222,7 +222,7 @@ Run this command on df_dcu, not on the local workstation. Expected: four-rank
 ScaLAPACK default case prints `WC_SQRT_BENCH ... status=PASS` and CTest reports
 `100% tests passed`.
 
-- [ ] **Step 7: Run nearby regression tests**
+- [x] **Step 7: Run nearby regression tests**
 
 ```bash
 ctest --test-dir build_mnf2_wc_green \
@@ -232,7 +232,7 @@ ctest --test-dir build_mnf2_wc_green \
 
 Expected: all three tests pass. Record commands and results in the report.
 
-- [ ] **Step 8: Commit the green implementation**
+- [x] **Step 8: Commit the green implementation**
 
 ```bash
 git add src/test/test_wc_sqrt_solver.cpp \
