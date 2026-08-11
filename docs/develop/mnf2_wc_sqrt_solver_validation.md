@@ -139,3 +139,24 @@ on the server. Neither local attempt reached the Wc test and neither provides a
 solver result. All subsequent configure, compile, MPI-test, and GW work is
 performed on df_dcu; the local worktree is used only for source, Git, reports,
 and downloaded-result inspection.
+
+## Attempt T3: queued production-dimension solver isolation
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-08-11 |
+| Purpose / changed variable | Compare only the MPI provider and square-root backend for the Wc-sized deterministic matrix on one common allocation |
+| Remote run directory | `/work1/ghj/gw/mnf2_dojo_tzdp10_abfs_shrink_sym_headwing_k6x6x9_gw_20260807/wc_sqrt_solver_isolation_20260811` |
+| Source identity | Local feature HEAD `203f122f4ca4fa5b6300205335d4948ff1e2a591`; remote `src/CMakeLists.txt` and `src/test/test_wc_sqrt_solver.cpp` SHA256 values match this commit exactly |
+| Test executable SHA256 | `874479a89450be13d309d7a1b7c721ca789e22a59b55994956a6a5fde45d3aee` |
+| ELPA gate | Bundled CPU ELPA and its OpenMP variant are ON in `CMakeCache.txt`; the test is statically linked to `libelpa_openmp.a` |
+| Common numerical size | Deterministic SPD matrix `1078 x 1078`, block 128, 16 MPI ranks on 16 nodes, expected BLACS grid `4x4`, 30 OpenMP and MKL threads per rank |
+| Network pre-gates | 16-rank default-native and explicit `verbs;ofi_rxm` Allreduce smokes on the exact solver allocation |
+| Lane A | ScaLAPACK with forced TCP (`FI_PROVIDER=tcp`, `I_MPI_OFI_PROVIDER=tcp`, `UCX_TLS=tcp,self`) |
+| Lane B | ScaLAPACK with explicit high-speed `verbs;ofi_rxm`, only after the corresponding smoke passes |
+| Lane C | ELPA with the same explicit high-speed `verbs;ofi_rxm`, only after the corresponding smoke passes |
+| Stop rule | Each solver lane is terminated after 1200 seconds, with a 30-second kill grace period |
+| Submission | `sbatch --test-only` accepted the script; formal Slurm job `21578141` submitted to `normal`, initially pending |
+| Completion evidence required | `DIAGNOSTIC_COMPLETE`, per-lane return codes, parseable `WC_SQRT_BENCH`, finite output, PASS, relative square residual, Hermiticity residual, and scheduler exit code |
+| Evidence-bounded conclusion | No solver result exists yet because the job has not started. A pending job is not evidence of a hang. |
+| Next action | Monitor `21578141`; interpret MPI-init failures separately from eigensolver timeouts, then use the passing backend/provider for the reduced-frequency GW gate. |
