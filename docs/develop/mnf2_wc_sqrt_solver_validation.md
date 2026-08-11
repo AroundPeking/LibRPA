@@ -286,8 +286,18 @@ partial output is retained under
 
 The replacement keeps the same input, charge density, 310-point path, ABACUS
 executable, and postprocessing gate.  Only the login-node runtime topology is
-changed to 16 MPI ranks and one OpenMP thread per rank so that ABACUS can
-distribute the spin-k points across the 16 available CPUs.  The replacement
-script is `band/run_band_login16.slurm`; it is run by the guarded continuation
-before PyATB and Coulomb audit.  No nfreq=6 LibRPA job is submitted until all
-three postprocessing markers pass.
+changed to 16 MPI ranks and one OpenMP thread per rank.  This does **not**
+distribute independent k points: ABACUS currently rejects `kpar > 1` for the
+LCAO basis, so the 620 spin-k points remain sequential and all ranks cooperate
+on each 176-by-176 generalized diagonalization.  Nevertheless, it is a large
+measured improvement over the first topology: the one-rank attempt completed
+5 `DiagoElpa::diag` calls in 695.976 s, while the 16-rank replacement completed
+110 calls in 995.763 s, approximately 15.4 times more diagonalizations per
+unit time.  Process sampling placed the 16 ranks on 16 distinct CPUs, but each
+rank averaged only about 6% CPU because the small distributed eigensolve spends
+most of its wall time in synchronization.  This is low parallel efficiency,
+not a stall or a login-node CPU-set restriction.
+
+The replacement script is `band/run_band_login16.slurm`; it is run by the
+guarded continuation before PyATB and Coulomb audit.  No nfreq=6 LibRPA job is
+submitted until all three postprocessing markers pass.
