@@ -174,3 +174,26 @@ square-root lane to 240 seconds, and the Slurm request to 20 minutes. A healthy
 already sufficient for this bounded hang diagnosis. The replacement formal job
 is `21578160` in `normal`, initially pending. The original and replacement
 submission scripts are both retained in the remote T3 run directory.
+
+## Attempt D1: cross-server solver control on df
+
+This attempt is a controlled code/solver check on `df_iopcas_ghj`. It must not
+be used to claim that the df_dcu network or scheduler problem is fixed, because
+the compiler, MPI runtime, network fabric, and nodes differ.
+
+| Field | Value |
+| --- | --- |
+| Date | 2026-08-11 |
+| Purpose / changed variable | Run the same deterministic 1078-dimensional solver benchmark on df while df_dcu remains priority-pending |
+| Remote source | `/data/home/df_iopcas_ghj/app/librpa/LibRPA-mnf2-wc-sqrt-7397782d-20260811` |
+| Source identity | Clean archive of feature branch commit `7397782ddd7925c5aef1bd4162abd2505e5671c0`; remote hashes of `src/CMakeLists.txt` and `src/test/test_wc_sqrt_solver.cpp` match the local worktree |
+| Build environment | df oneAPI 2024.2, CMake 3.31.7, `mpiicx`, `mpiicpx`, `mpiifx`; no local compilation |
+| Build settings | Release; LibRI ON; bundled ELPA 2026.02.001 ON with OpenMP; external ELPA OFF; tests and driver ON |
+| Build result | `BUILD_OK` at 2026-08-11 12:01:54 +08:00 |
+| Test executable SHA256 | `d30da864bd8a6b53db005db0f58bf7f6b0bec141f4121bdf9316b5be12fb3faf` |
+| Driver SHA256 | `9fd16774a9fc6d5127c9cf69827068f6804f1d9dfa9bff03a8435707c0ab1069` |
+| Runtime root | `/data/home/df_iopcas_ghj/gw/altermagnet/mnf2_wc_sqrt_solver_df_20260811` |
+| 16-node lane | Job `2546962`, partition `48cp3`, 16 nodes/ranks, one rank per node, 30 OpenMP/MKL threads, native `I_MPI_FABRICS=shm:ofi`, 1078/block128 ScaLAPACK and ELPA on a common allocation |
+| 4-node auxiliary lane | Initial p1 job `2546964` was cancelled before start because the scheduler estimate was not useful; replacement `2546970` uses `48cp2`, four nodes/ranks, grid `2x2`, 30 OpenMP/MKL threads, native `shm:ofi` |
+| Evidence boundary | The 4-node lane only checks distributed solver viability on a `2x2` process grid. The 16-node lane is required for the original `4x4` topology. Neither job had produced a solver result when this entry was written. |
+| Next action | Require scheduler completion, per-lane zero return code, `finite=1 status=PASS`, relative square residual, and Hermiticity residual before interpreting either lane. |
