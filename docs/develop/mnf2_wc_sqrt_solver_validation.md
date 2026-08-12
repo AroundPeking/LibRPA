@@ -301,3 +301,40 @@ not a stall or a login-node CPU-set restriction.
 The replacement script is `band/run_band_login16.slurm`; it is run by the
 guarded continuation before PyATB and Coulomb audit.  No nfreq=6 LibRPA job is
 submitted until all three postprocessing markers pass.
+
+### D2 postprocessing result and PyATB resource failure
+
+The replacement band calculation finished on 2026-08-11 and wrote
+`BAND_OK job=login_band_20260811_135523 nk=310 nspin=2 nbands=176`.  The
+artifact gate found 310 nonempty `band_KS_eigenvalue_k_*`, 310 nonempty
+`band_KS_eigenvector_k_*`, and 310 nonempty `band_vxc_k_*` files.  The first
+line of `band_kpath_info` is `176 176 2 310`, consistent with the expected
+spin-resolved 310-point path.
+
+The guarded continuation then invoked `pyatb/run_pyatb.slurm` directly as a
+login-node shell script.  This was an execution-topology error: its
+`#SBATCH --mem=190000M` line was only a comment because the script was not
+launched by `sbatch`.  The df login user slice has a measured cgroup limit of
+4294967296 bytes (4 GiB), and `get_diel.py` was killed before writing a
+nonempty velocity log or `PYATB_OK`.  The partial 613 MiB output directory is
+preserved as
+`producer/pyatb_librpa_df.failed_login_20260811_181145`; it is not accepted as
+a head/wing result.
+
+A compute-node-only retry script,
+`pyatb/run_pyatb_compute_48cp3.slurm`, keeps the PyATB environment, physical
+inputs, reader-v1 headers, and post-run assertions unchanged.  Only the batch
+resource specification follows the previously successful producer lane:
+partition `48cp3`, one exclusive 48-core node, and 185000M memory.  Its SHA256
+is `558a75bd9814ba4a68945c9db1684ad4be8e1af7cf3089876514f539ce356cde`.
+It has not been submitted: all CPU partitions currently report
+`UNKNOWN/NOT_RESPONDING`, and `sbatch --test-only` returns
+`Requested node configuration is not available`.
+
+The independent reader-v1 Coulomb audit was safe to run on the working
+`c2ln6` login node because it reconstructs one 1078-by-1078 q-point matrix at
+a time.  It passed with 65 q points, finite and Hermitian full/cut matrices,
+and cut-Coulomb minimum eigenvalue `6.2697396526843227e-06`.  The full Ewald
+minimum eigenvalue `-1.1860115687492676e+03` is retained as the predefined
+nonblocking warning.  This produced `COULOMB_GATE_OK` but does not bypass the
+missing `PYATB_OK` gate.  No nfreq=6 LibRPA job has been submitted.
