@@ -383,5 +383,44 @@ nodes available, the formal LibRPA script changes only the partition from
 `48cp2` to `48cp1`.  Its 16-node/16-rank/30-thread topology, nfreq=6 physical
 input, symmetry, shrink, PyATB head/wing, ELPA Wc square root, and bounded
 LibComm settings are unchanged.  `sbatch --test-only` passed and formal job
-`3000114` was submitted exactly once.  Its scheduler result and Wc/Sigma/band
-artifacts remain pending and must be appended after completion.
+`3000114` was submitted exactly once.  The completed result is recorded below.
+
+### D2 nfreq=6 physical GW completion
+
+Formal job `3000114` completed on 2026-08-12 with scheduler state
+`COMPLETED`, exit `0:0`, and elapsed time `05:44:44`.  The rank-zero log ends
+with `libRPA finished successfully`, the batch wrapper wrote
+`LIBRPA_NFREQ6_OK`, and `slurm.3000114.err` is empty.  The run used the staged
+nfreq=6 input (`option_dielect_func = 3`, PyATB head/wing, symmetry, ABFS and
+chi shrink, ScaLAPACK Wc, and ELPA Coulomb square root) with the previously
+recorded 16-node/16-rank topology and bounded LibComm exchange.
+
+This run crossed every earlier execution blocker: ABFS shrink, chi0, all Wc
+construction and square-root work, construction of the real-space correlation self-energy,
+the transformation into the Kohn--Sham representation, and the quasiparticle
+equation.  The principal profile totals were 20647.1313 s wall time for the
+G0W0 calculation and 16847.1789 s for real-space correlation self-energy.
+Thus the branch is validated as an end-to-end execution route for this MnF2
+case; this statement is limited to execution and does not by itself validate
+the physical accuracy of nfreq=6.
+
+All six requested band tables were written and contain exactly 310 k-point
+rows: `GW_band_spin_1.dat`, `GW_band_spin_2.dat`, `EXX_band_spin_1.dat`,
+`EXX_band_spin_2.dat`, `KS_band_spin_1.dat`, and `KS_band_spin_2.dat`.  The KS
+and EXX files are finite.  The GW output is **not fully finite**: the QPE
+solver reported four failed unoccupied states and wrote `nan` at precisely
+those entries:
+
+- spin 1, k point 76, state 37;
+- spin 1, k point 270, state 35;
+- spin 2, k point 270, state 35;
+- spin 2, k point 293, state 37.
+
+Consequently, the completed nfreq=6 run is a successful Wc/Sigma and output
+pipeline validation, but it is not yet an unconditional final GW-band result.
+Any plot or gap analysis must either demonstrate that these four higher
+unoccupied states lie outside the selected near-gap window or rerun the
+quasiparticle solve with a controlled remedy.  The downloaded evidence,
+including inputs, logs, the six band tables, `band_kpath_info`, `KPT_nscf`,
+`band_out`, and SHA256 manifest, is retained under
+`GW_pseudopotential_NAO/.codex_tmp/mnf2_wc_df_20260811/final`.
