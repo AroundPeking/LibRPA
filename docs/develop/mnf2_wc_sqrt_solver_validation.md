@@ -338,3 +338,50 @@ and cut-Coulomb minimum eigenvalue `6.2697396526843227e-06`.  The full Ewald
 minimum eigenvalue `-1.1860115687492676e+03` is retained as the predefined
 nonblocking warning.  This produced `COULOMB_GATE_OK` but does not bypass the
 missing `PYATB_OK` gate.  No nfreq=6 LibRPA job has been submitted.
+
+### D2 bounded-memory PyATB retry and nfreq=6 submission
+
+The login-node PyATB failure was reproduced on 2026-08-12 with a controlled
+single-thread retry on `c2ln5`.  The retry kept the producer input, PyATB
+environment, and reader-v1 output contract unchanged, while setting all BLAS
+and OpenMP thread counts to one and reducing the OpenMP/KMP thread stack from
+512 MiB to 32 MiB.  It was again killed by the login user cgroup.  GNU `time`
+measured a maximum resident set of 4178768 KiB; the cgroup reported
+`memory.max=4294967296`, `oom=1`, and `oom_kill=1`.  Only the 321163080-byte
+`KS_eigenvector_0.dat` was written.  This second 613 MiB partial directory is
+preserved as
+`producer/pyatb_librpa_df.failed_login_single_20260812_170420`.
+
+This controlled result rules out thread oversubscription and the original
+512 MiB thread-stack setting as the immediate cause.  The MnF2 PyATB process
+itself needs slightly more than the login session's 4 GiB hard limit, so a
+third login retry would not be informative.
+
+When partition `48cp1` recovered, the same compute-node retry was staged there;
+the only difference from `run_pyatb_compute_48cp3.slurm` is the partition name.
+Formal job `3000095` used one exclusive 48-core, 190000 MiB node, completed in
+96 s with scheduler exit `0:0`, and wrote:
+
+- `velocity_matrix`: 963481420 bytes, reader-v1 header
+  `(-12345680, 29, 324, 2, 176, 176, 3)`;
+- `KS_eigenvector_0.dat`: 321163080 bytes, reader-v1 header
+  `(-12345679, 28, 324, 2, 176, 176)`;
+- nonempty `band_out` and `k_path_info`;
+- `PYATB_OK job=3000095 nk=324 nspin=2 nbasis=176`.
+
+All four downstream gates are therefore now present: `PRODUCER_OK`, `BAND_OK`,
+`PYATB_OK`, and `COULOMB_GATE_OK`.  Before the LibRPA submission, the retained
+df executable was rechecked against source commit
+`7397782ddd7925c5aef1bd4162abd2505e5671c0`, executable SHA256
+`9fd16774a9fc6d5127c9cf69827068f6804f1d9dfa9bff03a8435707c0ab1069`,
+and nfreq=6 input SHA256
+`63d9699c6fdd49fc298c3cdfe0b6c9a0a6b78930e9c1c61155f83bcca49c47e6`.
+The build keeps bundled OpenMP ELPA and LibRI enabled.
+
+Because `48cp2` remained drained while `48cp1` had matching 48-core, 190000 MiB
+nodes available, the formal LibRPA script changes only the partition from
+`48cp2` to `48cp1`.  Its 16-node/16-rank/30-thread topology, nfreq=6 physical
+input, symmetry, shrink, PyATB head/wing, ELPA Wc square root, and bounded
+LibComm settings are unchanged.  `sbatch --test-only` passed and formal job
+`3000114` was submitted exactly once.  Its scheduler result and Wc/Sigma/band
+artifacts remain pending and must be appended after completion.
