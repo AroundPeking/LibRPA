@@ -100,6 +100,31 @@ void test_kpoint_coordinate_mapping_selects_active_klist_from_full_source()
     assert((wrapped_mapping == std::vector<int>{6}));
 }
 
+void test_strict_2d_qmember_diagnostic_selects_one_periodic_member()
+{
+    const Vector3_Order<double> selected{0.0, 1.0 / 12.0, 0.0};
+    const std::vector<Vector3_Order<double>> first_star{
+        {0.0, 1.0 / 12.0, 0.0},
+        {0.0, -1.0 / 12.0, 0.0},
+        {1.0 / 12.0, 0.0, 0.0},
+        {-1.0 / 12.0, 0.0, 0.0},
+        {1.0 / 12.0, -1.0 / 12.0, 0.0},
+        {-1.0 / 12.0, 1.0 / 12.0, 0.0},
+    };
+
+    for (const auto& q : first_star)
+    {
+        assert(librpa_int::strict_2d_qmember_diagnostic_keeps(q, selected, false));
+    }
+    assert(librpa_int::strict_2d_qmember_diagnostic_keeps(first_star.front(), selected, true));
+    assert(librpa_int::strict_2d_qmember_diagnostic_keeps(
+        Vector3_Order<double>{0.0, -11.0 / 12.0, 0.0}, selected, true));
+    for (std::size_t i = 1; i != first_star.size(); ++i)
+    {
+        assert(!librpa_int::strict_2d_qmember_diagnostic_keeps(first_star[i], selected, true));
+    }
+}
+
 void test_kstar_velocity_mapping_preserves_member_order_and_periodic_gauge()
 {
     SymmetryContext ctx;
@@ -2006,6 +2031,52 @@ void test_wq_to_wr_symmetry_reduced_q_matches_full_bz()
     assert_wq_rspace_maps_close(actual, expected);
 }
 
+void test_wq_to_wr_qmember_diagnostic_keeps_original_full_bz_weight()
+{
+    const auto pbc_full = make_wq_full_pbc();
+    const auto pbc_sym = make_wq_reduced_pbc();
+    auto ctx = make_two_atom_inversion_context(pbc_sym);
+    AtomicBasis basis_abf(std::vector<std::size_t>{1, 1});
+    basis_abf.set_l_shells({{0}, {0}});
+
+    const auto gamma_blocks = scalar_wq_to_blocks({
+        {0, {{0, {1.5, 0.0}}, {1, {0.4, 0.0}}}},
+        {1, {{0, {0.4, 0.0}}, {1, {1.5, 0.0}}}}});
+    const auto rep_blocks = scalar_wq_to_blocks({
+        {0, {{0, {2.1, 0.0}}, {1, {-0.7, 0.5}}}},
+        {1, {{0, {-0.7, -0.5}}, {1, {1.4, 0.0}}}}});
+
+    atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old
+        wq_sym;
+    add_scalar_wq_blocks(wq_sym, pbc_sym.klist.at(0), gamma_blocks);
+    add_scalar_wq_blocks(wq_sym, pbc_sym.klist.at(1), rep_blocks);
+    const double symmetry_collective_scale =
+        1.0 / static_cast<double>(librpa_int::global::mpi_comm_global_h.nprocs);
+    for (auto &[atom_i, row] : wq_sym)
+    {
+        for (auto &[atom_j, q_blocks] : row)
+        {
+            for (auto &[q, block] : q_blocks) block *= symmetry_collective_scale;
+        }
+    }
+
+    atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old
+        wq_selected_full;
+    add_scalar_wq_blocks(wq_selected_full, pbc_full.klist.at(1), rep_blocks);
+    const TFGrids dummy_tfg;
+    SymmetryContext no_symmetry;
+    const auto expected = librpa_int::FT_Wc_q2R(
+        librpa_int::global::mpi_comm_global_h, basis_abf, no_symmetry, wq_selected_full,
+        dummy_tfg, pbc_full, pbc_full.Rlist, false, "", false);
+
+    setenv("LIBRPA_STRICT2D_QMEMBER_DIAG", "0.3333333333333333,0,0", 1);
+    const auto actual = librpa_int::FT_Wc_q2R(
+        librpa_int::global::mpi_comm_global_h, basis_abf, ctx, wq_sym,
+        dummy_tfg, pbc_sym, pbc_sym.Rlist, false, "", true);
+    unsetenv("LIBRPA_STRICT2D_QMEMBER_DIAG");
+    assert_wq_rspace_maps_close(actual, expected);
+}
+
 void test_wq_to_wr_symmetry_collective_handles_empty_local_rank()
 {
     const auto pbc_full = make_wq_full_pbc();
@@ -2218,6 +2289,7 @@ int main(int argc, char *argv[])
         test_replace_rpa_response_headwing_replaces_only_singular_channels(blacs_h);
         test_rspace_symmetry_requires_complete_band_space();
         test_kpoint_coordinate_mapping_selects_active_klist_from_full_source();
+        test_strict_2d_qmember_diagnostic_selects_one_periodic_member();
         test_kstar_velocity_mapping_preserves_member_order_and_periodic_gauge();
         test_replace_rpa_response_head_only_keeps_numeric_wings(blacs_h);
         test_head_only_trace_logdet_can_use_reduced_response(blacs_h);
@@ -2264,6 +2336,7 @@ int main(int argc, char *argv[])
         test_head_initialization_does_not_require_coulomb_diagonalization(blacs_h);
         test_strict_2d_gamma_quadrature_is_ready_after_wing_initialization(blacs_h);
         test_wq_to_wr_symmetry_reduced_q_matches_full_bz();
+        test_wq_to_wr_qmember_diagnostic_keeps_original_full_bz_weight();
         test_wq_to_wr_symmetry_collective_handles_empty_local_rank();
         test_dense_wq_to_wr_symmetry_reduced_q_matches_full_bz(blacs_h);
         test_gamma_only_dense_wq_fourier_weight_scales_as_inverse_bvk_cells();

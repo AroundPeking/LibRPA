@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -242,6 +243,14 @@ static bool are_equivalent_symmetry_qpoints(const Vector3_Order<double> &lhs,
     };
     return same_component(lhs.x, rhs.x) && same_component(lhs.y, rhs.y)
            && same_component(lhs.z, rhs.z);
+}
+
+bool strict_2d_qmember_diagnostic_keeps(const Vector3_Order<double>& q_member_frac,
+                                        const Vector3_Order<double>& selected_q_frac,
+                                        const bool diagnostics_enabled)
+{
+    return !diagnostics_enabled
+           || are_equivalent_symmetry_qpoints(q_member_frac, selected_q_frac);
 }
 
 template <typename QMap>
@@ -698,6 +707,23 @@ static abf_rspace_complex_block_map_t accumulate_symmetry_full_wr_from_ibz_q(
         build_symmetry_full_grid_kstar_member_kfrac_targets(ctx, pbc.kfrac_list);
     const bool use_full_grid_member_targets =
         full_grid_member_targets.size() == ctx.kstars.size();
+    const char* qmember_env = std::getenv("LIBRPA_STRICT2D_QMEMBER_DIAG");
+    const bool qmember_diagnostic_enabled = qmember_env != nullptr && qmember_env[0] != '\0';
+    Vector3_Order<double> selected_q_frac;
+    if (qmember_diagnostic_enabled)
+    {
+        std::string value(qmember_env);
+        std::replace(value.begin(), value.end(), ',', ' ');
+        std::istringstream input(value);
+        std::string extra;
+        if (!(input >> selected_q_frac.x >> selected_q_frac.y >> selected_q_frac.z)
+            || (input >> extra))
+        {
+            throw LIBRPA_RUNTIME_ERROR(
+                "LIBRPA_STRICT2D_QMEMBER_DIAG requires three comma-separated reduced coordinates");
+        }
+    }
+    std::size_t kept_qmembers = 0;
 
     for (const auto& star_mapping : ctx.kstar_grid_mapping)
     {
@@ -733,6 +759,12 @@ static abf_rspace_complex_block_map_t accumulate_symmetry_full_wr_from_ibz_q(
                     : Vector3_Order<double>{pbc.latvec * star_mapping.member_q_bz_keys[imember]};
             const Vector3_Order<double> q_bz_target_frac =
                 restrict_fractional_coordinate(raw_q_bz_target_frac);
+            if (!strict_2d_qmember_diagnostic_keeps(
+                    q_bz_target_frac, selected_q_frac, qmember_diagnostic_enabled))
+            {
+                continue;
+            }
+            ++kept_qmembers;
             librpa_int::symmetry_atom_block_matrix_map_t rotated_blocks;
             try
             {
@@ -766,6 +798,21 @@ static abf_rspace_complex_block_map_t accumulate_symmetry_full_wr_from_ibz_q(
                 }
             }
         }
+    }
+
+    if (qmember_diagnostic_enabled && kept_qmembers != 1)
+    {
+        std::ostringstream message;
+        message << "LIBRPA_STRICT2D_QMEMBER_DIAG selected " << kept_qmembers
+                << " full-BZ q members instead of one";
+        throw LIBRPA_RUNTIME_ERROR(message.str());
+    }
+    if (qmember_diagnostic_enabled)
+    {
+        global::lib_printf_root(
+            "Strict 2D diagnostic retained one full-BZ q member at reduced coordinates "
+            "(% .12f, % .12f, % .12f) with the original 1/Nk Fourier weight.\n",
+            selected_q_frac.x, selected_q_frac.y, selected_q_frac.z);
     }
 
     return convert_dense_rspace_blocks_to_row_major(blocks_by_R_full);

@@ -25,6 +25,9 @@ std::string strict_2d_finite_q_diagnostics_header();
 std::string strict_2d_gamma_wc_diagnostics_header();
 std::vector<Vector3_Order<double>> strict_2d_diagnostic_qpoint_order(
     const std::vector<Vector3_Order<double>> &qpoints, bool diagnostics_enabled);
+bool strict_2d_qmember_diagnostic_keeps(const Vector3_Order<double>& q_member_frac,
+                                        const Vector3_Order<double>& selected_q_frac,
+                                        bool diagnostics_enabled);
 bool use_strict_2d_complete_wc_gamma_route(bool replace_w_head, int option_dielect_func,
                                            bool use_2d_dielectric, bool gamma_point,
                                            bool headwing_data_available);
