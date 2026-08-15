@@ -218,12 +218,16 @@ int main(int argc, char **argv)
         const string path_eigocc_scf = driver_params.input_dir + driver_params.fn_eigocc_scf;
 
         profiler.start("driver_read_common_input_data", "Driver Read Task-Common Input Data");
-        const bool needs_scf_eigenvalues = task != task_t::SternheimerRPA;
+        const bool sternheimer_analytic_headwing =
+            task == task_t::SternheimerRPA && driver::get_bool(driver::opts.replace_w_head) &&
+            (driver::opts.option_dielect_func == 3 || driver::opts.option_dielect_func == 4);
+        const bool needs_scf_eigenvalues =
+            task != task_t::SternheimerRPA || sternheimer_analytic_headwing;
         const bool needs_standard_meanfield_data =
-            task != task_t::print_minimax && task != task_t::SternheimerRPA;
+            task != task_t::print_minimax &&
+            (task != task_t::SternheimerRPA || sternheimer_analytic_headwing);
         const bool needs_sternheimer_symmetry_metadata =
-            task == task_t::SternheimerRPA
-            && !driver_params.fn_sternheimer_partial_manifest.empty();
+            task == task_t::SternheimerRPA && !driver_params.fn_sternheimer_partial_manifest.empty();
         const bool needs_structure_bz_basis =
             needs_standard_meanfield_data || needs_sternheimer_symmetry_metadata;
 
