@@ -136,23 +136,16 @@ CoulombEigenbasis diagonalize_coulomb(ComplexMatrix mat, const double threshold)
 ComplexMatrix project_response_to_coulomb_eigenbasis(const CoulombEigenbasis &basis,
                                                      const ComplexMatrix &response_m)
 {
-    const int n = basis.eigenvectors.nr;
     const int active = basis.active_size;
+    const auto transformed =
+        transpose(basis.eigenvectors, true) * response_m * basis.eigenvectors;
     ComplexMatrix projected(active, active);
     for (int i = 0; i != active; ++i)
     {
         for (int j = 0; j != active; ++j)
         {
-            std::complex<double> value = 0.0;
-            for (int mu = 0; mu != n; ++mu)
-            {
-                for (int nu = 0; nu != n; ++nu)
-                {
-                    value += std::conj(basis.eigenvectors(mu, i)) * response_m(mu, nu) *
-                             basis.eigenvectors(nu, j);
-                }
-            }
-            projected(i, j) = value / std::sqrt(basis.eigenvalues[i] * basis.eigenvalues[j]);
+            projected(i, j) = transformed(i, j) /
+                              std::sqrt(basis.eigenvalues[i] * basis.eigenvalues[j]);
         }
     }
     return hermitize(projected);

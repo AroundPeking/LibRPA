@@ -92,6 +92,48 @@ void test_sternheimer_head_only_replaces_gamma_head()
     require_close(result.integrand, expected, 1e-12);
 }
 
+void test_sternheimer_headwing_dense_projection_matches_direct_reference()
+{
+    librpa_int::ComplexMatrix coulomb(3, 3);
+    coulomb(0, 0) = {9.0, 0.0};
+    coulomb(1, 1) = {4.0, 0.0};
+    coulomb(2, 2) = {1.0, 0.0};
+
+    librpa_int::ComplexMatrix response_m(3, 3);
+    response_m(0, 0) = {-2.7, 0.0};
+    response_m(1, 1) = {-0.8, 0.0};
+    response_m(2, 2) = {-0.1, 0.0};
+    response_m(0, 1) = {0.12, 0.03};
+    response_m(1, 0) = std::conj(response_m(0, 1));
+    response_m(0, 2) = {0.03, -0.06};
+    response_m(2, 0) = std::conj(response_m(0, 2));
+    response_m(1, 2) = {0.04, 0.02};
+    response_m(2, 1) = std::conj(response_m(1, 2));
+
+    librpa_int::SternheimerRpaHeadwingInput headwing;
+    headwing.mode = "head_only";
+    headwing.head = librpa_int::ComplexMatrix(3, 3);
+    headwing.head(0, 0) = {-0.03, 0.0};
+    headwing.head(1, 1) = {-0.05, 0.0};
+    headwing.head(2, 2) = {-0.07, 0.0};
+
+    const auto result = librpa_int::compute_sternheimer_rpa_frequency_headwing(
+        coulomb, response_m, headwing, 1, 0.5, 0.25, 1.0, 1e-12);
+
+    librpa_int::ComplexMatrix expected_pi(3, 3);
+    const double eigenvalues[] = {9.0, 4.0, 1.0};
+    for (int i = 0; i != 3; ++i)
+    {
+        for (int j = 0; j != 3; ++j)
+        {
+            expected_pi(i, j) = response_m(i, j) / std::sqrt(eigenvalues[i] * eigenvalues[j]);
+        }
+    }
+    expected_pi(0, 0) = {-0.05, 0.0};
+    require_close(result.integrand, librpa_int::compute_rpa_trace_log_integrand(expected_pi),
+                  1e-12);
+}
+
 void test_sternheimer_qavg_uses_analytic_head_and_wing()
 {
     librpa_int::ComplexMatrix coulomb(2, 2);
@@ -181,6 +223,7 @@ int main()
     test_sternheimer_pi_and_trace_log_match_diagonal_reference();
     test_sternheimer_headwing_frequency_uses_one_based_response_labels();
     test_sternheimer_head_only_replaces_gamma_head();
+    test_sternheimer_headwing_dense_projection_matches_direct_reference();
     test_sternheimer_qavg_uses_analytic_head_and_wing();
     test_sternheimer_qavg_matches_standard_rpa_headwing_average();
     return 0;
