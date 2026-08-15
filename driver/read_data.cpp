@@ -1207,7 +1207,8 @@ static std::vector<Vector3_Order<double>> read_headwing_k_path_info(const string
     return kfrac_list;
 }
 
-void read_headwing_input(const string &dir_path, bool need_wing)
+void read_headwing_input(const string &dir_path, bool need_wing,
+                         const std::vector<double> *frequencies_override)
 {
     using namespace librpa_int;
     using namespace librpa_int::global;
@@ -1260,7 +1261,20 @@ void read_headwing_input(const string &dir_path, bool need_wing)
 
     std::vector<double> freq_weights;
     driver::h.get_imaginary_frequency_grids(driver::opts, pds->omegas_imagfreq, freq_weights);
-    const auto &freqs = pds->tfg.get_freq_nodes();
+    const auto &default_freqs = pds->tfg.get_freq_nodes();
+    const std::vector<double> freqs =
+        frequencies_override != nullptr ? *frequencies_override : default_freqs;
+    if (freqs.empty())
+    {
+        throw std::runtime_error("Head/wing frequency grid is empty");
+    }
+    if (frequencies_override != nullptr)
+    {
+        librpa_int::global::lib_printf_root(
+            "Head/wing uses the external Sternheimer response frequency grid: "
+            "nfreq=%zu first=%.12e last=%.12e Ha\n",
+            freqs.size(), freqs.front(), freqs.back());
+    }
 
     if (path_exists(pyatb_velocity.c_str()))
     {

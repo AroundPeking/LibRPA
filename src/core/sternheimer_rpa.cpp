@@ -220,6 +220,51 @@ int sternheimer_headwing_frequency_index(const int response_ifreq, const int nfr
     return response_ifreq - 1;
 }
 
+std::vector<double> sternheimer_frequency_grid_from_metadata(
+    const std::vector<std::pair<int, double>> &metadata, const int expected_nfreq)
+{
+    if (expected_nfreq <= 0 || metadata.empty())
+    {
+        throw std::runtime_error("ST-RPA response frequency metadata are empty or invalid");
+    }
+
+    std::vector<double> frequencies(static_cast<std::size_t>(expected_nfreq), 0.0);
+    std::vector<bool> present(static_cast<std::size_t>(expected_nfreq), false);
+    const auto close = [](const double lhs, const double rhs) {
+        return std::abs(lhs - rhs) <= 1e-12 * std::max({1.0, std::abs(lhs), std::abs(rhs)});
+    };
+    for (const auto &[ifreq, omega] : metadata)
+    {
+        if (ifreq <= 0 || ifreq > expected_nfreq || !std::isfinite(omega) || omega < 0.0)
+        {
+            throw std::runtime_error("ST-RPA response has invalid frequency metadata");
+        }
+        const auto index = static_cast<std::size_t>(ifreq - 1);
+        if (present[index] && !close(frequencies[index], omega))
+        {
+            throw std::runtime_error("ST-RPA response frequencies disagree for ifreq=" +
+                                     std::to_string(ifreq));
+        }
+        frequencies[index] = omega;
+        present[index] = true;
+    }
+
+    for (int ifreq = 1; ifreq <= expected_nfreq; ++ifreq)
+    {
+        const auto index = static_cast<std::size_t>(ifreq - 1);
+        if (!present[index])
+        {
+            throw std::runtime_error("ST-RPA response frequency grid is missing ifreq=" +
+                                     std::to_string(ifreq));
+        }
+        if (index > 0 && frequencies[index] <= frequencies[index - 1])
+        {
+            throw std::runtime_error("ST-RPA response frequency grid is not strictly increasing");
+        }
+    }
+    return frequencies;
+}
+
 ComplexMatrix compute_sternheimer_pi_from_m(const ComplexMatrix &coulomb,
                                             const ComplexMatrix &response_m,
                                             const double sqrt_coulomb_threshold)
