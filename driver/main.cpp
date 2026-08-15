@@ -1,21 +1,21 @@
-#include "librpa.hpp"
-
-#include "driver.h"
-#include "read_data.h"
-#include "inputfile.h"
-#include "task.h"
-
 #include <mpi.h>
 #include <omp.h>
+
 #include <exception>
 #include <stdexcept>
 #include <string>
 
+#include "driver.h"
+#include "inputfile.h"
+#include "librpa.hpp"
+#include "read_data.h"
+#include "task.h"
+
 // Internal headers, used here only for printing formation and some consistency check
 // May move to public API later
+#include "../src/io/fs.h"
 #include "../src/utils/profiler.h"
 #include "../src/utils/utils_mem.h"
-#include "../src/io/fs.h"
 // #include "task_qsgw.h"
 // #include "task_qsgwA.h"
 // #include "task_qsgw_band.h"
@@ -170,12 +170,16 @@ int main(int argc, char **argv)
     const string path_eigocc_scf = driver_params.input_dir + driver_params.fn_eigocc_scf;
 
     profiler.start("driver_read_common_input_data", "Driver Read Task-Common Input Data");
-    const bool needs_scf_eigenvalues = task != task_t::SternheimerRPA;
+    const bool sternheimer_analytic_headwing =
+        task == task_t::SternheimerRPA && driver::get_bool(driver::opts.replace_w_head) &&
+        (driver::opts.option_dielect_func == 3 || driver::opts.option_dielect_func == 4);
+    const bool needs_scf_eigenvalues =
+        task != task_t::SternheimerRPA || sternheimer_analytic_headwing;
     const bool needs_standard_meanfield_data =
-        task != task_t::print_minimax && task != task_t::SternheimerRPA;
+        task != task_t::print_minimax &&
+        (task != task_t::SternheimerRPA || sternheimer_analytic_headwing);
     const bool needs_sternheimer_symmetry_metadata =
-        task == task_t::SternheimerRPA
-        && !driver_params.fn_sternheimer_partial_manifest.empty();
+        task == task_t::SternheimerRPA && !driver_params.fn_sternheimer_partial_manifest.empty();
     const bool needs_structure_bz_basis =
         needs_standard_meanfield_data || needs_sternheimer_symmetry_metadata;
     if (needs_scf_eigenvalues)
@@ -224,14 +228,14 @@ int main(int argc, char **argv)
         {
             if (ret_eigenvec > 0)
             {
-                lib_printf_root(LIBRPA_VERBOSE_CRITICAL, "Error in reading eigenvector files (retcode %d)\n", ret_eigenvec);
+                lib_printf_root(LIBRPA_VERBOSE_CRITICAL,
+                                "Error in reading eigenvector files (retcode %d)\n", ret_eigenvec);
             }
             else
             {
-                lib_printf_root(
-                    LIBRPA_VERBOSE_CRITICAL,
-                    "Error!!! No eigenvector files is found at directory, check if you "
-                    "have input files KS_eigenvector\n");
+                lib_printf_root(LIBRPA_VERBOSE_CRITICAL,
+                                "Error!!! No eigenvector files is found at directory, check if you "
+                                "have input files KS_eigenvector\n");
             }
             finalize_librpa(false);
             return EXIT_FAILURE;
@@ -240,7 +244,8 @@ int main(int argc, char **argv)
 
         profiler.start("driver_read_ri");
         read_ri(driver_params.input_dir, driver::opts.parallel_routing);
-        lib_printf_root("Actual parallel routing used: %s\n", get_routing_string(driver::opts.parallel_routing).c_str());
+        lib_printf_root("Actual parallel routing used: %s\n",
+                        get_routing_string(driver::opts.parallel_routing).c_str());
         profiler.stop("driver_read_ri");
 
         // Vq distributed using the same strategy
@@ -253,8 +258,10 @@ int main(int argc, char **argv)
         if (mpi_comm_global_h.myid == 0)
         {
             const auto cputime = profiler.get_cpu_time_last("driver_read_common_input_data") / 60.0;
-            const auto walltime = profiler.get_wall_time_last("driver_read_common_input_data") / 60.0;
-            lib_printf("Initialization finished, Wall/CPU time [min]: %12.4f %12.4f\n", walltime, cputime);
+            const auto walltime =
+                profiler.get_wall_time_last("driver_read_common_input_data") / 60.0;
+            lib_printf("Initialization finished, Wall/CPU time [min]: %12.4f %12.4f\n", walltime,
+                       cputime);
         }
         double freemem;
         auto flag = get_node_free_mem(freemem);

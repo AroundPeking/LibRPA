@@ -12,10 +12,11 @@
 #include "../mpi/base_blacs.h"
 #include "../mpi/kpoint_blacs_parallel_context.h"
 #include "atomic_basis.h"
-#include "symmetry_context.h"
 #include "meanfield.h"
 #include "pbc.h"
 #include "ri.h"
+#include "sternheimer_rpa.h"
+#include "symmetry_context.h"
 
 namespace librpa_int
 {
@@ -70,32 +71,19 @@ void accumulate_wing_mu_for_pair(const std::vector<double> &omega,
 std::vector<int> headwing_local_kpoints(int n_kpoints,
                                         const KPointBlacsParallelContext *kblacs_ctxt);
 ComplexMatrix rotate_headwing_wfc_to_kstar_member(
-    const SymmetryContext &ctx,
-    const SymmetryKStarMember &member,
-    const std::vector<SpeciesBasisLayout> &wfc_layouts,
-    const std::map<atom_t, size_t> &atom_nw,
-    const Vector3_Order<double> &k_ibz,
-    const ComplexMatrix &wfc_ibz,
+    const SymmetryContext &ctx, const SymmetryKStarMember &member,
+    const std::vector<SpeciesBasisLayout> &wfc_layouts, const std::map<atom_t, size_t> &atom_nw,
+    const Vector3_Order<double> &k_ibz, const ComplexMatrix &wfc_ibz,
     const Vector3_Order<double> *k_bz_target = nullptr);
 std::array<ComplexMatrix, 3> rotate_headwing_velocity_to_kstar_member(
-    const SymmetryContext &ctx,
-    const SymmetryKStarMember &member,
-    const std::array<ComplexMatrix, 3> &velocity_ibz,
-    int n_bands,
-    bool use_time_reversal);
+    const SymmetryContext &ctx, const SymmetryKStarMember &member,
+    const std::array<ComplexMatrix, 3> &velocity_ibz, int n_bands, bool use_time_reversal);
 std::array<ComplexMatrix, 3> direct_full_bz_velocity_for_kstar_member(
-    const velocity_matrix_t &velocity_full,
-    const std::vector<std::vector<int>> &member_source_ik,
-    int ispin,
-    int ik_ibz,
-    std::size_t imember);
+    const velocity_matrix_t &velocity_full, const std::vector<std::vector<int>> &member_source_ik,
+    int ispin, int ik_ibz, std::size_t imember);
 const ComplexMatrix &direct_full_bz_wfc_for_kstar_member(
-    const MeanField &wfc_full,
-    const std::vector<std::vector<int>> &member_source_ik,
-    int ispin,
-    int ispinor,
-    int ik_ibz,
-    std::size_t imember);
+    const MeanField &wfc_full, const std::vector<std::vector<int>> &member_source_ik, int ispin,
+    int ispinor, int ik_ibz, std::size_t imember);
 
 // All calculation in unit: Bohr and Ha.
 class diele_func
@@ -169,10 +157,8 @@ public:
     std::map<atom_t, size_t> atom_nw;
     std::map<atom_t, std::array<double, 3>> coord_frac;
     void set_symmetry_context(const SymmetryContext &ctx) { symmetry_context_ = &ctx; }
-    void set_direct_full_bz_headwing_inputs(
-        velocity_matrix_t velocity_full,
-        MeanField wfc_full,
-        std::vector<std::vector<int>> member_source_ik)
+    void set_direct_full_bz_headwing_inputs(velocity_matrix_t velocity_full, MeanField wfc_full,
+                                            std::vector<std::vector<int>> member_source_ik)
     {
         direct_full_bz_velocity_ = std::move(velocity_full);
         direct_full_bz_wfc_ = std::move(wfc_full);
@@ -190,12 +176,10 @@ public:
 
 public:
     diele_func(const MeanField &mf, const velocity_matrix_t &velocity,
-               const std::vector<Vector3_Order<double>> &kfrac,
-               const AtomicBasis &atomic_basis_wfc,
-               const AtomicBasis &atomic_basis_abf,
-               const std::vector<double> &frequencies_target, const int nbasis, const int nstates,
-               const int nspin, const int nabf, const PeriodicBoundaryData &pbc,
-               const MpiCommHandler &comm_h_in,
+               const std::vector<Vector3_Order<double>> &kfrac, const AtomicBasis &atomic_basis_wfc,
+               const AtomicBasis &atomic_basis_abf, const std::vector<double> &frequencies_target,
+               const int nbasis, const int nstates, const int nspin, const int nabf,
+               const PeriodicBoundaryData &pbc, const MpiCommHandler &comm_h_in,
                const BlacsCtxtHandler &blacs_h_in,
                const KPointBlacsParallelContext *kblacs_ctxt_in = nullptr)
         : meanfield_df(mf),
@@ -306,6 +290,8 @@ public:
 
     matrix_m<std::complex<double>> get_rpa_chi0v_head(const int ifreq) const;
     matrix_m<std::complex<double>> get_rpa_chi0v_wing(const int ifreq) const;
+    SternheimerRpaHeadwingInput get_sternheimer_rpa_headwing_input(
+        int ifreq, const RpaHeadwingSettings &settings) const;
 
     ArrayDesc get_body_inv(matrix_m<std::complex<double>> &chi0_block,
                            ArrayDesc &desc_nabf_nabf_opt);

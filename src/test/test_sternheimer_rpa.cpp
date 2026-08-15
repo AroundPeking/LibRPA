@@ -47,10 +47,65 @@ void test_sternheimer_pi_and_trace_log_match_diagonal_reference()
     require_close(result.energy, expected_integrand * 0.25 / librpa_int::TWO_PI, 1e-12);
 }
 
+void test_sternheimer_head_only_replaces_gamma_head()
+{
+    librpa_int::ComplexMatrix coulomb(2, 2);
+    coulomb(0, 0) = {9.0, 0.0};
+    coulomb(1, 1) = {4.0, 0.0};
+
+    librpa_int::ComplexMatrix response_m(2, 2);
+    response_m(0, 0) = {-3.6, 0.0};
+    response_m(1, 1) = {-0.8, 0.0};
+
+    librpa_int::SternheimerRpaHeadwingInput headwing;
+    headwing.mode = "head_only";
+    headwing.head = librpa_int::ComplexMatrix(3, 3);
+    headwing.head(0, 0) = {-0.1, 0.0};
+    headwing.head(1, 1) = {-0.1, 0.0};
+    headwing.head(2, 2) = {-0.1, 0.0};
+
+    const auto result = librpa_int::compute_sternheimer_rpa_frequency_headwing(
+        coulomb, response_m, headwing, 1, 0.5, 0.25, 1.0, 1e-12);
+    const auto expected = std::log(std::complex<double>(1.1, 0.0)) - 0.1 +
+                          std::log(std::complex<double>(1.2, 0.0)) - 0.2;
+    require_close(result.integrand, expected, 1e-12);
+}
+
+void test_sternheimer_qavg_uses_analytic_head_and_wing()
+{
+    librpa_int::ComplexMatrix coulomb(2, 2);
+    coulomb(0, 0) = {9.0, 0.0};
+    coulomb(1, 1) = {4.0, 0.0};
+
+    librpa_int::ComplexMatrix response_m(2, 2);
+    response_m(0, 0) = {-3.6, 0.0};
+    response_m(1, 1) = {-0.8, 0.0};
+
+    librpa_int::SternheimerRpaHeadwingInput headwing;
+    headwing.mode = "qavg";
+    headwing.head = librpa_int::ComplexMatrix(3, 3);
+    headwing.head(0, 0) = {-0.1, 0.0};
+    headwing.head(1, 1) = {-0.1, 0.0};
+    headwing.head(2, 2) = {-0.1, 0.0};
+    headwing.wing_mu = librpa_int::ComplexMatrix(2, 3);
+    headwing.wing_mu(1, 0) = {0.025, 0.0};
+    headwing.directions = {{{1.0, 0.0, 0.0}, 1.0}};
+
+    const auto result = librpa_int::compute_sternheimer_rpa_frequency_headwing(
+        coulomb, response_m, headwing, 1, 0.5, 0.25, 1.0, 1e-12);
+    const double schur = 1.1 - 0.05 * 0.05 / 1.2;
+    const auto expected = std::complex<double>(-0.3, 0.0) +
+                          std::log(std::complex<double>(1.2, 0.0)) +
+                          std::log(std::complex<double>(schur, 0.0));
+    require_close(result.integrand, expected, 1e-12);
+}
+
 }  // namespace
 
 int main()
 {
     test_sternheimer_pi_and_trace_log_match_diagonal_reference();
+    test_sternheimer_head_only_replaces_gamma_head();
+    test_sternheimer_qavg_uses_analytic_head_and_wing();
     return 0;
 }
