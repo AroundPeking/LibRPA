@@ -147,10 +147,54 @@ void driver::task_sternheimer_rpa()
             driver_params.prefix_sternheimer_chi0, driver::opts.nfreq, driver_params.use_rpa_gamma);
     }
 
+    SternheimerPartialResponseGroups partial_groups;
+    if (partial_mode)
+    {
+        const auto records = read_sternheimer_partial_manifest(partial_manifest_path);
+        partial_groups = read_sternheimer_partial_response_groups(records);
+    }
+
+    std::map<int, std::vector<SternheimerChi0V1Matrix>> response_cache;
+    std::vector<double> headwing_frequencies;
+    if (replace_gamma_headwing)
+    {
+        std::vector<std::pair<int, double>> frequency_metadata;
+        if (partial_mode)
+        {
+            frequency_metadata.reserve(partial_groups.size());
+            for (const auto &[key, group] : partial_groups)
+            {
+                frequency_metadata.emplace_back(group.ifreq, group.omega);
+            }
+        }
+        else
+        {
+            const auto gamma =
+                std::find_if(qpoints.cbegin(), qpoints.cend(),
+                             [](const auto &point) { return is_rpa_gamma_point(point.q); });
+            if (gamma == qpoints.cend())
+            {
+                throw std::runtime_error(
+                    "Sternheimer RPA head/wing correction requires a Gamma response");
+            }
+            auto responses = read_sternheimer_chi0_v1_matrices(
+                driver_params.input_dir, driver_params.prefix_sternheimer_chi0, gamma->iq);
+            frequency_metadata.reserve(responses.size());
+            for (const auto &response : responses)
+            {
+                frequency_metadata.emplace_back(response.ifreq, response.omega);
+            }
+            response_cache.emplace(gamma->iq, std::move(responses));
+        }
+        headwing_frequencies = librpa_int::sternheimer_frequency_grid_from_metadata(
+            frequency_metadata, driver::opts.nfreq);
+    }
+
     auto pds = librpa_int::api::get_dataset_instance(driver::h);
     if (replace_gamma_headwing)
     {
-        read_headwing_input(driver_params.input_dir, headwing_mode == "qavg");
+        read_headwing_input(driver_params.input_dir, headwing_mode == "qavg",
+                            &headwing_frequencies);
     }
     auto headwing_for_frequency = [&](const int ifreq)
     {
@@ -174,8 +218,7 @@ void driver::task_sternheimer_rpa()
     qresults.reserve(qpoints.size());
     if (partial_mode)
     {
-        const auto records = read_sternheimer_partial_manifest(partial_manifest_path);
-        const auto groups = read_sternheimer_partial_response_groups(records);
+        const auto &groups = partial_groups;
         std::vector<SternheimerFixedQRouteRecord> fixed_q_routes;
         std::vector<SternheimerQStarRouteRecord> qstar_routes;
         if (!driver_params.fn_sternheimer_symmetry_routes.empty())
@@ -441,8 +484,18 @@ void driver::task_sternheimer_rpa()
             }
             auto coulomb = read_coulomb_v1_full_matrix(driver_params.input_dir,
                                                        driver_params.prefix_coul_full, point.iq);
-            auto responses = read_sternheimer_chi0_v1_matrices(
-                driver_params.input_dir, driver_params.prefix_sternheimer_chi0, point.iq);
+            std::vector<SternheimerChi0V1Matrix> responses;
+            const auto cached = response_cache.find(point.iq);
+            if (cached != response_cache.end())
+            {
+                responses = std::move(cached->second);
+                response_cache.erase(cached);
+            }
+            else
+            {
+                responses = read_sternheimer_chi0_v1_matrices(
+                    driver_params.input_dir, driver_params.prefix_sternheimer_chi0, point.iq);
+            }
             QResult qresult;
             qresult.point = point;
             qresult.frequencies.reserve(responses.size());

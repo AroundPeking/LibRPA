@@ -3,6 +3,7 @@
 #include <array>
 #include <complex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../math/complexmatrix.h"
@@ -41,6 +42,9 @@ struct SternheimerRpaHeadwingInput
 };
 
 int sternheimer_headwing_frequency_index(int response_ifreq, int nfreq);
+
+std::vector<double> sternheimer_frequency_grid_from_metadata(
+    const std::vector<std::pair<int, double>> &metadata, int expected_nfreq);
 
 ComplexMatrix compute_sternheimer_pi_from_m(const ComplexMatrix &coulomb,
                                             const ComplexMatrix &response_m,
