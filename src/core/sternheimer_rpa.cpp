@@ -218,6 +218,15 @@ SternheimerRpaFrequencyResult make_frequency_result(const int ifreq, const doubl
 
 }  // namespace
 
+int sternheimer_headwing_frequency_index(const int response_ifreq, const int nfreq)
+{
+    if (nfreq <= 0 || response_ifreq <= 0 || response_ifreq > nfreq)
+    {
+        throw std::out_of_range("ST-RPA response frequency index is outside the one-based grid");
+    }
+    return response_ifreq - 1;
+}
+
 ComplexMatrix compute_sternheimer_pi_from_m(const ComplexMatrix &coulomb,
                                             const ComplexMatrix &response_m,
                                             const double sqrt_coulomb_threshold)

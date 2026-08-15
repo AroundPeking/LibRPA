@@ -3,6 +3,7 @@
 #include <complex>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 
 #include "../core/sternheimer_rpa.h"
 #include "../utils/constants.h"
@@ -45,6 +46,25 @@ void test_sternheimer_pi_and_trace_log_match_diagonal_reference()
                                                                       0.25, 1.0, 1e-12);
     require_close(result.integrand, expected_integrand, 1e-12);
     require_close(result.energy, expected_integrand * 0.25 / librpa_int::TWO_PI, 1e-12);
+}
+
+void test_sternheimer_headwing_frequency_uses_one_based_response_labels()
+{
+    assert(librpa_int::sternheimer_headwing_frequency_index(1, 12) == 0);
+    assert(librpa_int::sternheimer_headwing_frequency_index(12, 12) == 11);
+    for (const int invalid : {0, 13})
+    {
+        bool threw = false;
+        try
+        {
+            (void)librpa_int::sternheimer_headwing_frequency_index(invalid, 12);
+        }
+        catch (const std::out_of_range &)
+        {
+            threw = true;
+        }
+        assert(threw);
+    }
 }
 
 void test_sternheimer_head_only_replaces_gamma_head()
@@ -105,6 +125,7 @@ void test_sternheimer_qavg_uses_analytic_head_and_wing()
 int main()
 {
     test_sternheimer_pi_and_trace_log_match_diagonal_reference();
+    test_sternheimer_headwing_frequency_uses_one_based_response_labels();
     test_sternheimer_head_only_replaces_gamma_head();
     test_sternheimer_qavg_uses_analytic_head_and_wing();
     return 0;

@@ -40,6 +40,8 @@ struct SternheimerRpaHeadwingInput
     std::vector<SternheimerRpaAngularPoint> directions;
 };
 
+int sternheimer_headwing_frequency_index(int response_ifreq, int nfreq);
+
 ComplexMatrix compute_sternheimer_pi_from_m(const ComplexMatrix &coulomb,
                                             const ComplexMatrix &response_m,
                                             double sqrt_coulomb_threshold);
