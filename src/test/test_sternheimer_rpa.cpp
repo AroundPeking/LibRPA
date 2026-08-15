@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "../core/dielecmodel.h"
 #include "../core/sternheimer_rpa.h"
 #include "../utils/constants.h"
 
@@ -120,6 +121,59 @@ void test_sternheimer_qavg_uses_analytic_head_and_wing()
     require_close(result.integrand, expected, 1e-12);
 }
 
+void test_sternheimer_qavg_matches_standard_rpa_headwing_average()
+{
+    librpa_int::ComplexMatrix coulomb(2, 2);
+    coulomb(0, 0) = {9.0, 0.0};
+    coulomb(1, 1) = {4.0, 0.0};
+
+    librpa_int::ComplexMatrix response_m(2, 2);
+    response_m(0, 0) = {-3.6, 0.0};
+    response_m(1, 1) = {-0.8, 0.0};
+
+    librpa_int::SternheimerRpaHeadwingInput headwing;
+    headwing.mode = "qavg";
+    headwing.head = librpa_int::ComplexMatrix(3, 3);
+    headwing.head(0, 0) = {-0.1, 0.0};
+    headwing.head(1, 1) = {-0.2, 0.0};
+    headwing.head(2, 2) = {-0.3, 0.0};
+    headwing.wing_mu = librpa_int::ComplexMatrix(2, 3);
+    headwing.wing_mu(1, 0) = {0.025, 0.010};
+    headwing.wing_mu(1, 1) = {-0.015, 0.005};
+    headwing.directions = {{{1.0, 0.0, 0.0}, 0.25}, {{0.0, 1.0, 0.0}, 0.75}};
+
+    const auto sternheimer = librpa_int::compute_sternheimer_rpa_frequency_headwing(
+        coulomb, response_m, headwing, 1, 0.5, 0.25, 1.0, 1e-12);
+
+    const std::complex<double> body{-0.2, 0.0};
+    const std::complex<double> body_inverse = 1.0 / (1.0 - body);
+    const std::array<std::complex<double>, 3> wing{
+        2.0 * headwing.wing_mu(1, 0), 2.0 * headwing.wing_mu(1, 1), 2.0 * headwing.wing_mu(1, 2)};
+    matrix_m<std::complex<double>> standard_head(
+        std::vector<std::vector<std::complex<double>>>{
+            {headwing.head(0, 0), headwing.head(0, 1), headwing.head(0, 2)},
+            {headwing.head(1, 0), headwing.head(1, 1), headwing.head(1, 2)},
+            {headwing.head(2, 0), headwing.head(2, 1), headwing.head(2, 2)}},
+        MAJOR::COL);
+    matrix_m<std::complex<double>> standard_schur(3, 3, MAJOR::COL);
+    for (int alpha = 0; alpha != 3; ++alpha)
+    {
+        for (int beta = 0; beta != 3; ++beta)
+        {
+            standard_schur(alpha, beta) = (alpha == beta ? 1.0 : 0.0) - headwing.head(alpha, beta) -
+                                          std::conj(wing[alpha]) * body_inverse * wing[beta];
+        }
+    }
+    const std::vector<double> qx{1.0, 0.0};
+    const std::vector<double> qy{0.0, 1.0};
+    const std::vector<double> qz{0.0, 0.0};
+    const std::vector<double> weights{0.25, 0.75};
+    const auto standard = librpa_int::compute_rpa_chi0v_headwing_trace_log_average(
+        standard_head, standard_schur, body, std::log(1.0 - body), qx, qy, qz, weights);
+
+    require_close(sternheimer.integrand, standard, 1e-12);
+}
+
 }  // namespace
 
 int main()
@@ -128,5 +182,6 @@ int main()
     test_sternheimer_headwing_frequency_uses_one_based_response_labels();
     test_sternheimer_head_only_replaces_gamma_head();
     test_sternheimer_qavg_uses_analytic_head_and_wing();
+    test_sternheimer_qavg_matches_standard_rpa_headwing_average();
     return 0;
 }
