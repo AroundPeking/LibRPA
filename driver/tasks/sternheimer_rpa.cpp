@@ -165,7 +165,9 @@ void driver::task_sternheimer_rpa()
         settings.rpa_headwing_body_start = driver::opts.rpa_headwing_body_start;
         settings.rpa_headwing_mode = headwing_mode;
         settings.sqrt_coulomb_threshold = driver::opts.sqrt_coulomb_threshold;
-        return pds->p_headwing->get_sternheimer_rpa_headwing_input(ifreq, settings);
+        const int headwing_index =
+            librpa_int::sternheimer_headwing_frequency_index(ifreq, driver::opts.nfreq);
+        return pds->p_headwing->get_sternheimer_rpa_headwing_input(headwing_index, settings);
     };
 
     std::vector<QResult> qresults;
