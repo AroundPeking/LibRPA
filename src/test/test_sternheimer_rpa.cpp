@@ -149,13 +149,13 @@ void test_sternheimer_qavg_matches_standard_rpa_headwing_average()
     const std::complex<double> body_inverse = 1.0 / (1.0 - body);
     const std::array<std::complex<double>, 3> wing{
         2.0 * headwing.wing_mu(1, 0), 2.0 * headwing.wing_mu(1, 1), 2.0 * headwing.wing_mu(1, 2)};
-    matrix_m<std::complex<double>> standard_head(
+    librpa_int::matrix_m<std::complex<double>> standard_head(
         std::vector<std::vector<std::complex<double>>>{
             {headwing.head(0, 0), headwing.head(0, 1), headwing.head(0, 2)},
             {headwing.head(1, 0), headwing.head(1, 1), headwing.head(1, 2)},
             {headwing.head(2, 0), headwing.head(2, 1), headwing.head(2, 2)}},
-        MAJOR::COL);
-    matrix_m<std::complex<double>> standard_schur(3, 3, MAJOR::COL);
+        librpa_int::MAJOR::COL);
+    librpa_int::matrix_m<std::complex<double>> standard_schur(3, 3, librpa_int::MAJOR::COL);
     for (int alpha = 0; alpha != 3; ++alpha)
     {
         for (int beta = 0; beta != 3; ++beta)
