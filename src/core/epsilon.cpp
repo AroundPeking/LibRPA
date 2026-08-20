@@ -1,4 +1,5 @@
 #include "epsilon.h"
+
 #include <math.h>
 #include <omp.h>
 
@@ -14,6 +15,7 @@
 #include <utility>
 #include <valarray>
 
+#include "../gpu/la_connector.h"
 #include "../io/fs.h"
 #include "../io/global_io.h"
 #include "../io/stl_io_helper.h"
@@ -28,14 +30,12 @@
 #include "../utils/libri_utils.h"
 #include "../utils/profiler.h"
 #include "../utils/utils_mem.h"
-#include "symmetry_context.h"
 #include "atom.h"
 #include "atomic_basis.h"
 #include "librpa_enums.h"
 #include "pbc.h"
+#include "symmetry_context.h"
 #include "utils_atomic_basis_blacs.h"
-
-#include "../gpu/la_connector.h"
 #if defined(LIBRPA_USE_CUDA) || defined(LIBRPA_USE_HIP)
 #include <ddla/ddla_connector.h>
 using namespace ddla;
@@ -52,7 +52,138 @@ using RI::Communicate_Tensors_Map_Judge::comm_map2_first;
 using std::map;
 using std::vector;
 
-namespace librpa_int {
+namespace librpa_int
+{
+
+Strict2dQshellRegion classify_strict_2d_qshell(const double q_norm, const double first_q_norm)
+{
+    if (!(first_q_norm > 0.0) || !std::isfinite(first_q_norm))
+        throw LIBRPA_RUNTIME_ERROR("strict 2D q-shell diagnostic requires positive first q");
+    if (q_norm < 0.0 || !std::isfinite(q_norm))
+        throw LIBRPA_RUNTIME_ERROR("strict 2D q-shell diagnostic encountered invalid q");
+
+    const double tolerance = 1.0e-8 * std::max(1.0, first_q_norm);
+    if (q_norm <= tolerance) return Strict2dQshellRegion::gamma;
+    if (std::abs(q_norm - first_q_norm) <= tolerance) return Strict2dQshellRegion::first;
+    return Strict2dQshellRegion::rest;
+}
+
+Strict2dQradialRegion classify_strict_2d_qradial(const double q_norm,
+                                                  const double first_q_norm)
+{
+    if (!(first_q_norm > 0.0) || !std::isfinite(first_q_norm))
+        throw LIBRPA_RUNTIME_ERROR("strict 2D radial-q diagnostic requires positive first q");
+    if (q_norm < 0.0 || !std::isfinite(q_norm))
+        throw LIBRPA_RUNTIME_ERROR("strict 2D radial-q diagnostic encountered invalid q");
+
+    const double absolute_tolerance = 1.0e-8 * std::max(1.0, first_q_norm);
+    const double first_shell_tolerance =
+        std::max(absolute_tolerance, 5.0e-4 * first_q_norm);
+    if (q_norm <= first_q_norm + first_shell_tolerance)
+        return Strict2dQradialRegion::gamma_or_first;
+    const double ratio = q_norm / first_q_norm;
+    if (ratio <= 2.5) return Strict2dQradialRegion::near;
+    if (ratio <= 4.5) return Strict2dQradialRegion::middle;
+    return Strict2dQradialRegion::far;
+}
+
+bool strict_2d_qradial_is_corner(const double q_norm, const double first_q_norm)
+{
+    (void)classify_strict_2d_qradial(q_norm, first_q_norm);
+    return q_norm / first_q_norm > 6.5;
+}
+
+Strict2dWcBlock strict_2d_first_shell_wc_block_diagnostic(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return Strict2dWcBlock::full;
+    const std::string mode(value);
+    if (mode == "head") return Strict2dWcBlock::head;
+    if (mode == "wing") return Strict2dWcBlock::wing;
+    if (mode == "body") return Strict2dWcBlock::body;
+    throw std::invalid_argument(
+        "LIBRPA_STRICT2D_FIRST_SHELL_WC_BLOCK_DIAG must be head, wing, or body");
+}
+
+bool strict_2d_wc_block_keeps(const Strict2dWcBlock block, const int row, const int column,
+                              const int head_index)
+{
+    if (row < 0 || column < 0 || head_index < 0)
+        throw std::invalid_argument("strict 2D Wc block indices must be nonnegative");
+    const bool row_is_head = row == head_index;
+    const bool column_is_head = column == head_index;
+    switch (block)
+    {
+        case Strict2dWcBlock::full:
+            return true;
+        case Strict2dWcBlock::head:
+            return row_is_head && column_is_head;
+        case Strict2dWcBlock::wing:
+            return row_is_head != column_is_head;
+        case Strict2dWcBlock::body:
+            return !row_is_head && !column_is_head;
+    }
+    throw std::invalid_argument("unknown strict 2D Wc block diagnostic mode");
+}
+
+Vector3_Order<double> strict_2d_minimum_image_q(const PeriodicBoundaryData &pbc,
+                                                const Vector3_Order<double> &q)
+{
+    const Vector3_Order<double> qfrac{pbc.latvec * q};
+    const int center_x = static_cast<int>(std::llround(qfrac.x));
+    const int center_y = static_cast<int>(std::llround(qfrac.y));
+    Vector3_Order<double> minimum_q = q;
+    double minimum_norm = std::hypot(q.x, q.y);
+
+    // In a skew 2D cell, wrapping fractional components independently does not
+    // always select the nearest reciprocal image.
+    for (int ix = center_x - 1; ix <= center_x + 1; ++ix)
+    {
+        for (int iy = center_y - 1; iy <= center_y + 1; ++iy)
+        {
+            const Vector3_Order<double> candidate_frac{qfrac.x - ix, qfrac.y - iy, qfrac.z};
+            const Vector3_Order<double> candidate{candidate_frac * pbc.G};
+            const double candidate_norm = std::hypot(candidate.x, candidate.y);
+            if (candidate_norm < minimum_norm)
+            {
+                minimum_q = candidate;
+                minimum_norm = candidate_norm;
+            }
+        }
+    }
+    return minimum_q;
+}
+
+bool strict_2d_alpha_wc_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "0.25") return true;
+    throw std::invalid_argument(
+        "LIBRPA_STRICT2D_ALPHA_WC_DIAG only accepts the fixed reference 0.25");
+}
+
+bool strict_2d_first_shell_analytic_wc_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_STRICT2D_FIRST_SHELL_ANALYTIC_WC_DIAG only accepts enabled");
+}
+
+bool disable_chi0_qspace_symmetry_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_DISABLE_CHI0_QSPACE_SYMMETRY_DIAG only accepts enabled");
+}
+
+bool strict_2d_should_dump_finite_q_matrix(const int iq, const int ifreq,
+                                           const bool gamma_point, const int maximum_iq)
+{
+    if (maximum_iq < 1)
+        throw std::invalid_argument("strict 2D finite-q matrix dump requires maximum_iq >= 1");
+    return !gamma_point && ifreq == 0 && iq >= 1 && iq <= maximum_iq;
+}
 
 bool strict_2d_complete_wc_requested(const bool replace_w_head, const int option_dielect_func,
                                      const bool use_2d_dielectric)
@@ -75,8 +206,28 @@ void validate_strict_2d_complete_wc_runtime(const bool strict_2d_requested,
 std::string strict_2d_finite_q_diagnostics_header()
 {
     return "iq,qfrac_x,qfrac_y,qfrac_z,q_physical,qhat_x,qhat_y,q_weight,head_overlap,"
+           "coulomb_head_eigenvalue,q_coulomb_head_eigenvalue,current_basis_head_column,"
            "p_head_real,p_head_imag,p_head_over_q_real,p_head_over_q_imag,"
            "p_head_body_fro,p_body_head_fro,p_body_body_fro,"
+           "chi0_head_real,chi0_head_imag,chi0_head_over_q2_real,"
+           "chi0_head_over_q2_imag,chi0_head_body_fro,chi0_body_head_fro,"
+           "chi0_body_body_fro,"
+           "current_basis_p_head_real,current_basis_p_head_imag,"
+           "current_basis_p_head_over_q_real,current_basis_p_head_over_q_imag,"
+           "current_basis_p_head_body_fro,current_basis_p_body_head_fro,"
+           "current_basis_p_body_body_fro,"
+           "current_basis_chi0_head_real,current_basis_chi0_head_imag,"
+           "current_basis_chi0_head_over_q2_real,current_basis_chi0_head_over_q2_imag,"
+           "current_basis_wc_head_real,current_basis_wc_head_imag,"
+           "current_basis_wc_head_body_fro,current_basis_wc_body_head_fro,"
+           "current_basis_wc_body_body_fro,current_basis_q_wc_head_real,"
+           "current_basis_q_wc_head_imag,current_basis_weighted_wc_head_real,"
+           "current_basis_weighted_wc_head_imag,current_basis_weighted_wc_head_body_fro,"
+           "current_basis_weighted_wc_body_head_fro,"
+           "current_basis_weighted_wc_body_body_fro,"
+           "analytic_finite_q_wc_head_real,analytic_finite_q_wc_head_imag,"
+           "analytic_finite_q_wc_head_body_fro,analytic_finite_q_wc_body_head_fro,"
+           "analytic_finite_q_wc_body_body_fro,"
            "analytic_p_over_q_real,analytic_p_over_q_imag,wc_head_real,wc_head_imag,"
            "wc_head_body_fro,wc_body_head_fro,wc_body_body_fro,"
            "alpha_wc_head_real,alpha_wc_head_imag,alpha_wc_head_body_fro,"
@@ -87,6 +238,12 @@ std::string strict_2d_finite_q_diagnostics_header()
            "weighted_wc_body_body_fro";
 }
 
+std::string strict_2d_raw_gamma_chi0_diagnostics_header()
+{
+    return "ifreq,frequency,head_column,chi0_head_real,chi0_head_imag,"
+           "chi0_head_body_fro,chi0_body_head_fro,chi0_body_body_fro,n_auxiliary";
+}
+
 std::string strict_2d_gamma_wc_diagnostics_header()
 {
     return "ifreq,frequency,q_weight,gamma_area,wc_head_real,wc_head_imag,"
@@ -95,6 +252,29 @@ std::string strict_2d_gamma_wc_diagnostics_header()
            "alpha_wc_body_head_fro,alpha_wc_body_body_fro,weighted_wc_head_real,"
            "weighted_wc_head_imag,weighted_wc_head_body_fro,weighted_wc_body_head_fro,"
            "weighted_wc_body_body_fro";
+}
+
+std::string strict_2d_gamma_wc_transform_diagnostics_header()
+{
+    return "ifreq,frequency,pw_to_auxiliary_scale,pw_head_analytic_real,"
+           "pw_head_analytic_imag,aux_head_expected_real,aux_head_expected_imag,"
+           "aux_head_roundtrip_real,aux_head_roundtrip_imag,pw_head_roundtrip_real,"
+           "pw_head_roundtrip_imag,roundtrip_relative_error";
+}
+
+int strict_2d_head_eigenvector_column(const double *eigenvalues, const int count)
+{
+    if (eigenvalues == nullptr || count < 1)
+        throw std::logic_error("strict 2D diagnostic Coulomb eigenvalues are unavailable");
+    return static_cast<int>(std::max_element(eigenvalues, eigenvalues + count) - eigenvalues);
+}
+
+int strict_2d_diagnostic_head_first_index(const int index, const int head_index)
+{
+    if (index < 0 || head_index < 0)
+        throw std::logic_error("strict 2D diagnostic basis index is invalid");
+    if (index == head_index) return 0;
+    return index < head_index ? index + 1 : index;
 }
 
 std::vector<Vector3_Order<double>> strict_2d_diagnostic_qpoint_order(
@@ -191,9 +371,10 @@ static void project_blacs_matrix_in_basis(const matrix_m<std::complex<double>> &
 
 static Strict2dBlockMetrics collect_strict_2d_block_metrics(
     const matrix_m<std::complex<double>> &matrix_local, const ArrayDesc &matrix_desc,
-    const int active_size, const MpiCommHandler &comm_h)
+    const int active_size, const MpiCommHandler &comm_h, const int head_index = 0)
 {
-    if (active_size < 1 || active_size > matrix_desc.m() || matrix_desc.m() != matrix_desc.n())
+    if (active_size < 1 || active_size > matrix_desc.m() || matrix_desc.m() != matrix_desc.n() ||
+        head_index < 0 || head_index >= active_size)
         throw LIBRPA_RUNTIME_ERROR("strict 2D diagnostic block size is invalid");
 
     Strict2dBlockMetricSums local;
@@ -205,7 +386,9 @@ static Strict2dBlockMetrics collect_strict_2d_block_metrics(
         {
             const int column = matrix_desc.indx_l2g_c(column_local);
             if (column < 0 || column >= active_size) continue;
-            accumulate_strict_2d_block_metric(local, row, column,
+            const int block_row = strict_2d_diagnostic_head_first_index(row, head_index);
+            const int block_column = strict_2d_diagnostic_head_first_index(column, head_index);
+            accumulate_strict_2d_block_metric(local, block_row, block_column,
                                               matrix_local(row_local, column_local));
         }
     }
@@ -237,26 +420,32 @@ static bool are_equivalent_symmetry_qpoints(const Vector3_Order<double> &lhs,
                                             const Vector3_Order<double> &rhs,
                                             const double tol = 1e-5)
 {
-    const auto same_component = [tol](const double lhs_component, const double rhs_component) {
-        return std::abs((lhs_component - rhs_component) - std::round(lhs_component - rhs_component))
-               < tol;
+    const auto same_component = [tol](const double lhs_component, const double rhs_component)
+    {
+        return std::abs((lhs_component - rhs_component) -
+                        std::round(lhs_component - rhs_component)) < tol;
     };
-    return same_component(lhs.x, rhs.x) && same_component(lhs.y, rhs.y)
-           && same_component(lhs.z, rhs.z);
+    return same_component(lhs.x, rhs.x) && same_component(lhs.y, rhs.y) &&
+           same_component(lhs.z, rhs.z);
 }
 
-bool strict_2d_qmember_diagnostic_keeps(const Vector3_Order<double>& q_member_frac,
-                                        const Vector3_Order<double>& selected_q_frac,
+bool strict_2d_qmember_diagnostic_keeps(const Vector3_Order<double> &q_member_frac,
+                                        const Vector3_Order<double> &selected_q_frac,
                                         const bool diagnostics_enabled)
 {
-    return !diagnostics_enabled
-           || are_equivalent_symmetry_qpoints(q_member_frac, selected_q_frac);
+    return !diagnostics_enabled || are_equivalent_symmetry_qpoints(q_member_frac, selected_q_frac);
+}
+
+bool strict_2d_qmember_diagnostic_selection_valid(const std::size_t local_count,
+                                                  const std::size_t global_max_count,
+                                                  const bool diagnostics_enabled)
+{
+    return !diagnostics_enabled || (local_count <= 1 && global_max_count == 1);
 }
 
 template <typename QMap>
 static typename QMap::const_iterator find_matching_symmetry_qpoint(
-    const QMap& q_map,
-    const Vector3_Order<double>& q_target)
+    const QMap &q_map, const Vector3_Order<double> &q_target)
 {
     const auto exact_iter = q_map.find(q_target);
     if (exact_iter != q_map.end())
@@ -264,16 +453,14 @@ static typename QMap::const_iterator find_matching_symmetry_qpoint(
         return exact_iter;
     }
 
-    return std::find_if(q_map.begin(), q_map.end(), [&q_target](const auto& entry) {
-        return are_equivalent_symmetry_qpoints(entry.first, q_target);
-    });
+    return std::find_if(q_map.begin(), q_map.end(),
+                        [&q_target](const auto &entry)
+                        { return are_equivalent_symmetry_qpoints(entry.first, q_target); });
 }
 
 template <typename QMap>
 static typename QMap::const_iterator find_matching_internal_qpoint(
-    const QMap& q_map,
-    const PeriodicBoundaryData& pbc,
-    const Vector3_Order<double>& q_target)
+    const QMap &q_map, const PeriodicBoundaryData &pbc, const Vector3_Order<double> &q_target)
 {
     const auto exact_iter = q_map.find(q_target);
     if (exact_iter != q_map.end())
@@ -281,16 +468,17 @@ static typename QMap::const_iterator find_matching_internal_qpoint(
         return exact_iter;
     }
     const Vector3_Order<double> q_target_frac{pbc.latvec * q_target};
-    return std::find_if(q_map.begin(), q_map.end(), [&pbc, &q_target_frac](const auto& entry) {
-        const Vector3_Order<double> q_current_frac{pbc.latvec * entry.first};
-        return are_equivalent_symmetry_qpoints(q_current_frac, q_target_frac);
-    });
+    return std::find_if(q_map.begin(), q_map.end(),
+                        [&pbc, &q_target_frac](const auto &entry)
+                        {
+                            const Vector3_Order<double> q_current_frac{pbc.latvec * entry.first};
+                            return are_equivalent_symmetry_qpoints(q_current_frac, q_target_frac);
+                        });
 }
 
 template <typename QVector>
 static typename QVector::const_iterator find_matching_symmetry_qpoint_in_sequence(
-    const QVector& q_sequence,
-    const Vector3_Order<double>& q_target)
+    const QVector &q_sequence, const Vector3_Order<double> &q_target)
 {
     const auto exact_iter = std::find(q_sequence.begin(), q_sequence.end(), q_target);
     if (exact_iter != q_sequence.end())
@@ -298,12 +486,12 @@ static typename QVector::const_iterator find_matching_symmetry_qpoint_in_sequenc
         return exact_iter;
     }
 
-    return std::find_if(q_sequence.begin(), q_sequence.end(), [&q_target](const auto& q_current) {
-        return are_equivalent_symmetry_qpoints(q_current, q_target);
-    });
+    return std::find_if(q_sequence.begin(), q_sequence.end(),
+                        [&q_target](const auto &q_current)
+                        { return are_equivalent_symmetry_qpoints(q_current, q_target); });
 }
 
-static std::map<atom_t, size_t> build_atom_nabf_map(const AtomicBasis& basis_abf)
+static std::map<atom_t, size_t> build_atom_nabf_map(const AtomicBasis &basis_abf)
 {
     std::map<atom_t, size_t> atom_nabf;
     for (atom_t atom = 0; atom != static_cast<atom_t>(basis_abf.n_atoms); ++atom)
@@ -313,7 +501,7 @@ static std::map<atom_t, size_t> build_atom_nabf_map(const AtomicBasis& basis_abf
     return atom_nabf;
 }
 
-static ComplexMatrix to_complex_matrix(const matrix_m<std::complex<double>>& mat)
+static ComplexMatrix to_complex_matrix(const matrix_m<std::complex<double>> &mat)
 {
     ComplexMatrix complex_mat(mat.nr(), mat.nc());
     for (int row = 0; row < mat.nr(); ++row)
@@ -326,14 +514,13 @@ static ComplexMatrix to_complex_matrix(const matrix_m<std::complex<double>>& mat
     return complex_mat;
 }
 
-static matrix_m<std::complex<double>> to_row_major_matrix_m(const ComplexMatrix& mat)
+static matrix_m<std::complex<double>> to_row_major_matrix_m(const ComplexMatrix &mat)
 {
     return matrix_m<std::complex<double>>(mat.nr, mat.nc, mat.c, MAJOR::ROW);
 }
 
-static void add_scaled_complex_matrix(ComplexMatrix& matrix_dst,
-                                      const ComplexMatrix& matrix_src,
-                                      const std::complex<double>& scale)
+static void add_scaled_complex_matrix(ComplexMatrix &matrix_dst, const ComplexMatrix &matrix_src,
+                                      const std::complex<double> &scale)
 {
     if (matrix_dst.nr != matrix_src.nr || matrix_dst.nc != matrix_src.nc)
     {
@@ -346,14 +533,13 @@ static void add_scaled_complex_matrix(ComplexMatrix& matrix_dst,
 }
 
 static librpa_int::symmetry_atom_block_matrix_map_t collect_symmetry_abf_ibz_blocks_for_q(
-    const abf_qspace_complex_block_map_t& blocks_by_q,
-    const Vector3_Order<double>& q_ibz_internal)
+    const abf_qspace_complex_block_map_t &blocks_by_q, const Vector3_Order<double> &q_ibz_internal)
 {
     librpa_int::symmetry_atom_block_matrix_map_t blocks_ibz;
-    for (const auto& atom_i_pair : blocks_by_q)
+    for (const auto &atom_i_pair : blocks_by_q)
     {
         const auto atom_i = atom_i_pair.first;
-        for (const auto& atom_j_pair : atom_i_pair.second)
+        for (const auto &atom_j_pair : atom_i_pair.second)
         {
             const auto atom_j = atom_j_pair.first;
             const auto q_iter = find_matching_symmetry_qpoint(atom_j_pair.second, q_ibz_internal);
@@ -367,12 +553,12 @@ static librpa_int::symmetry_atom_block_matrix_map_t collect_symmetry_abf_ibz_blo
 }
 
 static librpa_int::symmetry_atom_block_matrix_map_t to_ordered_symmetry_blocks(
-    const atom_mapping<ComplexMatrix>::pair_t_old& atom_blocks)
+    const atom_mapping<ComplexMatrix>::pair_t_old &atom_blocks)
 {
     librpa_int::symmetry_atom_block_matrix_map_t ordered_blocks;
-    for (const auto& atom_i_pair : atom_blocks)
+    for (const auto &atom_i_pair : atom_blocks)
     {
-        for (const auto& atom_j_pair : atom_i_pair.second)
+        for (const auto &atom_j_pair : atom_i_pair.second)
         {
             ordered_blocks[atom_i_pair.first][atom_j_pair.first] = atom_j_pair.second;
         }
@@ -381,12 +567,12 @@ static librpa_int::symmetry_atom_block_matrix_map_t to_ordered_symmetry_blocks(
 }
 
 static atom_mapping<ComplexMatrix>::pair_t_old to_atom_mapping_blocks(
-    const librpa_int::symmetry_atom_block_matrix_map_t& ordered_blocks)
+    const librpa_int::symmetry_atom_block_matrix_map_t &ordered_blocks)
 {
     atom_mapping<ComplexMatrix>::pair_t_old atom_blocks;
-    for (const auto& atom_i_pair : ordered_blocks)
+    for (const auto &atom_i_pair : ordered_blocks)
     {
-        for (const auto& atom_j_pair : atom_i_pair.second)
+        for (const auto &atom_j_pair : atom_i_pair.second)
         {
             atom_blocks[atom_i_pair.first][atom_j_pair.first] = atom_j_pair.second;
         }
@@ -395,12 +581,12 @@ static atom_mapping<ComplexMatrix>::pair_t_old to_atom_mapping_blocks(
 }
 
 static std::set<std::pair<atom_t, atom_t>> collect_symmetry_atom_pairs(
-    const librpa_int::symmetry_atom_block_matrix_map_t& atom_blocks)
+    const librpa_int::symmetry_atom_block_matrix_map_t &atom_blocks)
 {
     std::set<std::pair<atom_t, atom_t>> atom_pairs;
-    for (const auto& atom_i_pair : atom_blocks)
+    for (const auto &atom_i_pair : atom_blocks)
     {
-        for (const auto& atom_j_pair : atom_i_pair.second)
+        for (const auto &atom_j_pair : atom_i_pair.second)
         {
             atom_pairs.insert({atom_i_pair.first, atom_j_pair.first});
         }
@@ -409,12 +595,12 @@ static std::set<std::pair<atom_t, atom_t>> collect_symmetry_atom_pairs(
 }
 
 static std::set<std::pair<atom_t, atom_t>> collect_symmetry_atom_pairs(
-    const atom_mapping<ComplexMatrix>::pair_t_old& atom_blocks)
+    const atom_mapping<ComplexMatrix>::pair_t_old &atom_blocks)
 {
     std::set<std::pair<atom_t, atom_t>> atom_pairs;
-    for (const auto& atom_i_pair : atom_blocks)
+    for (const auto &atom_i_pair : atom_blocks)
     {
-        for (const auto& atom_j_pair : atom_i_pair.second)
+        for (const auto &atom_j_pair : atom_i_pair.second)
         {
             atom_pairs.insert({atom_i_pair.first, atom_j_pair.first});
         }
@@ -423,7 +609,7 @@ static std::set<std::pair<atom_t, atom_t>> collect_symmetry_atom_pairs(
 }
 
 static std::set<std::pair<atom_t, atom_t>> collect_all_upper_atom_pairs(
-    const std::map<atom_t, size_t>& atom_nabf)
+    const std::map<atom_t, size_t> &atom_nabf)
 {
     std::set<std::pair<atom_t, atom_t>> atom_pairs;
     for (std::size_t atom_i = 0; atom_i < atom_nabf.size(); ++atom_i)
@@ -437,12 +623,12 @@ static std::set<std::pair<atom_t, atom_t>> collect_all_upper_atom_pairs(
 }
 
 static std::set<std::pair<atom_t, atom_t>> collect_local_target_atom_pairs_from_qspace(
-    const abf_qspace_complex_block_map_t& blocks_by_q)
+    const abf_qspace_complex_block_map_t &blocks_by_q)
 {
     std::set<std::pair<atom_t, atom_t>> target_atom_pairs;
-    for (const auto& atom_i_pair : blocks_by_q)
+    for (const auto &atom_i_pair : blocks_by_q)
     {
-        for (const auto& atom_j_pair : atom_i_pair.second)
+        for (const auto &atom_j_pair : atom_i_pair.second)
         {
             if (!atom_j_pair.second.empty())
             {
@@ -453,39 +639,38 @@ static std::set<std::pair<atom_t, atom_t>> collect_local_target_atom_pairs_from_
     return target_atom_pairs;
 }
 
-static std::vector<int> build_symmetry_atom_offsets(const std::map<atom_t, size_t>& atom_nabf)
+static std::vector<int> build_symmetry_atom_offsets(const std::map<atom_t, size_t> &atom_nabf)
 {
     std::vector<int> offsets(atom_nabf.size() + 1, 0);
     for (std::size_t atom = 0; atom < atom_nabf.size(); ++atom)
     {
-        offsets[atom + 1] = offsets[atom]
-                            + static_cast<int>(atom_nabf.at(static_cast<atom_t>(atom)));
+        offsets[atom + 1] =
+            offsets[atom] + static_cast<int>(atom_nabf.at(static_cast<atom_t>(atom)));
     }
     return offsets;
 }
 
 static ComplexMatrix build_dense_symmetry_hermitian_matrix_from_local_blocks(
-    const librpa_int::symmetry_atom_block_matrix_map_t& local_blocks,
-    const std::map<atom_t, size_t>& atom_nabf)
+    const librpa_int::symmetry_atom_block_matrix_map_t &local_blocks,
+    const std::map<atom_t, size_t> &atom_nabf)
 {
     const auto offsets = build_symmetry_atom_offsets(atom_nabf);
     ComplexMatrix dense(offsets.back(), offsets.back());
-    for (const auto& atom_i_pair : local_blocks)
+    for (const auto &atom_i_pair : local_blocks)
     {
         const int row_offset = offsets.at(static_cast<std::size_t>(atom_i_pair.first));
         const int expected_nrows = static_cast<int>(atom_nabf.at(atom_i_pair.first));
-        for (const auto& atom_j_pair : atom_i_pair.second)
+        for (const auto &atom_j_pair : atom_i_pair.second)
         {
             const int col_offset = offsets.at(static_cast<std::size_t>(atom_j_pair.first));
             const int expected_ncols = static_cast<int>(atom_nabf.at(atom_j_pair.first));
-            const auto& block = atom_j_pair.second;
+            const auto &block = atom_j_pair.second;
             if (block.nr != expected_nrows || block.nc != expected_ncols)
             {
                 std::ostringstream oss;
                 oss << "Dense W(q) symmetry restore block dimension mismatch for atom pair ("
                     << atom_i_pair.first << "," << atom_j_pair.first << "): block=" << block.nr
-                    << "x" << block.nc << ", expected=" << expected_nrows << "x"
-                    << expected_ncols;
+                    << "x" << block.nc << ", expected=" << expected_nrows << "x" << expected_ncols;
                 throw std::runtime_error(oss.str());
             }
             for (int row = 0; row < block.nr; ++row)
@@ -506,8 +691,7 @@ static ComplexMatrix build_dense_symmetry_hermitian_matrix_from_local_blocks(
 }
 
 static librpa_int::symmetry_atom_block_matrix_map_t build_symmetry_blocks_from_dense_matrix(
-    const ComplexMatrix& dense_matrix,
-    const std::map<atom_t, size_t>& atom_nabf)
+    const ComplexMatrix &dense_matrix, const std::map<atom_t, size_t> &atom_nabf)
 {
     const auto offsets = build_symmetry_atom_offsets(atom_nabf);
     librpa_int::symmetry_atom_block_matrix_map_t atom_blocks;
@@ -535,9 +719,9 @@ static librpa_int::symmetry_atom_block_matrix_map_t build_symmetry_blocks_from_d
 }
 
 static librpa_int::symmetry_atom_block_matrix_map_t gather_symmetry_ibz_blocks_collective(
-    const MpiCommHandler& comm_h,
-    const librpa_int::symmetry_atom_block_matrix_map_t& blocks_ibz_local,
-    const std::map<atom_t, size_t>& atom_nabf)
+    const MpiCommHandler &comm_h,
+    const librpa_int::symmetry_atom_block_matrix_map_t &blocks_ibz_local,
+    const std::map<atom_t, size_t> &atom_nabf)
 {
     if (comm_h.nprocs <= 1)
     {
@@ -552,18 +736,17 @@ static librpa_int::symmetry_atom_block_matrix_map_t gather_symmetry_ibz_blocks_c
 }
 
 static abf_rspace_dense_block_map_t allocate_symmetry_full_wr_storage(
-    const std::set<std::pair<atom_t, atom_t>>& target_atom_pairs,
-    const std::vector<Vector3_Order<int>>& Rlist,
-    const std::map<atom_t, size_t>& atom_nabf)
+    const std::set<std::pair<atom_t, atom_t>> &target_atom_pairs,
+    const std::vector<Vector3_Order<int>> &Rlist, const std::map<atom_t, size_t> &atom_nabf)
 {
     abf_rspace_dense_block_map_t blocks_by_R_dense;
-    for (const auto& atom_pair : target_atom_pairs)
+    for (const auto &atom_pair : target_atom_pairs)
     {
         const auto atom_i = atom_pair.first;
         const auto atom_j = atom_pair.second;
         const int n_i = static_cast<int>(atom_nabf.at(atom_i));
         const int n_j = static_cast<int>(atom_nabf.at(atom_j));
-        for (const auto& R : Rlist)
+        for (const auto &R : Rlist)
         {
             blocks_by_R_dense[atom_i][atom_j][R] = ComplexMatrix(n_i, n_j);
         }
@@ -572,14 +755,14 @@ static abf_rspace_dense_block_map_t allocate_symmetry_full_wr_storage(
 }
 
 static abf_rspace_complex_block_map_t convert_dense_rspace_blocks_to_row_major(
-    const abf_rspace_dense_block_map_t& dense_blocks)
+    const abf_rspace_dense_block_map_t &dense_blocks)
 {
     abf_rspace_complex_block_map_t row_major_blocks;
-    for (const auto& atom_i_pair : dense_blocks)
+    for (const auto &atom_i_pair : dense_blocks)
     {
-        for (const auto& atom_j_pair : atom_i_pair.second)
+        for (const auto &atom_j_pair : atom_i_pair.second)
         {
-            for (const auto& R_block : atom_j_pair.second)
+            for (const auto &R_block : atom_j_pair.second)
             {
                 row_major_blocks[atom_i_pair.first][atom_j_pair.first][R_block.first] =
                     to_row_major_matrix_m(R_block.second);
@@ -589,65 +772,54 @@ static abf_rspace_complex_block_map_t convert_dense_rspace_blocks_to_row_major(
     return row_major_blocks;
 }
 
-static std::complex<double> build_ft_wq_phase(const PeriodicBoundaryData& pbc,
-                                              const Vector3_Order<double>& q_internal,
-                                              const Vector3_Order<int>& R)
+static std::complex<double> build_ft_wq_phase(const PeriodicBoundaryData &pbc,
+                                              const Vector3_Order<double> &q_internal,
+                                              const Vector3_Order<int> &R)
 {
     const auto q_frac = pbc.latvec * q_internal;
     const double ang = -(q_frac * R) * TWO_PI;
-    return std::complex<double>(std::cos(ang), std::sin(ang))
-           / static_cast<double>(pbc.get_n_cells_bvk());
+    return std::complex<double>(std::cos(ang), std::sin(ang)) /
+           static_cast<double>(pbc.get_n_cells_bvk());
 }
 
-static bool can_use_symmetry_qstar_wr_restore(
-    const librpa_int::SymmetryContext& ctx,
-    const std::vector<SpeciesBasisLayout>& abf_layouts,
-    const std::map<atom_t, size_t>& atom_nabf,
-    const PeriodicBoundaryData& pbc)
+static bool can_use_symmetry_qstar_wr_restore(const librpa_int::SymmetryContext &ctx,
+                                              const std::vector<SpeciesBasisLayout> &abf_layouts,
+                                              const std::map<atom_t, size_t> &atom_nabf,
+                                              const PeriodicBoundaryData &pbc)
 {
-    if (!librpa_int::symmetry_species_layouts_match_atom_counts(
-            abf_layouts, ctx.atom_to_type, atom_nabf))
+    if (!librpa_int::symmetry_species_layouts_match_atom_counts(abf_layouts, ctx.atom_to_type,
+                                                                atom_nabf))
     {
         return false;
     }
-    return ctx.available
-           && !ctx.kstars.empty()
-           && ctx.kstars.size() == pbc.kfrac_list.size()
-           && !ctx.kstar_grid_mapping.empty()
-           && ctx.atom_to_type.size() == atom_nabf.size()
-           && ctx.input_coord_frac.size() == atom_nabf.size()
-           && pbc.klist.size() < static_cast<std::size_t>(pbc.get_n_cells_bvk())
-           && !ctx.irreducible_sector.empty()
-           && !ctx.rspace_sector_stars.empty()
-           && !ctx.rspace_operations.empty();
+    return ctx.available && !ctx.kstars.empty() && ctx.kstars.size() == pbc.kfrac_list.size() &&
+           !ctx.kstar_grid_mapping.empty() && ctx.atom_to_type.size() == atom_nabf.size() &&
+           ctx.input_coord_frac.size() == atom_nabf.size() &&
+           pbc.klist.size() < static_cast<std::size_t>(pbc.get_n_cells_bvk()) &&
+           !ctx.irreducible_sector.empty() && !ctx.rspace_sector_stars.empty() &&
+           !ctx.rspace_operations.empty();
 }
 
 static bool can_symmetrize_symmetry_chi0_ibz_blocks(
-    const librpa_int::SymmetryContext& ctx,
-    const std::vector<SpeciesBasisLayout>& abf_layouts,
-    const std::map<atom_t, size_t>& atom_nabf,
-    const PeriodicBoundaryData& pbc)
+    const librpa_int::SymmetryContext &ctx, const std::vector<SpeciesBasisLayout> &abf_layouts,
+    const std::map<atom_t, size_t> &atom_nabf, const PeriodicBoundaryData &pbc)
 {
-    if (!librpa_int::symmetry_species_layouts_match_atom_counts(
-            abf_layouts, ctx.atom_to_type, atom_nabf))
+    if (!librpa_int::symmetry_species_layouts_match_atom_counts(abf_layouts, ctx.atom_to_type,
+                                                                atom_nabf))
     {
         return false;
     }
-    return ctx.available
-           && !ctx.kstars.empty()
-           && ctx.kstars.size() == pbc.kfrac_list.size()
-           && ctx.atom_to_type.size() == atom_nabf.size()
-           && ctx.input_coord_frac.size() == atom_nabf.size();
+    return ctx.available && !ctx.kstars.empty() && ctx.kstars.size() == pbc.kfrac_list.size() &&
+           ctx.atom_to_type.size() == atom_nabf.size() &&
+           ctx.input_coord_frac.size() == atom_nabf.size();
 }
 
 static atom_mapping<ComplexMatrix>::pair_t_old symmetrize_symmetry_chi0_ibz_blocks_if_needed(
-    const MpiCommHandler& comm_h,
-    const librpa_int::SymmetryContext& ctx,
-    const std::vector<SpeciesBasisLayout>& abf_layouts,
-    const atom_mapping<ComplexMatrix>::pair_t_old& blocks_ibz,
-    const Vector3_Order<double>& q_ibz_internal,
-    const PeriodicBoundaryData& pbc,
-    const std::map<atom_t, size_t>& atom_nabf)
+    const MpiCommHandler &comm_h, const librpa_int::SymmetryContext &ctx,
+    const std::vector<SpeciesBasisLayout> &abf_layouts,
+    const atom_mapping<ComplexMatrix>::pair_t_old &blocks_ibz,
+    const Vector3_Order<double> &q_ibz_internal, const PeriodicBoundaryData &pbc,
+    const std::map<atom_t, size_t> &atom_nabf)
 {
     if (!can_symmetrize_symmetry_chi0_ibz_blocks(ctx, abf_layouts, atom_nabf, pbc))
     {
@@ -665,15 +837,14 @@ static atom_mapping<ComplexMatrix>::pair_t_old symmetrize_symmetry_chi0_ibz_bloc
         return blocks_ibz;
     }
 
-    const auto& q_ibz_frac = pbc.kfrac_list.at(iq_ibz);
+    const auto &q_ibz_frac = pbc.kfrac_list.at(iq_ibz);
 
     auto blocks_for_symmetrization = to_ordered_symmetry_blocks(blocks_ibz);
     auto output_atom_pairs = collect_symmetry_atom_pairs(blocks_for_symmetrization);
     if (comm_h.nprocs > 1)
     {
         blocks_for_symmetrization =
-            gather_symmetry_ibz_blocks_collective(
-                comm_h, blocks_for_symmetrization, atom_nabf);
+            gather_symmetry_ibz_blocks_collective(comm_h, blocks_for_symmetrization, atom_nabf);
         output_atom_pairs = collect_all_upper_atom_pairs(atom_nabf);
     }
 
@@ -682,32 +853,43 @@ static atom_mapping<ComplexMatrix>::pair_t_old symmetrize_symmetry_chi0_ibz_bloc
         return blocks_ibz;
     }
 
+    const bool disable_qspace_symmetry =
+        librpa_int::disable_chi0_qspace_symmetry_diagnostic_requested(
+            std::getenv("LIBRPA_DISABLE_CHI0_QSPACE_SYMMETRY_DIAG"));
+    if (disable_qspace_symmetry)
+    {
+        static bool diagnostic_message_printed = false;
+        if (comm_h.is_root() && !diagnostic_message_printed)
+        {
+            std::cout << "Diagnostic: chi0 q-space little-group symmetrization is disabled; "
+                         "collective IBZ block gathering is preserved."
+                      << std::endl;
+            diagnostic_message_printed = true;
+        }
+        return to_atom_mapping_blocks(blocks_for_symmetrization);
+    }
+
     const auto symmetrized_blocks = librpa_int::symmetrize_symmetry_ibz_kspace_operator_blocks(
         ctx, abf_layouts, q_ibz_frac, blocks_for_symmetrization, atom_nabf, &output_atom_pairs);
     return to_atom_mapping_blocks(symmetrized_blocks);
 }
 
 static abf_rspace_complex_block_map_t accumulate_symmetry_full_wr_from_ibz_q(
-    const MpiCommHandler& comm_h,
-    const librpa_int::SymmetryContext& ctx,
-    const std::vector<SpeciesBasisLayout>& abf_layouts,
-    const abf_qspace_complex_block_map_t& Wc_q,
-    const PeriodicBoundaryData& pbc,
-    const std::vector<Vector3_Order<int>>& Rlist,
-    const std::map<atom_t, size_t>& atom_nabf)
+    const MpiCommHandler &comm_h, const librpa_int::SymmetryContext &ctx,
+    const std::vector<SpeciesBasisLayout> &abf_layouts, const abf_qspace_complex_block_map_t &Wc_q,
+    const PeriodicBoundaryData &pbc, const std::vector<Vector3_Order<int>> &Rlist,
+    const std::map<atom_t, size_t> &atom_nabf)
 {
     const auto local_target_pairs = collect_local_target_atom_pairs_from_qspace(Wc_q);
     if (ctx.kstar_grid_mapping.empty())
     {
         return {};
     }
-    auto blocks_by_R_full =
-        allocate_symmetry_full_wr_storage(local_target_pairs, Rlist, atom_nabf);
+    auto blocks_by_R_full = allocate_symmetry_full_wr_storage(local_target_pairs, Rlist, atom_nabf);
     const auto full_grid_member_targets =
         build_symmetry_full_grid_kstar_member_kfrac_targets(ctx, pbc.kfrac_list);
-    const bool use_full_grid_member_targets =
-        full_grid_member_targets.size() == ctx.kstars.size();
-    const char* qmember_env = std::getenv("LIBRPA_STRICT2D_QMEMBER_DIAG");
+    const bool use_full_grid_member_targets = full_grid_member_targets.size() == ctx.kstars.size();
+    const char *qmember_env = std::getenv("LIBRPA_STRICT2D_QMEMBER_DIAG");
     const bool qmember_diagnostic_enabled = qmember_env != nullptr && qmember_env[0] != '\0';
     Vector3_Order<double> selected_q_frac;
     if (qmember_diagnostic_enabled)
@@ -716,23 +898,21 @@ static abf_rspace_complex_block_map_t accumulate_symmetry_full_wr_from_ibz_q(
         std::replace(value.begin(), value.end(), ',', ' ');
         std::istringstream input(value);
         std::string extra;
-        if (!(input >> selected_q_frac.x >> selected_q_frac.y >> selected_q_frac.z)
-            || (input >> extra))
-        {
+        if (!(input >> selected_q_frac.x >> selected_q_frac.y >> selected_q_frac.z) ||
+            (input >> extra))
             throw LIBRPA_RUNTIME_ERROR(
-                "LIBRPA_STRICT2D_QMEMBER_DIAG requires three comma-separated reduced coordinates");
-        }
+                "LIBRPA_STRICT2D_QMEMBER_DIAG requires three comma-separated reduced "
+                "coordinates");
     }
     std::size_t kept_qmembers = 0;
 
-    for (const auto& star_mapping : ctx.kstar_grid_mapping)
+    for (const auto &star_mapping : ctx.kstar_grid_mapping)
     {
-        const auto& star = ctx.kstars.at(static_cast<std::size_t>(star_mapping.star_list_index));
+        const auto &star = ctx.kstars.at(static_cast<std::size_t>(star_mapping.star_list_index));
 
         const auto q_ibz_internal = pbc.klist.at(static_cast<std::size_t>(star_mapping.iq_ibz));
         const auto q_ibz_frac = pbc.kfrac_list.at(static_cast<std::size_t>(star_mapping.iq_ibz));
-        const auto blocks_ibz_local =
-            collect_symmetry_abf_ibz_blocks_for_q(Wc_q, q_ibz_internal);
+        const auto blocks_ibz_local = collect_symmetry_abf_ibz_blocks_for_q(Wc_q, q_ibz_internal);
         auto blocks_ibz =
             gather_symmetry_ibz_blocks_collective(comm_h, blocks_ibz_local, atom_nabf);
         if (local_target_pairs.empty() || blocks_ibz.empty())
@@ -751,7 +931,7 @@ static abf_rspace_complex_block_map_t accumulate_symmetry_full_wr_from_ibz_q(
 
         for (std::size_t imember = 0; imember < star.members.size(); ++imember)
         {
-            const auto& member = star.members[imember];
+            const auto &member = star.members[imember];
             const Vector3_Order<double> raw_q_bz_target_frac =
                 use_full_grid_member_targets
                     ? full_grid_member_targets[static_cast<std::size_t>(
@@ -759,11 +939,9 @@ static abf_rspace_complex_block_map_t accumulate_symmetry_full_wr_from_ibz_q(
                     : Vector3_Order<double>{pbc.latvec * star_mapping.member_q_bz_keys[imember]};
             const Vector3_Order<double> q_bz_target_frac =
                 restrict_fractional_coordinate(raw_q_bz_target_frac);
-            if (!strict_2d_qmember_diagnostic_keeps(
-                    q_bz_target_frac, selected_q_frac, qmember_diagnostic_enabled))
-            {
+            if (!strict_2d_qmember_diagnostic_keeps(q_bz_target_frac, selected_q_frac,
+                                                    qmember_diagnostic_enabled))
                 continue;
-            }
             ++kept_qmembers;
             librpa_int::symmetry_atom_block_matrix_map_t rotated_blocks;
             try
@@ -772,23 +950,22 @@ static abf_rspace_complex_block_map_t accumulate_symmetry_full_wr_from_ibz_q(
                     ctx, abf_layouts, member, blocks_ibz, atom_nabf, star.k_ibz,
                     member.time_reversal, &local_target_pairs, &q_bz_target_frac);
             }
-            catch (const std::exception& ex)
+            catch (const std::exception &ex)
             {
                 std::ostringstream oss;
                 oss << "Symmetry irreducible-sector W(q)->W(R) accumulation failed for star="
                     << star.star_index << ", member=" << imember
                     << ", spatial_isym=" << member.spatial_isym
-                    << ", time_reversal=" << member.time_reversal
-                    << ": " << ex.what();
+                    << ", time_reversal=" << member.time_reversal << ": " << ex.what();
                 throw std::runtime_error(oss.str());
             }
 
             const Vector3_Order<double> q_internal{q_bz_target_frac * pbc.G};
-            for (const auto& atom_i_pair : rotated_blocks)
+            for (const auto &atom_i_pair : rotated_blocks)
             {
-                for (const auto& atom_j_pair : atom_i_pair.second)
+                for (const auto &atom_j_pair : atom_i_pair.second)
                 {
-                    for (const auto& R : Rlist)
+                    for (const auto &R : Rlist)
                     {
                         const auto phase = build_ft_wq_phase(pbc, q_internal, R);
                         add_scaled_complex_matrix(
@@ -800,11 +977,17 @@ static abf_rspace_complex_block_map_t accumulate_symmetry_full_wr_from_ibz_q(
         }
     }
 
-    if (qmember_diagnostic_enabled && kept_qmembers != 1)
+    const unsigned long local_kept_qmembers = static_cast<unsigned long>(kept_qmembers);
+    unsigned long max_kept_qmembers = 0;
+    MPI_Allreduce(&local_kept_qmembers, &max_kept_qmembers, 1, MPI_UNSIGNED_LONG, MPI_MAX,
+                  comm_h.comm);
+    if (!strict_2d_qmember_diagnostic_selection_valid(
+            kept_qmembers, static_cast<std::size_t>(max_kept_qmembers), qmember_diagnostic_enabled))
     {
         std::ostringstream message;
-        message << "LIBRPA_STRICT2D_QMEMBER_DIAG selected " << kept_qmembers
-                << " full-BZ q members instead of one";
+        message << "LIBRPA_STRICT2D_QMEMBER_DIAG selected local=" << kept_qmembers
+                << ", global_max=" << max_kept_qmembers
+                << " full-BZ q members; expected local<=1 and global_max=1";
         throw LIBRPA_RUNTIME_ERROR(message.str());
     }
     if (qmember_diagnostic_enabled)
@@ -819,15 +1002,17 @@ static abf_rspace_complex_block_map_t accumulate_symmetry_full_wr_from_ibz_q(
 }
 CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx_mat_t &coulmat,
                                                        const std::vector<atpair_t> &local_atpair,
-                                                       const BlacsCtxtHandler &blacs_h, bool use_gpu_replace_scalapack)
+                                                       const BlacsCtxtHandler &blacs_h,
+                                                       bool use_gpu_replace_scalapack)
 {
     using librpa_int::ArrayDesc;
-    using librpa_int::global::ofs_myid;
     using librpa_int::global::lib_printf;
+    using librpa_int::global::ofs_myid;
 
     CorrEnergy corr;
-    if (blacs_h.myid == 0){
-        if(use_gpu_replace_scalapack)
+    if (blacs_h.myid == 0)
+    {
+        if (use_gpu_replace_scalapack)
             lib_printf("Calculating EcRPA with BLACS GPU 2D gamma_only\n");
         else
             lib_printf("Calculating EcRPA with BLACS/ScaLAPACK 2D gamma_only\n");
@@ -848,12 +1033,14 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
     comm_h.barrier();
 
     ArrayDesc desc_nabf_nabf(blacs_h);
-    // use a square blocksize instead max block, otherwise heev and inversion will complain about illegal parameter
+    // use a square blocksize instead max block, otherwise heev and inversion will complain about
+    // illegal parameter
     desc_nabf_nabf.init_square_blk(n_abf, n_abf, 0, 0);
     ArrayDesc desc_nabf_nabf_opt(blacs_h);
     const int nb_opt = std::min(128, desc_nabf_nabf.nb());
     desc_nabf_nabf_opt.init(n_abf, n_abf, nb_opt, nb_opt, 0, 0);
-    const auto set_IJ_nabf_nabf = get_necessary_IJ_from_block_2D_sy('U', chi0.atbasis_abf, desc_nabf_nabf);
+    const auto set_IJ_nabf_nabf =
+        get_necessary_IJ_from_block_2D_sy('U', chi0.atbasis_abf, desc_nabf_nabf);
     const auto s0_s1 = get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf);
     auto temp_block = init_local_mat<double>(desc_nabf_nabf, MAJOR::COL);
     auto chi0_block = init_local_mat<double>(desc_nabf_nabf_opt, MAJOR::COL);
@@ -861,18 +1048,23 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
     auto coul_chi0_block = init_local_mat<double>(desc_nabf_nabf_opt, MAJOR::COL);
     std::vector<int> ipiv(desc_nabf_nabf_opt.m_loc() + desc_nabf_nabf_opt.mb());
 
-    double* chi0_block_ptr;
-    double* coul_block_ptr;
-    double* coul_chi0_block_ptr;
-    int* ipiv_ptr;
+    double *chi0_block_ptr;
+    double *coul_block_ptr;
+    double *coul_chi0_block_ptr;
+    int *ipiv_ptr;
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
-    if(use_gpu_replace_scalapack)
+    if (use_gpu_replace_scalapack)
     {
         desc_nabf_nabf_opt.set_ddla_desc(blacs_h.ddla_handle);
-        DEVICE_CHECK(deviceMallocAsync((void**)&chi0_block_ptr, chi0_block.size() * sizeof(double), blacs_h.ddla_handle->stream));
-        DEVICE_CHECK(deviceMallocAsync((void**)&coul_block_ptr, coul_block.size() * sizeof(double), blacs_h.ddla_handle->stream));
-        DEVICE_CHECK(deviceMallocAsync((void**)&coul_chi0_block_ptr, coul_chi0_block.size() * sizeof(double), blacs_h.ddla_handle->stream));
-        DEVICE_CHECK(deviceMallocAsync((void**)&ipiv_ptr, ipiv.size() * sizeof(int), blacs_h.ddla_handle->stream));
+        DEVICE_CHECK(deviceMallocAsync((void **)&chi0_block_ptr, chi0_block.size() * sizeof(double),
+                                       blacs_h.ddla_handle->stream));
+        DEVICE_CHECK(deviceMallocAsync((void **)&coul_block_ptr, coul_block.size() * sizeof(double),
+                                       blacs_h.ddla_handle->stream));
+        DEVICE_CHECK(deviceMallocAsync((void **)&coul_chi0_block_ptr,
+                                       coul_chi0_block.size() * sizeof(double),
+                                       blacs_h.ddla_handle->stream));
+        DEVICE_CHECK(deviceMallocAsync((void **)&ipiv_ptr, ipiv.size() * sizeof(int),
+                                       blacs_h.ddla_handle->stream));
     }
     else
 #endif
@@ -885,10 +1077,9 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
     const auto &qpts = chi0.active_qpoints();
     complex<double> tot_RPA_energy(0.0, 0.0);
     map<Vector3_Order<double>, complex<double>> cRPA_q;
-    if(comm_h.is_root())
-        lib_printf("Finish init RPA blacs 2d\n");
+    if (comm_h.is_root()) lib_printf("Finish init RPA blacs 2d\n");
 #ifdef LIBRPA_USE_LIBRI
-    for (const auto &q: qpts)
+    for (const auto &q : qpts)
     {
         coul_block.zero_out();
 
@@ -901,19 +1092,21 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
             std::map<int, std::map<std::pair<int, std::array<double, 3>>, Tensor<double>>>
                 coul_libri;
 
-            for (const auto& Mu_coulmat: coulmat)
+            for (const auto &Mu_coulmat : coulmat)
             {
                 const auto Mu = Mu_coulmat.first;
-                for(const auto& Nu_coulmat : Mu_coulmat.second){
+                for (const auto &Nu_coulmat : Mu_coulmat.second)
+                {
                     const auto Nu = Nu_coulmat.first;
                     const auto &Vq = coulmat.at(Mu).at(Nu).at(q);
                     const auto n_mu = chi0.atbasis_abf.get_atom_nb(Mu);
                     const auto n_nu = chi0.atbasis_abf.get_atom_nb(Nu);
-                    matrix tmp_vq_real=(*Vq).real();
+                    matrix tmp_vq_real = (*Vq).real();
                     std::valarray<double> Vq_va(tmp_vq_real.c, Vq->size);
                     auto pvq = std::make_shared<std::valarray<double>>();
                     *pvq = Vq_va;
-                    coul_libri[Mu][{Nu, std::array<double, 3>{0,0,0}}] = Tensor<double>({n_mu, n_nu}, pvq);
+                    coul_libri[Mu][{Nu, std::array<double, 3>{0, 0, 0}}] =
+                        Tensor<double>({n_mu, n_nu}, pvq);
                     // coulmat.at(Mu).at(Nu).at(q).reset();
                 }
             }
@@ -924,25 +1117,31 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
             double arr_end = omp_get_wtime();
             comm_h.barrier();
             double comm_begin = omp_get_wtime();
-            //printf("Begin comm_map2_first  myid: %d\n",comm_h.myid);
-            const auto IJq_coul = comm_map2_first(comm_h.comm, coul_libri, s0_s1.first, s0_s1.second);
+            // printf("Begin comm_map2_first  myid: %d\n",comm_h.myid);
+            const auto IJq_coul =
+                comm_map2_first(comm_h.comm, coul_libri, s0_s1.first, s0_s1.second);
             double comm_end = omp_get_wtime();
             comm_h.barrier();
 
             double block_begin = omp_get_wtime();
 
-            collect_block_from_ALL_IJ_Tensor(temp_block, desc_nabf_nabf, chi0.atbasis_abf,
-                        qa,true, CONE, IJq_coul, MAJOR::ROW);
+            collect_block_from_ALL_IJ_Tensor(temp_block, desc_nabf_nabf, chi0.atbasis_abf, qa, true,
+                                             CONE, IJq_coul, MAJOR::ROW);
             ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1, desc_nabf_nabf.desc,
                                           coul_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
                                           blacs_h.ictxt);
             double block_end = omp_get_wtime();
-            lib_printf("Vq Time  myid: %d  arr_time: %f  comm_time: %f   block_time: %f   pair_size: %d\n",comm_h.myid,arr_end-vq_begin, comm_end-comm_begin, block_end-block_begin,set_IJ_nabf_nabf.size());
+            lib_printf(
+                "Vq Time  myid: %d  arr_time: %f  comm_time: %f   block_time: %f   pair_size: %d\n",
+                comm_h.myid, arr_end - vq_begin, comm_end - comm_begin, block_end - block_begin,
+                set_IJ_nabf_nabf.size());
             comm_h.barrier();
             double vq_end = omp_get_wtime();
 
-            if(comm_h.myid == 0)
-                lib_printf(" | Total vq time: %f  lri_coul: %f   comm_vq: %f   block_vq: %f\n",vq_end-vq_begin, comm_begin-vq_begin,block_begin-comm_begin,vq_end-block_begin);
+            if (comm_h.myid == 0)
+                lib_printf(" | Total vq time: %f  lri_coul: %f   comm_vq: %f   block_vq: %f\n",
+                           vq_end - vq_begin, comm_begin - vq_begin, block_begin - comm_begin,
+                           vq_end - block_begin);
         }
 
         double chi_arr_time = 0.0;
@@ -965,7 +1164,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
                 {
                     const auto &M = M_Nchi.first;
                     const auto n_mu = chi0.atbasis_abf.get_atom_nb(M);
-                    for (const auto &N_chi: M_Nchi.second)
+                    for (const auto &N_chi : M_Nchi.second)
                     {
                         const auto &N = N_chi.first;
                         const auto n_nu = chi0.atbasis_abf.get_atom_nb(N);
@@ -999,16 +1198,18 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
                 double chi_end_arr = omp_get_wtime();
                 // ofs_myid << "chi0_libri" << endl << chi0_libri;
 
-                const auto IJq_chi0 = comm_map2_first(comm_h.comm, chi0_libri, s0_s1.first, s0_s1.second);
+                const auto IJq_chi0 =
+                    comm_map2_first(comm_h.comm, chi0_libri, s0_s1.first, s0_s1.second);
                 // ofs_myid << "IJq_chi0" << endl << IJq_chi0;
                 double chi_end_comm = omp_get_wtime();
 
-                collect_block_from_ALL_IJ_Tensor(temp_block, desc_nabf_nabf, chi0.atbasis_abf,
-                        qa,true, CONE, IJq_chi0, MAJOR::ROW);
-                ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1, desc_nabf_nabf.desc,
-                                              chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
-                                              blacs_h.ictxt);
-                //printf("End collect block myid: %d ifreq: %d   TIME_USED: %f\n",comm_h.myid,ifreq,chi_end_comm-chi_end_arr);
+                collect_block_from_ALL_IJ_Tensor(temp_block, desc_nabf_nabf, chi0.atbasis_abf, qa,
+                                                 true, CONE, IJq_chi0, MAJOR::ROW);
+                ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1,
+                                              desc_nabf_nabf.desc, chi0_block.ptr(), 1, 1,
+                                              desc_nabf_nabf_opt.desc, blacs_h.ictxt);
+                // printf("End collect block myid: %d ifreq: %d   TIME_USED:
+                // %f\n",comm_h.myid,ifreq,chi_end_comm-chi_end_arr);
                 comm_h.barrier();
                 double chi_end_2d = omp_get_wtime();
 
@@ -1019,22 +1220,28 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
             if (use_gpu_replace_scalapack)
             {
-                DEVICE_CHECK(deviceMemcpyAsync(chi0_block_ptr, chi0_block.ptr(), chi0_block.size() * sizeof(double), deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
-                DEVICE_CHECK(deviceMemcpyAsync(coul_block_ptr, coul_block.ptr(), coul_block.size() * sizeof(double), deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
+                DEVICE_CHECK(deviceMemcpyAsync(
+                    chi0_block_ptr, chi0_block.ptr(), chi0_block.size() * sizeof(double),
+                    deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
+                DEVICE_CHECK(deviceMemcpyAsync(
+                    coul_block_ptr, coul_block.ptr(), coul_block.size() * sizeof(double),
+                    deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
             }
 #endif
             double pi_begin = omp_get_wtime();
-            LaConnector::pgemm(
-                'N', 'N', n_abf, n_abf, n_abf, -1.0, coul_block_ptr, 1, 1,
-                desc_nabf_nabf_opt, chi0_block_ptr, 1, 1, desc_nabf_nabf_opt,
-                0.0, coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
+            LaConnector::pgemm('N', 'N', n_abf, n_abf, n_abf, -1.0, coul_block_ptr, 1, 1,
+                               desc_nabf_nabf_opt, chi0_block_ptr, 1, 1, desc_nabf_nabf_opt, 0.0,
+                               coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
             double pi_end = omp_get_wtime();
             double trace_pi = 0.0;
             double trace_pi_loc = 0.0;
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
             if (use_gpu_replace_scalapack)
             {
-                DEVICE_CHECK(deviceMemcpyAsync(coul_chi0_block.ptr(), coul_chi0_block_ptr, coul_chi0_block.size() * sizeof(double), deviceMemcpyDeviceToHost, blacs_h.ddla_handle->stream));
+                DEVICE_CHECK(deviceMemcpyAsync(coul_chi0_block.ptr(), coul_chi0_block_ptr,
+                                               coul_chi0_block.size() * sizeof(double),
+                                               deviceMemcpyDeviceToHost,
+                                               blacs_h.ddla_handle->stream));
                 DEVICE_CHECK(deviceStreamSynchronize(blacs_h.ddla_handle->stream));
             }
 #endif
@@ -1047,11 +1254,15 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
             LaConnector::pdam(1.0, coul_chi0_block_ptr, desc_nabf_nabf_opt);
             int info = -1;
             double det_begin = omp_get_wtime();
-            LaConnector::pgetrf_bpiv(n_abf, n_abf, coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt, ipiv_ptr, info);
+            LaConnector::pgetrf_bpiv(n_abf, n_abf, coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt,
+                                     ipiv_ptr, info);
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
             if (use_gpu_replace_scalapack)
             {
-                DEVICE_CHECK(deviceMemcpyAsync(coul_chi0_block.ptr(), coul_chi0_block_ptr, coul_chi0_block.size() * sizeof(double), deviceMemcpyDeviceToHost, blacs_h.ddla_handle->stream));
+                DEVICE_CHECK(deviceMemcpyAsync(coul_chi0_block.ptr(), coul_chi0_block_ptr,
+                                               coul_chi0_block.size() * sizeof(double),
+                                               deviceMemcpyDeviceToHost,
+                                               blacs_h.ddla_handle->stream));
                 DEVICE_CHECK(deviceStreamSynchronize(blacs_h.ddla_handle->stream));
             }
 #endif
@@ -1081,24 +1292,29 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
             }
 
             MPI_Allreduce(&ln_det_loc, &ln_det, 1, MPI_DOUBLE, MPI_SUM, desc_nabf_nabf_opt.comm());
-            //printf("End det  myid: %d ifreq: %d \n",comm_h.myid,ifreq);
+            // printf("End det  myid: %d ifreq: %d \n",comm_h.myid,ifreq);
             double det_end = omp_get_wtime();
             comm_h.barrier();
             MPI_Allreduce(&trace_pi_loc, &trace_pi, 1, MPI_DOUBLE, MPI_SUM, comm_h.comm);
             double pi_freq_end = omp_get_wtime();
 
-            if(comm_h.myid==0)
+            if (comm_h.myid == 0)
             {
-                lib_printf("| TIME of DET-freq-q:  %f,  q: ( %f, %f, %f)  TOT: %f  CHI_arr: %f  CHI_comm: %f, CHI_2d: %f, Pi: %f, Det: %f\n",freq, q.x,q.y,q.z,pi_freq_end-pi_freq_begin, chi_arr_time,chi_comm_time,chi_2d_time,pi_end-pi_begin,det_end-pi_end);
+                lib_printf(
+                    "| TIME of DET-freq-q:  %f,  q: ( %f, %f, %f)  TOT: %f  CHI_arr: %f  CHI_comm: "
+                    "%f, CHI_2d: %f, Pi: %f, Det: %f\n",
+                    freq, q.x, q.y, q.z, pi_freq_end - pi_freq_begin, chi_arr_time, chi_comm_time,
+                    chi_2d_time, pi_end - pi_begin, det_end - pi_end);
                 complex<double> rpa_for_omega_q = complex<double>(trace_pi + ln_det);
                 const auto qweight = chi0.q_weight(q);
-                cRPA_q[q] += rpa_for_omega_q * freq_weight * qweight / TWO_PI;//!check
+                cRPA_q[q] += rpa_for_omega_q * freq_weight * qweight / TWO_PI;  //! check
                 tot_RPA_energy += rpa_for_omega_q * freq_weight * qweight / TWO_PI;
             }
         }
     }
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
-    if(use_gpu_replace_scalapack){
+    if (use_gpu_replace_scalapack)
+    {
         DEVICE_CHECK(deviceFreeAsync(chi0_block_ptr, blacs_h.ddla_handle->stream));
         DEVICE_CHECK(deviceFreeAsync(coul_block_ptr, blacs_h.ddla_handle->stream));
         DEVICE_CHECK(deviceFreeAsync(coul_chi0_block_ptr, blacs_h.ddla_handle->stream));
@@ -1109,7 +1325,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
 #else
     throw std::logic_error("need compilation with LibRI");
 #endif
-    if(comm_h.myid==0)
+    if (comm_h.myid == 0)
     {
         for (auto &q_crpa : cRPA_q)
         {
@@ -1129,18 +1345,17 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                                             const RpaHeadwingSettings &headwing_settings,
                                             diele_func *df_headwing)
 {
-    using librpa_int::global::ofs_myid;
     using librpa_int::global::lib_printf;
+    using librpa_int::global::ofs_myid;
     using librpa_int::global::profiler;
 
     profiler.start("compute_RPA_correlation_blacs_2d");
 
     const auto &comm_h = blacs_h.comm_h();
-    lib_printf("Begin to compute_RPA_correlation_blacs_2d  myid: %d\n", comm_h.myid );
+    lib_printf("Begin to compute_RPA_correlation_blacs_2d  myid: %d\n", comm_h.myid);
     release_free_mem();
     CorrEnergy corr;
-    if (comm_h.myid == 0)
-        lib_printf("Calculating EcRPA with BLACS/ScaLAPACK 2D\n");
+    if (comm_h.myid == 0) lib_printf("Calculating EcRPA with BLACS/ScaLAPACK 2D\n");
     // lib_printf("Calculating EcRPA with BLACS, pid:  %d\n", comm_h.myid);
     // const auto & mf = chi0.mf;
     const int n_abf = chi0.atbasis_abf.nb_total;
@@ -1149,12 +1364,14 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
     comm_h.barrier();
 
     ArrayDesc desc_nabf_nabf(blacs_h);
-    // use a square blocksize instead max block, otherwise heev and inversion will complain about illegal parameter
+    // use a square blocksize instead max block, otherwise heev and inversion will complain about
+    // illegal parameter
     desc_nabf_nabf.init_square_blk(n_abf, n_abf, 0, 0);
     ArrayDesc desc_nabf_nabf_opt(blacs_h);
     const int nb_opt = std::min(128, desc_nabf_nabf.nb());
     desc_nabf_nabf_opt.init(n_abf, n_abf, nb_opt, nb_opt, 0, 0);
-    const auto set_IJ_nabf_nabf = get_necessary_IJ_from_block_2D_sy('U', chi0.atbasis_abf, desc_nabf_nabf);
+    const auto set_IJ_nabf_nabf =
+        get_necessary_IJ_from_block_2D_sy('U', chi0.atbasis_abf, desc_nabf_nabf);
     const auto s0_s1 = get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf);
     auto temp_block = init_local_mat<complex<double>>(desc_nabf_nabf, MAJOR::COL);
     auto chi0_block = init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
@@ -1164,7 +1381,8 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
     ArrayDesc desc_headwing_response(blacs_h);
     matrix_m<std::complex<double>> headwing_response_block;
     // ofs_myid << "Iset Jset " << s0_s1 << endl;
-    // ofs_myid << "atpair_unordered_local of myid " << blacs_h.myid << " " << atpair_unordered_local << endl;
+    // ofs_myid << "atpair_unordered_local of myid " << blacs_h.myid << " " <<
+    // atpair_unordered_local << endl;
 
     // NOTE: this may change later when q-points are parallelized
     vector<Vector3_Order<double>> qpts(chi0.active_qpoints());
@@ -1176,7 +1394,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
 
     complex<double> tot_RPA_energy(0.0, 0.0);
     map<Vector3_Order<double>, complex<double>> cRPA_q;
-    if(comm_h.is_root()) lib_printf("Finish init RPA blacs 2d\n");
+    if (comm_h.is_root()) lib_printf("Finish init RPA blacs 2d\n");
     comm_h.barrier();
     // ofs_myid << "atpair_unordered_local of myid " << blacs_ctxt_global_h.myid << " " <<
     // atpair_unordered_local << endl;
@@ -1197,42 +1415,44 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 coul_libri;
             coul_libri.clear();
             ofs_myid << "Initializing coul_libri Tensors" << std::endl;
-            for (const auto &Mu_Nu: local_atpair)
+            for (const auto &Mu_Nu : local_atpair)
             {
                 const auto Mu = Mu_Nu.first;
                 const auto Nu = Mu_Nu.second;
-                // ofs_myid << "myid " << blacs_h.myid << "Mu " << Mu << " Nu " << Nu << endl;
-                #ifdef OPEN_TEST_FOR_LU_DECOMPOSITION
-                // printf("success before if coulmat.count:%d\n", mpi_comm_global_h.myid);
-                #endif
-                if (coulmat.count(Mu) == 0 ||
-                    coulmat.at(Mu).count(Nu) == 0 ||
-                    coulmat.at(Mu).at(Nu).count(q) == 0) continue;
-                #ifdef OPEN_TEST_FOR_LU_DECOMPOSITION
-                // printf("success after if coulmat.count:%d\n", mpi_comm_global_h.myid);
-                #endif
+// ofs_myid << "myid " << blacs_h.myid << "Mu " << Mu << " Nu " << Nu << endl;
+#ifdef OPEN_TEST_FOR_LU_DECOMPOSITION
+// printf("success before if coulmat.count:%d\n", mpi_comm_global_h.myid);
+#endif
+                if (coulmat.count(Mu) == 0 || coulmat.at(Mu).count(Nu) == 0 ||
+                    coulmat.at(Mu).at(Nu).count(q) == 0)
+                    continue;
+#ifdef OPEN_TEST_FOR_LU_DECOMPOSITION
+// printf("success after if coulmat.count:%d\n", mpi_comm_global_h.myid);
+#endif
                 const auto &Vq = coulmat.at(Mu).at(Nu).at(q);
                 const auto n_mu = chi0.atbasis_abf.get_atom_nb(Mu);
                 const auto n_nu = chi0.atbasis_abf.get_atom_nb(Nu);
-                ofs_myid << "- coul_libri Tensor Mu " << Mu << " Nu " << Nu
-                         << " address " << Vq->c << " " << Vq->size << " shape " << n_mu << " x " << n_nu << std::endl;
+                ofs_myid << "- coul_libri Tensor Mu " << Mu << " Nu " << Nu << " address " << Vq->c
+                         << " " << Vq->size << " shape " << n_mu << " x " << n_nu << std::endl;
                 std::valarray<complex<double>> Vq_va(Vq->c, Vq->size);
                 auto pvq = std::make_shared<std::valarray<complex<double>>>();
                 *pvq = Vq_va;
                 coul_libri[Mu][{Nu, qa}] = Tensor<complex<double>>({n_mu, n_nu}, pvq);
             }
             ofs_myid << "Done initializing coul_libri Tensors" << std::endl;
-            //printf("Finish RPA blacs 2d  vq arr\n");
+            // printf("Finish RPA blacs 2d  vq arr\n");
             double arr_end = omp_get_wtime();
             comm_h.barrier();
             double comm_begin = omp_get_wtime();
-            //printf("Begin comm_map2_first  myid: %d\n",comm_h.myid);
-            const auto IJq_coul = comm_map2_first(comm_h.comm, coul_libri, s0_s1.first, s0_s1.second);
+            // printf("Begin comm_map2_first  myid: %d\n",comm_h.myid);
+            const auto IJq_coul =
+                comm_map2_first(comm_h.comm, coul_libri, s0_s1.first, s0_s1.second);
             double comm_end = omp_get_wtime();
             comm_h.barrier();
-            //printf("End vq comm_map2_first  myid: %d   TIME_USED: %f\n",comm_h.myid,comm_end-comm_begin);
-            // ofs_myid << "IJq_coul" << endl << IJq_coul;
-            //printf("Finish RPA blacs 2d  vq 2d\n");
+            // printf("End vq comm_map2_first  myid: %d   TIME_USED:
+            // %f\n",comm_h.myid,comm_end-comm_begin);
+            //  ofs_myid << "IJq_coul" << endl << IJq_coul;
+            // printf("Finish RPA blacs 2d  vq 2d\n");
             double block_begin = omp_get_wtime();
             // for (const auto &IJ: set_IJ_nabf_nabf)
             // {
@@ -1250,49 +1470,54 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
 
             if (IJq_coul.size() > 0)
             {
-                collect_block_from_ALL_IJ_Tensor(temp_block, desc_nabf_nabf, chi0.atbasis_abf,
-                                                qa, true, C_ONE, IJq_coul, MAJOR::ROW);
-                ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1, desc_nabf_nabf.desc,
-                                              coul_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
-                                              blacs_h.ictxt);
+                collect_block_from_ALL_IJ_Tensor(temp_block, desc_nabf_nabf, chi0.atbasis_abf, qa,
+                                                 true, C_ONE, IJq_coul, MAJOR::ROW);
+                ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1,
+                                              desc_nabf_nabf.desc, coul_block.ptr(), 1, 1,
+                                              desc_nabf_nabf_opt.desc, blacs_h.ictxt);
             }
             double block_end = omp_get_wtime();
-            lib_printf("Vq Time  myid: %d  arr_time: %f  comm_time: %f   block_time: %f   pair_size: %d\n",comm_h.myid,arr_end-vq_begin, comm_end-comm_begin, block_end-block_begin,set_IJ_nabf_nabf.size());
+            lib_printf(
+                "Vq Time  myid: %d  arr_time: %f  comm_time: %f   block_time: %f   pair_size: %d\n",
+                comm_h.myid, arr_end - vq_begin, comm_end - comm_begin, block_end - block_begin,
+                set_IJ_nabf_nabf.size());
             comm_h.barrier();
             double vq_end = omp_get_wtime();
 
-            if(comm_h.myid == 0)
-                lib_printf(" | Total vq time: %f  lri_coul: %f   comm_vq: %f   block_vq: %f\n",vq_end-vq_begin, comm_begin-vq_begin,block_begin-comm_begin,vq_end-block_begin);
+            if (comm_h.myid == 0)
+                lib_printf(" | Total vq time: %f  lri_coul: %f   comm_vq: %f   block_vq: %f\n",
+                           vq_end - vq_begin, comm_begin - vq_begin, block_begin - comm_begin,
+                           vq_end - block_begin);
         }
 
-
-        //if(comm_h.is_root())
-        //printf("Finish RPA blacs 2d  vq comm\n");
-        // char fn[100];
-        // sprintf(fn, "coul_iq_%d.mtx", iq);
-        // print_matrix_mm_file_parallel(fn, coul_block, desc_nabf_nabf);
-        // ofs_myid << str(coul_block);
-        // lib_printf("coul_block\n%s", str(coul_block).c_str());
-        const bool replace_gamma_headwing =
-            headwing_settings.enabled && headwing_settings.option_dielect_func == 3 &&
-            is_gamma_point(q);
+        // if(comm_h.is_root())
+        // printf("Finish RPA blacs 2d  vq comm\n");
+        //  char fn[100];
+        //  sprintf(fn, "coul_iq_%d.mtx", iq);
+        //  print_matrix_mm_file_parallel(fn, coul_block, desc_nabf_nabf);
+        //  ofs_myid << str(coul_block);
+        //  lib_printf("coul_block\n%s", str(coul_block).c_str());
+        const bool replace_gamma_headwing = headwing_settings.enabled &&
+                                            headwing_settings.option_dielect_func == 3 &&
+                                            is_gamma_point(q);
         matrix_m<std::complex<double>> sqrtveig_blacs;
         int n_nonsingular_headwing = 0;
         if (replace_gamma_headwing)
         {
             if (df_headwing == nullptr)
-                throw LIBRPA_RUNTIME_ERROR("RPA head/wing correction requested without headwing data");
+                throw LIBRPA_RUNTIME_ERROR(
+                    "RPA head/wing correction requested without headwing data");
             size_t n_singular = 0;
             vec<double> coul_eigenvalues(n_abf);
             sqrtveig_blacs = LaConnector::power_hemat_la_real(
-                coul_block, desc_nabf_nabf_opt, coul_eigen_block, desc_nabf_nabf_opt,
-                n_singular, coul_eigenvalues.c, 0.5,
-                headwing_settings.sqrt_coulomb_threshold);
+                coul_block, desc_nabf_nabf_opt, coul_eigen_block, desc_nabf_nabf_opt, n_singular,
+                coul_eigenvalues.c, 0.5, headwing_settings.sqrt_coulomb_threshold);
             n_nonsingular_headwing = n_abf - as_int(n_singular);
             if (headwing_settings.rpa_headwing_mode == "qavg")
                 df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf,
                                                n_nonsingular_headwing);
-            desc_headwing_response.init_square_blk(n_nonsingular_headwing, n_nonsingular_headwing, 0, 0);
+            desc_headwing_response.init_square_blk(n_nonsingular_headwing, n_nonsingular_headwing,
+                                                   0, 0);
             headwing_response_block =
                 init_local_mat<std::complex<double>>(desc_headwing_response, MAJOR::COL);
         }
@@ -1300,7 +1525,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
         double chi_arr_time = 0.0;
         double chi_comm_time = 0.0;
         double chi_2d_time = 0.0;
-        for (const auto &freq: chi0.tfg.get_freq_nodes())
+        for (const auto &freq : chi0.tfg.get_freq_nodes())
         {
             const auto ifreq = chi0.tfg.get_freq_index(freq);
             const double freq_weight = chi0.tfg.find_freq_weight(freq);
@@ -1308,7 +1533,9 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
             chi0_block.zero_out();
             {
                 double chi_begin_arr = omp_get_wtime();
-                std::map<int, std::map<std::pair<int, std::array<double, 3>>, Tensor<complex<double>>>> chi0_libri;
+                std::map<int,
+                         std::map<std::pair<int, std::array<double, 3>>, Tensor<complex<double>>>>
+                    chi0_libri;
                 chi0_libri.clear();
                 auto it_freq = chi0.get_chi0_q().find(freq);
                 if (it_freq != chi0.get_chi0_q().cend())
@@ -1317,11 +1544,11 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                     if (it_fq != it_freq->second.cend())
                     {
                         const auto &chi0_wq = it_fq->second;
-                        for (const auto &M_Nchi: chi0_wq)
+                        for (const auto &M_Nchi : chi0_wq)
                         {
                             const auto &M = M_Nchi.first;
                             const auto n_mu = chi0.atbasis_abf.get_atom_nb(M);
-                            for (const auto &N_chi: M_Nchi.second)
+                            for (const auto &N_chi : M_Nchi.second)
                             {
                                 const auto &N = N_chi.first;
                                 const auto n_nu = chi0.atbasis_abf.get_atom_nb(N);
@@ -1329,16 +1556,18 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                                 std::valarray<complex<double>> chi_va(chi.c, chi.size);
                                 auto pchi = std::make_shared<std::valarray<complex<double>>>();
                                 *pchi = chi_va;
-                                chi0_libri[M][{N,qa}] = Tensor<complex<double>>({n_mu, n_nu}, pchi);
+                                chi0_libri[M][{N, qa}] =
+                                    Tensor<complex<double>>({n_mu, n_nu}, pchi);
                             }
                         }
-                        if(comm_h.is_root())
+                        if (comm_h.is_root())
                         {
                             lib_printf("Begin to clean chi0 !!! \n");
                             // display_free_mem();
-                            lib_printf("chi0_freq_q size: %d,  freq: %f, q:( %f, %f, %f )\n",chi0_wq.size(),freq, q.x,q.y,q.z );
+                            lib_printf("chi0_freq_q size: %d,  freq: %f, q:( %f, %f, %f )\n",
+                                       chi0_wq.size(), freq, q.x, q.y, q.z);
                         }
-                        chi0.free_chi0_q(freq,q);
+                        chi0.free_chi0_q(freq, q);
                     }
                 }
 
@@ -1360,10 +1589,10 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 if (IJq_chi0.size() > 0)
                 {
                     collect_block_from_ALL_IJ_Tensor(temp_block, desc_nabf_nabf, chi0.atbasis_abf,
-                                                    qa, true, C_ONE, IJq_chi0, MAJOR::ROW);
-                    ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1, desc_nabf_nabf.desc,
-                                                  chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
-                                                  blacs_h.ictxt);
+                                                     qa, true, C_ONE, IJq_chi0, MAJOR::ROW);
+                    ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1,
+                                                  desc_nabf_nabf.desc, chi0_block.ptr(), 1, 1,
+                                                  desc_nabf_nabf_opt.desc, blacs_h.ictxt);
                 }
                 comm_h.barrier();
                 double chi_end_2d = omp_get_wtime();
@@ -1378,9 +1607,9 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
             }
 
             double pi_begin = omp_get_wtime();
-            const bool average_gamma_headwing =
-                replace_gamma_headwing && headwing_settings.option_dielect_func == 3 &&
-                headwing_settings.rpa_headwing_mode == "qavg";
+            const bool average_gamma_headwing = replace_gamma_headwing &&
+                                                headwing_settings.option_dielect_func == 3 &&
+                                                headwing_settings.rpa_headwing_mode == "qavg";
             const bool head_only_gamma =
                 replace_gamma_headwing && headwing_settings.rpa_headwing_mode == "head_only";
             complex<double> rpa_for_omega_q = 0.0;
@@ -1394,14 +1623,14 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 const double proj_left_begin = omp_get_wtime();
                 ScalapackConnector::pgemm_f(
                     'N', 'N', n_abf, n_nonsingular_headwing, n_abf, C_ONE, chi0_block.ptr(), 1, 1,
-                    desc_nabf_nabf_opt.desc, sqrtveig_blacs.ptr(), 1, 1, desc_nabf_nabf_opt.desc, C_ZERO,
-                    coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc);
+                    desc_nabf_nabf_opt.desc, sqrtveig_blacs.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
+                    C_ZERO, coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc);
                 const double proj_left_end = omp_get_wtime();
                 ScalapackConnector::pgemm_f(
                     'C', 'N', n_nonsingular_headwing, n_nonsingular_headwing, n_abf, C_ONE,
-                    sqrtveig_blacs.ptr(), 1, 1,
-                    desc_nabf_nabf_opt.desc, coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
-                    C_ZERO, headwing_response_block.ptr(), 1, 1, desc_headwing_response.desc);
+                    sqrtveig_blacs.ptr(), 1, 1, desc_nabf_nabf_opt.desc, coul_chi0_block.ptr(), 1,
+                    1, desc_nabf_nabf_opt.desc, C_ZERO, headwing_response_block.ptr(), 1, 1,
+                    desc_headwing_response.desc);
                 const double proj_right_end = omp_get_wtime();
                 headwing_proj_left_time = proj_left_end - proj_left_begin;
                 headwing_proj_right_time = proj_right_end - proj_left_end;
@@ -1418,16 +1647,16 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 }
                 else if (!average_gamma_headwing)
                 {
-                    throw std::logic_error("Unsupported RPA headwing mode: "
-                                           + headwing_settings.rpa_headwing_mode);
+                    throw std::logic_error("Unsupported RPA headwing mode: " +
+                                           headwing_settings.rpa_headwing_mode);
                 }
             }
             else
             {
-                ScalapackConnector::pgemm_f('N', 'N', n_abf, n_abf, n_abf, 1.0, coul_block.ptr(), 1, 1,
-                                            desc_nabf_nabf_opt.desc, chi0_block.ptr(), 1, 1,
-                                            desc_nabf_nabf_opt.desc, 0.0, coul_chi0_block.ptr(), 1, 1,
-                                            desc_nabf_nabf_opt.desc);
+                ScalapackConnector::pgemm_f('N', 'N', n_abf, n_abf, n_abf, 1.0, coul_block.ptr(), 1,
+                                            1, desc_nabf_nabf_opt.desc, chi0_block.ptr(), 1, 1,
+                                            desc_nabf_nabf_opt.desc, 0.0, coul_chi0_block.ptr(), 1,
+                                            1, desc_nabf_nabf_opt.desc);
             }
             // char fnp[100];
             // sprintf(fnp, "pi_ifreq_%d_iq_%d.mtx", ifreq, iq);
@@ -1469,30 +1698,40 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 int info;
                 complex<double> ln_det =
                     compute_pi_det_blacs_2d(coul_chi0_block, desc_nabf_nabf_opt, ipiv, info);
-                MPI_Allreduce(&trace_pi_loc,&trace_pi,1,MPI_DOUBLE_COMPLEX,MPI_SUM,comm_h.comm);
+                MPI_Allreduce(&trace_pi_loc, &trace_pi, 1, MPI_DOUBLE_COMPLEX, MPI_SUM,
+                              comm_h.comm);
                 delete[] ipiv;
                 rpa_for_omega_q = trace_pi + ln_det;
             }
             double det_end = omp_get_wtime();
             comm_h.barrier();
             double pi_freq_end = omp_get_wtime();
-            //double task_end = omp_get_wtime();
-            // if(comm_h.is_root())
-            //     lib_printf("| After det for freq:  %f,  q: ( %f, %f, %f)   TIME_LOCMAT: %f   TIME_DET: %f  TIME_CAL_Pi: %f, TIME_TRAN_LOC: %f\n",ifreq, q.x,q.y,q.z,task_mid-task_begin,task_end-task_mid,pi_time,loc_tran_time);
-            //para_mpi.mpi_barrier();
+            // double task_end = omp_get_wtime();
+            //  if(comm_h.is_root())
+            //      lib_printf("| After det for freq:  %f,  q: ( %f, %f, %f)   TIME_LOCMAT: %f
+            //      TIME_DET: %f  TIME_CAL_Pi: %f, TIME_TRAN_LOC: %f\n",ifreq,
+            //      q.x,q.y,q.z,task_mid-task_begin,task_end-task_mid,pi_time,loc_tran_time);
+            // para_mpi.mpi_barrier();
 
-            if(comm_h.myid==0)
+            if (comm_h.myid == 0)
             {
-                lib_printf("| TIME of DET-freq-q:  %f,  q: ( %f, %f, %f)  TOT: %f  CHI_arr: %f  CHI_comm: %f, CHI_2d: %f, Pi: %f, Det: %f\n",freq, q.x,q.y,q.z,pi_freq_end-pi_freq_begin, chi_arr_time,chi_comm_time,chi_2d_time,pi_end-pi_begin,det_end-pi_end);
+                lib_printf(
+                    "| TIME of DET-freq-q:  %f,  q: ( %f, %f, %f)  TOT: %f  CHI_arr: %f  CHI_comm: "
+                    "%f, CHI_2d: %f, Pi: %f, Det: %f\n",
+                    freq, q.x, q.y, q.z, pi_freq_end - pi_freq_begin, chi_arr_time, chi_comm_time,
+                    chi_2d_time, pi_end - pi_begin, det_end - pi_end);
                 if (replace_gamma_headwing)
                 {
-                    lib_printf("| TIME of HW-proj-freq-q: %f, q: ( %f, %f, %f)  left_chi0U: %f  right_Uchi0U: %f  trace_log_or_avg: %f\n",
-                               freq, q.x, q.y, q.z, headwing_proj_left_time,
-                               headwing_proj_right_time, headwing_trace_log_time);
+                    lib_printf(
+                        "| TIME of HW-proj-freq-q: %f, q: ( %f, %f, %f)  left_chi0U: %f  "
+                        "right_Uchi0U: %f  trace_log_or_avg: %f\n",
+                        freq, q.x, q.y, q.z, headwing_proj_left_time, headwing_proj_right_time,
+                        headwing_trace_log_time);
                 }
-                //cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "      lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
+                // cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "
+                // lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
                 const auto qweight = chi0.q_weight(q);
-                cRPA_q[q] += rpa_for_omega_q * freq_weight * qweight / TWO_PI;//!check
+                cRPA_q[q] += rpa_for_omega_q * freq_weight * qweight / TWO_PI;  //! check
                 tot_RPA_energy += rpa_for_omega_q * freq_weight * qweight / TWO_PI;
             }
         }
@@ -1500,7 +1739,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
 #else
     throw std::logic_error("need compilation with LibRI");
 #endif
-    if(comm_h.myid==0)
+    if (comm_h.myid == 0)
     {
         for (auto &q_crpa : cRPA_q)
         {
@@ -1518,14 +1757,15 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
     return corr;
 }
 
-double compute_pi_det_blacs_2d_gamma_only(matrix_m<double> &loc_piT, const ArrayDesc &arrdesc_pi, int *ipiv, int &info)
+double compute_pi_det_blacs_2d_gamma_only(matrix_m<double> &loc_piT, const ArrayDesc &arrdesc_pi,
+                                          int *ipiv, int &info)
 {
     const int range_all = arrdesc_pi.m();
 
     double det_begin = omp_get_wtime();
 
-    ScalapackConnector::pgetrf_f(range_all, range_all, loc_piT.ptr(), 1, 1, arrdesc_pi.desc,
-                                 ipiv, info);
+    ScalapackConnector::pgetrf_f(range_all, range_all, loc_piT.ptr(), 1, 1, arrdesc_pi.desc, ipiv,
+                                 info);
     double trf_end = omp_get_wtime();
 
     double ln_det_loc = 0.0;
@@ -1551,12 +1791,13 @@ double compute_pi_det_blacs_2d_gamma_only(matrix_m<double> &loc_piT, const Array
     }
     double ln_end = omp_get_wtime();
 
-    MPI_Allreduce(&ln_det_loc,&ln_det_all,1,MPI_DOUBLE,MPI_SUM, arrdesc_pi.comm());
+    MPI_Allreduce(&ln_det_loc, &ln_det_all, 1, MPI_DOUBLE, MPI_SUM, arrdesc_pi.comm());
     double det_end = omp_get_wtime();
     return ln_det_all;
 }
 
-complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_pi, int *ipiv, int &info)
+complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_pi, int *ipiv,
+                                        int &info)
 {
     int one = 1;
     const int range_all = arrdesc_pi.m();
@@ -1621,38 +1862,38 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
         }
     }
     double ln_end = omp_get_wtime();
-//     ComplexMatrix det_mm(loc_piT.nr(),loc_piT.nc());
-//     for(int i=0;i!=loc_piT.nr();i++)
-//         for(int j=0;j!=loc_piT.nc();j++)
-//             det_mm(i,j)=loc_piT(i,j);
-//    // sort(det_dig.rbegin(),det_dig.rend());
-//     ComplexMatrix det_dig_mm(det_dig.size(),4);
-//     for(int i=0;i!=det_dig.size();i++)
-//     {
-//         det_dig_mm(i,0) =det_dig_r[i];
-//         det_dig_mm(i,1) =det_dig_c[i];
-//         det_dig_mm(i,2)=det_dig[i];
-//         det_dig_mm(i,3)=ln_det_dig[i];
-//     }
-//     char fn[100];
-//     sprintf(fn, "det_dig_myid_%d.mtx", comm_h.myid);
-//     print_complex_matrix_file("det_dig_loc", det_dig_mm, fn, false);
+    //     ComplexMatrix det_mm(loc_piT.nr(),loc_piT.nc());
+    //     for(int i=0;i!=loc_piT.nr();i++)
+    //         for(int j=0;j!=loc_piT.nc();j++)
+    //             det_mm(i,j)=loc_piT(i,j);
+    //    // sort(det_dig.rbegin(),det_dig.rend());
+    //     ComplexMatrix det_dig_mm(det_dig.size(),4);
+    //     for(int i=0;i!=det_dig.size();i++)
+    //     {
+    //         det_dig_mm(i,0) =det_dig_r[i];
+    //         det_dig_mm(i,1) =det_dig_c[i];
+    //         det_dig_mm(i,2)=det_dig[i];
+    //         det_dig_mm(i,3)=ln_det_dig[i];
+    //     }
+    //     char fn[100];
+    //     sprintf(fn, "det_dig_myid_%d.mtx", comm_h.myid);
+    //     print_complex_matrix_file("det_dig_loc", det_dig_mm, fn, false);
 
-//     sprintf(fn, "det_mat_myid_%d.mtx", comm_h.myid);
-//     print_complex_matrix_file("det_mat_loc", det_mm, fn, false);
+    //     sprintf(fn, "det_mat_myid_%d.mtx", comm_h.myid);
+    //     print_complex_matrix_file("det_mat_loc", det_mm, fn, false);
 
-
-    MPI_Allreduce(&ln_det_loc,&ln_det_all,1,MPI_DOUBLE_COMPLEX,MPI_SUM, arrdesc_pi.comm());
+    MPI_Allreduce(&ln_det_loc, &ln_det_all, 1, MPI_DOUBLE_COMPLEX, MPI_SUM, arrdesc_pi.comm());
     double det_end = omp_get_wtime();
     // if(comm_h.myid == 0)
-    //     lib_printf("    | Det time   trf: %f   ln: %f   allreduce: %f\n",trf_end-det_begin,ln_end-trf_end, det_end-ln_end);
-    //MPI_Allreduce(&det_loc,&det_glo,1,MPI_DOUBLE_COMPLEX,MPI_PROD,comm_h.comm);
-    //ln_det_all=std::log(det_glo);
+    //     lib_printf("    | Det time   trf: %f   ln: %f   allreduce:
+    //     %f\n",trf_end-det_begin,ln_end-trf_end, det_end-ln_end);
+    // MPI_Allreduce(&det_loc,&det_glo,1,MPI_DOUBLE_COMPLEX,MPI_PROD,comm_h.comm);
+    // ln_det_all=std::log(det_glo);
     return ln_det_all;
 }
 
-cplxdb compute_rpa_response_trace_logdet_blacs_2d(
-    const Matz &response, const ArrayDesc &response_desc)
+cplxdb compute_rpa_response_trace_logdet_blacs_2d(const Matz &response,
+                                                  const ArrayDesc &response_desc)
 {
     cplxdb trace_loc(0.0, 0.0);
     cplxdb trace(0.0, 0.0);
@@ -1662,8 +1903,7 @@ cplxdb compute_rpa_response_trace_logdet_blacs_2d(
         const int jlo = response_desc.indx_g2l_c(i);
         if (ilo >= 0 && jlo >= 0) trace_loc += response(ilo, jlo);
     }
-    MPI_Allreduce(&trace_loc, &trace, 1, MPI_DOUBLE_COMPLEX, MPI_SUM,
-                  response_desc.comm());
+    MPI_Allreduce(&trace_loc, &trace, 1, MPI_DOUBLE_COMPLEX, MPI_SUM, response_desc.comm());
 
     auto identity_minus_response = response.copy();
     identity_minus_response *= -1.0;
@@ -1676,12 +1916,13 @@ cplxdb compute_rpa_response_trace_logdet_blacs_2d(
 
     int info = 0;
     std::vector<int> ipiv(std::max(1, response_desc.m_loc() * 10));
-    const cplxdb ln_det = compute_pi_det_blacs_2d(
-        identity_minus_response, response_desc, ipiv.data(), info);
+    const cplxdb ln_det =
+        compute_pi_det_blacs_2d(identity_minus_response, response_desc, ipiv.data(), info);
     return trace + ln_det;
 }
 
-complex<double> compute_pi_det_blacs(ComplexMatrix &loc_piT, const ArrayDesc &arrdesc_pi, int *ipiv, int &info)
+complex<double> compute_pi_det_blacs(ComplexMatrix &loc_piT, const ArrayDesc &arrdesc_pi, int *ipiv,
+                                     int &info)
 {
     // int range_all = atom_mu_part_range[natom-1]+atom_mu[natom-1];
     // int desc_pi[9];
@@ -1725,13 +1966,14 @@ complex<double> compute_pi_det_blacs(ComplexMatrix &loc_piT, const ArrayDesc &ar
 
     ScalapackConnector::transpose_desc(DESCPI_T, arrdesc_pi.desc);
 
-   // para_mpi.mpi_barrier();
-    //printf("   before LU Myid: %d        Available DOS memory = %ld bytes\n",comm_h.myid, memavail());
-    //printf("   before LU myid: %d  range_all: %d,  loc_mat.size: %d\n",comm_h.myid,range_all,loc_piT.size);
-    pzgetrf_(&range_all,&range_all,loc_piT.c,&one,&one,DESCPI_T,ipiv, &info);
-    //printf("   after LU myid: %d\n",comm_h.myid);
-    std::complex<double> ln_det_loc(0.0,0.0);
-    std::complex<double> ln_det_all(0.0,0.0);
+    // para_mpi.mpi_barrier();
+    // printf("   before LU Myid: %d        Available DOS memory = %ld bytes\n",comm_h.myid,
+    // memavail()); printf("   before LU myid: %d  range_all: %d,  loc_mat.size:
+    // %d\n",comm_h.myid,range_all,loc_piT.size);
+    pzgetrf_(&range_all, &range_all, loc_piT.c, &one, &one, DESCPI_T, ipiv, &info);
+    // printf("   after LU myid: %d\n",comm_h.myid);
+    std::complex<double> ln_det_loc(0.0, 0.0);
+    std::complex<double> ln_det_all(0.0, 0.0);
     for (int ig = 0; ig != range_all; ig++)
     {
         // int locr=para_mpi.localIndex(ig,row_nblk,para_mpi.nprow,para_mpi.myprow);
@@ -1750,17 +1992,16 @@ complex<double> compute_pi_det_blacs(ComplexMatrix &loc_piT, const ArrayDesc &ar
                 ln_det_loc += std::log(-loc_piT(locc, locr));
         }
     }
-    MPI_Allreduce(&ln_det_loc,&ln_det_all,1,MPI_DOUBLE_COMPLEX,MPI_SUM,arrdesc_pi.comm());
+    MPI_Allreduce(&ln_det_loc, &ln_det_all, 1, MPI_DOUBLE_COMPLEX, MPI_SUM, arrdesc_pi.comm());
     return ln_det_all;
 }
-
 
 CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_mat_t &coulmat,
                                          const vector<atpair_t> &local_atpair,
                                          const BlacsCtxtHandler &blacs_h)
 {
-    using librpa_int::global::ofs_myid;
     using librpa_int::global::lib_printf;
+    using librpa_int::global::ofs_myid;
 
     CorrEnergy corr;
     const auto &comm_h = chi0.comm_h;
@@ -1820,9 +2061,8 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
     // set<int> all_atom_set;
     // for(int I=0;I!=natom;I++)
     //     all_atom_set.insert(I);
-    // const auto IJq_coul = Communicate_Tensors_Map_Judge::comm_map2_first(comm_h.comm, vq_libri, all_atom_set, loc_atp_IJ);
-    // atpair_k_cplx_mat_t Vq_loc;
-    // double vq_end_comm = omp_get_wtime();
+    // const auto IJq_coul = Communicate_Tensors_Map_Judge::comm_map2_first(comm_h.comm, vq_libri,
+    // all_atom_set, loc_atp_IJ); atpair_k_cplx_mat_t Vq_loc; double vq_end_comm = omp_get_wtime();
     // for(auto Ip:IJq_coul)
     // {
     //     auto I=Ip.first;
@@ -1844,7 +2084,8 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
     // double vq_end_t2m = omp_get_wtime();
     // comm_h.barrier();
     // if(comm_h.is_root())
-    //     lib_printf("| Vq_time %f, TIME_m2t: %f   TIME_comm: %f  TIME_t2m: %f\n",vq_end_t2m-vq_begin_m2t,vq_end_m2t-vq_begin_m2t,vq_end_comm-vq_end_m2t,vq_end_t2m-vq_end_comm);
+    //     lib_printf("| Vq_time %f, TIME_m2t: %f   TIME_comm: %f  TIME_t2m:
+    //     %f\n",vq_end_t2m-vq_begin_m2t,vq_end_m2t-vq_begin_m2t,vq_end_comm-vq_end_m2t,vq_end_t2m-vq_end_comm);
     map<double, map<Vector3_Order<double>, ComplexMatrix>> pi_freq_q;
     complex<double> tot_RPA_energy(0.0, 0.0);
     map<Vector3_Order<double>, complex<double>> cRPA_q;
@@ -1869,12 +2110,13 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
                 double Mu_begin = omp_get_wtime();
                 // lib_printf(" |process %d,  Mu:  %d\n",comm_h.myid,Mu);
                 const int n_mu = chi0.atbasis_abf[Mu];
-                atom_mapping<ComplexMatrix>::pair_t_old Vq_row = gather_vq_row_q(chi0.atbasis_abf, comm_h, Mu, coulmat, q);
+                atom_mapping<ComplexMatrix>::pair_t_old Vq_row =
+                    gather_vq_row_q(chi0.atbasis_abf, comm_h, Mu, coulmat, q);
                 double Mu_after_vq = omp_get_wtime();
                 // atom_mapping<ComplexMatrix>::pair_t_old Vq_row;
-                // const auto IJq_coul = Communicate_Tensors_Map_Judge::comm_map2_first(comm_h.comm, vq_libri, {Mu}, loc_atp_atoms);
-                // double Mu_vq_comm = omp_get_wtime();
-                // for(auto Ip:IJq_coul)
+                // const auto IJq_coul = Communicate_Tensors_Map_Judge::comm_map2_first(comm_h.comm,
+                // vq_libri, {Mu}, loc_atp_atoms); double Mu_vq_comm = omp_get_wtime(); for(auto
+                // Ip:IJq_coul)
                 // {
                 //     auto I=Ip.first;
                 //     auto n_mu=atom_mu[I];
@@ -1889,19 +2131,21 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
                 //     }
                 // }
                 // double Mu_after_vq=omp_get_wtime();
-                //printf("   |process %d, Mu: %d  vq_row.size: %d\n",para_mpi.get_myid(),Mu,Vq_row[Mu].size());
-                //ComplexMatrix loc_pi_row=compute_Pi_freq_q_row(q,MuNuchi0,Vq_loc,Mu,q);
-                ComplexMatrix loc_pi_row = compute_Pi_freq_q_row(chi0.atbasis_abf, q, MuNuchi0, Vq_row, local_atpair, Mu);
-                //printf("   |process %d,   compute_pi\n",para_mpi.get_myid());
+                // printf("   |process %d, Mu: %d  vq_row.size:
+                // %d\n",para_mpi.get_myid(),Mu,Vq_row[Mu].size()); ComplexMatrix
+                // loc_pi_row=compute_Pi_freq_q_row(q,MuNuchi0,Vq_loc,Mu,q);
+                ComplexMatrix loc_pi_row =
+                    compute_Pi_freq_q_row(chi0.atbasis_abf, q, MuNuchi0, Vq_row, local_atpair, Mu);
+                // printf("   |process %d,   compute_pi\n",para_mpi.get_myid());
                 ComplexMatrix glo_pi_row(n_mu, chi0.atbasis_abf.nb_total);
                 comm_h.barrier();
-                librpa_int::allreduce_ComplexMatrix(loc_pi_row,glo_pi_row,comm_h.comm);
-                double Mu_after_pi_loc=omp_get_wtime();
-                //cout<<"  glo_pi_rowT nr,nc: "<<glo_pi_row.nr<<" "<<glo_pi_row.nc<<endl;
+                librpa_int::allreduce_ComplexMatrix(loc_pi_row, glo_pi_row, comm_h.comm);
+                double Mu_after_pi_loc = omp_get_wtime();
+                // cout<<"  glo_pi_rowT nr,nc: "<<glo_pi_row.nr<<" "<<glo_pi_row.nc<<endl;
 
                 for (int i_mu = 0; i_mu != n_mu; i_mu++)
                     trace_pi += glo_pi_row(i_mu, part_range[Mu] + i_mu);
-                //select glo_pi_rowT to pi_blacs
+                // select glo_pi_rowT to pi_blacs
                 for (int i = 0; i != loc_row; i++)
                 {
                     // int global_row =
@@ -1917,14 +2161,21 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
                             int global_col = arrdesc_pi.indx_l2g_c(j);
                             int nu_blacs, J_blacs;
                             chi0.atbasis_abf.get_local_index(global_col, J_blacs, nu_blacs);
-                            //cout<<" Mu: "<<Mu<<"  i,j: "<<i<<"  "<<j<<"    glo_row,col: "<<global_row<<"  "<<global_col<<"  J:"<<J_blacs<< "  index i,j: "<<atom_mu_part_range[J_blacs] + mu_blacs<<" "<<nu_blacs<<endl;
-                            if( global_col == global_row)
+                            // cout<<" Mu: "<<Mu<<"  i,j: "<<i<<"  "<<j<<"    glo_row,col:
+                            // "<<global_row<<"  "<<global_col<<"  J:"<<J_blacs<< "  index i,j:
+                            // "<<atom_mu_part_range[J_blacs] + mu_blacs<<" "<<nu_blacs<<endl;
+                            if (global_col == global_row)
                             {
-                                loc_piT(i,j) = complex<double>(1.0,0.0) - glo_pi_row(mu_blacs, chi0.atbasis_abf.get_part_range()[J_blacs]+nu_blacs);
+                                loc_piT(i, j) =
+                                    complex<double>(1.0, 0.0) -
+                                    glo_pi_row(
+                                        mu_blacs,
+                                        chi0.atbasis_abf.get_part_range()[J_blacs] + nu_blacs);
                             }
                             else
                             {
-                                loc_piT(i,j) = -glo_pi_row(mu_blacs, part_range[J_blacs]+nu_blacs);
+                                loc_piT(i, j) =
+                                    -glo_pi_row(mu_blacs, part_range[J_blacs] + nu_blacs);
                             }
                         }
                 }
@@ -1936,24 +2187,28 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
             // if(freq == chi0.tfg.get_freq_nodes()[0] && comm_h.is_root())
             //     print_complex_matrix(" loc_piT",loc_piT);
             double task_mid = omp_get_wtime();
-            //printf("|process  %d, before det\n",comm_h.myid);
-            std::complex<double> ln_det=compute_pi_det_blacs_2d(loc_piT, arrdesc_pi, ipiv, info);
+            // printf("|process  %d, before det\n",comm_h.myid);
+            std::complex<double> ln_det = compute_pi_det_blacs_2d(loc_piT, arrdesc_pi, ipiv, info);
             double task_end = omp_get_wtime();
-            if(comm_h.is_root())
-                lib_printf("| After det for freq:  %f,  q: ( %f, %f, %f)   TIME_Vq_COMM: %f   TIME_DET: %f  TIME_CAL_Pi: %f, TIME_TRAN_LOC: %f\n",freq, q.x,q.y,q.z,vq_time,task_end-task_mid,pi_time,loc_tran_time);
-            //para_mpi.mpi_barrier();
-            if(comm_h.myid==0)
+            if (comm_h.is_root())
+                lib_printf(
+                    "| After det for freq:  %f,  q: ( %f, %f, %f)   TIME_Vq_COMM: %f   TIME_DET: "
+                    "%f  TIME_CAL_Pi: %f, TIME_TRAN_LOC: %f\n",
+                    freq, q.x, q.y, q.z, vq_time, task_end - task_mid, pi_time, loc_tran_time);
+            // para_mpi.mpi_barrier();
+            if (comm_h.myid == 0)
             {
                 std::complex<double> rpa_for_omega_q = trace_pi + ln_det;
                 const auto kweight = chi0.q_weight(q);
-                //cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "      lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
-                cRPA_q[q] += rpa_for_omega_q * freq_weight * kweight / TWO_PI;//!check
+                // cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "
+                // lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
+                cRPA_q[q] += rpa_for_omega_q * freq_weight * kweight / TWO_PI;  //! check
                 tot_RPA_energy += rpa_for_omega_q * freq_weight * kweight / TWO_PI;
             }
         }
     }
 
-    if(comm_h.myid==0)
+    if (comm_h.myid == 0)
     {
         for (auto &q_crpa : cRPA_q)
         {
@@ -1969,26 +2224,27 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
     return corr;
 }
 
-CorrEnergy compute_RPA_correlation(LibrpaParallelRouting routing, const Chi0 &chi0, const atpair_k_cplx_mat_t &coulmat)
+CorrEnergy compute_RPA_correlation(LibrpaParallelRouting routing, const Chi0 &chi0,
+                                   const atpair_k_cplx_mat_t &coulmat)
 {
-    using global::ofs_myid;
     using global::lib_printf;
+    using global::ofs_myid;
 
     CorrEnergy corr;
     const auto &comm_h = chi0.comm_h;
-    if (comm_h.myid == 0)
-        lib_printf("Calculating EcRPA without BLACS/ScaLAPACK\n");
+    if (comm_h.myid == 0) lib_printf("Calculating EcRPA without BLACS/ScaLAPACK\n");
     // lib_printf("Begin cal cRPA , pid:  %d\n", comm_h.myid);
-    const auto & mf = chi0.mf;
+    const auto &mf = chi0.mf;
 
     // freq, q
-    map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>> pi_freq_q_Mu_Nu;
+    map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
+        pi_freq_q_Mu_Nu;
     if (routing == LIBRPA_ROUTING_ATOMPAIR || routing == LIBRPA_ROUTING_LIBRI)
         pi_freq_q_Mu_Nu = compute_Pi_q_MPI(chi0, coulmat);
     else
         pi_freq_q_Mu_Nu = compute_Pi_q(chi0, coulmat);
     lib_printf("Finish Pi freq on Proc %4d, size %zu\n", comm_h.myid, pi_freq_q_Mu_Nu.size());
-    //comm_h.barrier();
+    // comm_h.barrier();
 
     int range_all = chi0.atbasis_abf.nb_total;
 
@@ -2126,7 +2382,8 @@ CorrEnergy compute_RPA_correlation(LibrpaParallelRouting routing, const Chi0 &ch
                 // cout << endl;
                 rpa_for_omega_q = ln_det + trace_pi;
                 const auto kweight = chi0.q_weight(q);
-                // cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "      lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
+                // cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "
+                // lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
                 cRPA_q[q] += rpa_for_omega_q * freq_weight * kweight / TWO_PI;
                 tot_RPA_energy += rpa_for_omega_q * freq_weight * kweight / TWO_PI;
             }
@@ -2136,8 +2393,8 @@ CorrEnergy compute_RPA_correlation(LibrpaParallelRouting routing, const Chi0 &ch
         map<Vector3_Order<double>, complex<double>> global_cRPA_q;
         for (const auto &q : chi0.active_qpoints())
         {
-            MPI_Reduce(&cRPA_q[q], &global_cRPA_q[q], 1,
-                       MPI_DOUBLE_COMPLEX, MPI_SUM, 0, comm_h.comm);
+            MPI_Reduce(&cRPA_q[q], &global_cRPA_q[q], 1, MPI_DOUBLE_COMPLEX, MPI_SUM, 0,
+                       comm_h.comm);
         }
 
         for (auto &q_crpa : global_cRPA_q)
@@ -2145,7 +2402,8 @@ CorrEnergy compute_RPA_correlation(LibrpaParallelRouting routing, const Chi0 &ch
             corr.qcontrib[q_crpa.first] = q_crpa.second;
         }
         complex<double> gather_tot_RPA_energy(0.0, 0.0);
-        MPI_Reduce(&tot_RPA_energy,&gather_tot_RPA_energy,1,MPI_DOUBLE_COMPLEX,MPI_SUM,0,comm_h.comm);
+        MPI_Reduce(&tot_RPA_energy, &gather_tot_RPA_energy, 1, MPI_DOUBLE_COMPLEX, MPI_SUM, 0,
+                   comm_h.comm);
         corr.value = gather_tot_RPA_energy;
     }
     corr.etype = CorrEnergy::type::RPA;
@@ -2162,12 +2420,12 @@ CorrEnergy compute_MP2_correlation(const Chi0 &chi0, const atpair_k_cplx_mat_t &
 map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>> compute_Pi_q(
     const Chi0 &chi0, const atpair_k_cplx_mat_t &coulmat)
 {
-    using librpa_int::global::ofs_myid;
     using librpa_int::global::lib_printf;
+    using librpa_int::global::ofs_myid;
 
     map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>> pi;
     lib_printf("Begin compute_Pi_q , pid:  %d\n", chi0.comm_h.myid);
-    for (auto const & freq_qJQchi0: chi0.get_chi0_q())
+    for (auto const &freq_qJQchi0 : chi0.get_chi0_q())
     {
         const double freq = freq_qJQchi0.first;
         for (auto &q_JQchi0 : freq_qJQchi0.second)
@@ -2184,7 +2442,7 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
                     // auto &chi0_mat = Qchi0.second;
                     for (atom_t I = 0; I != chi0.atbasis_abf.n_atoms; I++)
                     {
-                        //const size_t I = I_p.first;
+                        // const size_t I = I_p.first;
                         const size_t I_mu = chi0.atbasis_abf[I];
                         pi[freq][q][I][Q].create(I_mu, Q_mu);
                         if (J != Q) pi[freq][q][I][J].create(I_mu, J_mu);
@@ -2194,7 +2452,8 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
             // if(freq==chi0.tfg.get_freq_nodes()[0])
             //     for(auto &Ip:pi[freq][q])
             //         for(auto &Jp:Ip.second)
-            //             lib_printf("  |process  %d, pi atpair: %d, %d \n",comm_h.myid,Ip.first,Jp.first);
+            //             lib_printf("  |process  %d, pi atpair: %d, %d
+            //             \n",comm_h.myid,Ip.first,Jp.first);
         }
     }
 
@@ -2219,15 +2478,18 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
                     auto &chi0_mat = Q_p.second;
                     for (atom_t I = 0; I != chi0.atbasis_abf.n_atoms; I++)
                     {
-                        //const size_t I = I_p.first;
-                        //printf("cal_pi  pid: %d , IJQ:  %d  %d  %d\n", comm_h.myid, I, J, Q);
-                        //  cout<<"         pi_IQ: "<<pi_k.at(freq).at(ik_vec).at(I).at(Q)(0,0)<<"   pi_IJ: "<<pi_k.at(freq).at(ik_vec).at(I).at(J)(0,0);
+                        // const size_t I = I_p.first;
+                        // printf("cal_pi  pid: %d , IJQ:  %d  %d  %d\n", comm_h.myid, I, J, Q);
+                        //   cout<<"         pi_IQ: "<<pi_k.at(freq).at(ik_vec).at(I).at(Q)(0,0)<<"
+                        //   pi_IJ: "<<pi_k.at(freq).at(ik_vec).at(I).at(J)(0,0);
                         if (I <= J)
                         {
                             // if (freq == chi0.tfg.get_freq_nodes()[0])
-                            //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d \n", comm_h.myid, I, J, Q,1);
+                            //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d \n",
+                            //     comm_h.myid, I, J, Q,1);
                             //      << "  Vq: " << (*Vq.at(I).at(J).at(ik_vec))(0, 0) << endl;
-                            pi.at(freq).at(ik_vec).at(I).at(Q) += (*coulmat.at(I).at(J).at(ik_vec)) * chi0_mat;
+                            pi.at(freq).at(ik_vec).at(I).at(Q) +=
+                                (*coulmat.at(I).at(J).at(ik_vec)) * chi0_mat;
                             // if (freq == chi0.tfg.get_freq_nodes()[0])
                             // {
                             //     std:stringstream sm;
@@ -2245,8 +2507,10 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
                         else
                         {
                             // if (freq == chi0.tfg.get_freq_nodes()[0])
-                            //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d \n", comm_h.myid, I, J, Q,2);
-                            //      << "  Vq: " << transpose(*Vq.at(J).at(I).at(ik_vec), 1)(0, 0) << endl;
+                            //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d \n",
+                            //     comm_h.myid, I, J, Q,2);
+                            //      << "  Vq: " << transpose(*Vq.at(J).at(I).at(ik_vec), 1)(0, 0) <<
+                            //      endl;
                             pi.at(freq).at(ik_vec).at(I).at(Q) +=
                                 transpose(*coulmat.at(J).at(I).at(ik_vec), 1) * chi0_mat;
                         }
@@ -2257,7 +2521,8 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
                             if (I <= Q)
                             {
                                 // if (freq == chi0.tfg.get_freq_nodes()[0])
-                                //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d \n", comm_h.myid, I, J, Q,3);
+                                //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d
+                                //     \n", comm_h.myid, I, J, Q,3);
                                 //      << "  Vq: " << (*Vq.at(I).at(Q).at(ik_vec))(0, 0) << endl;
                                 pi.at(freq).at(ik_vec).at(I).at(J) +=
                                     (*coulmat.at(I).at(Q).at(ik_vec)) * chi0_QJ;
@@ -2265,8 +2530,10 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
                             else
                             {
                                 // if (freq == chi0.tfg.get_freq_nodes()[0])
-                                //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d \n", comm_h.myid, I, J, Q,4);
-                                //      << "  Vq: " << transpose(*Vq.at(J).at(I).at(ik_vec), 1)(0, 0) << endl;
+                                //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d
+                                //     \n", comm_h.myid, I, J, Q,4);
+                                //      << "  Vq: " << transpose(*Vq.at(J).at(I).at(ik_vec), 1)(0,
+                                //      0) << endl;
                                 pi.at(freq).at(ik_vec).at(I).at(J) +=
                                     transpose(*coulmat.at(Q).at(I).at(ik_vec), 1) * chi0_QJ;
                             }
@@ -2287,13 +2554,13 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
 map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>> compute_Pi_q_MPI(
     const Chi0 &chi0, const atpair_k_cplx_mat_t &coulmat)
 {
-    using librpa_int::global::ofs_myid;
     using librpa_int::global::lib_printf;
+    using librpa_int::global::ofs_myid;
 
     map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>> pi;
     lib_printf("Begin compute_Pi_q_MPI , pid:  %d\n", chi0.comm_h.myid);
     const auto &abf = chi0.atbasis_abf;
-    for (auto const & freq_qJQchi0: chi0.get_chi0_q())
+    for (auto const &freq_qJQchi0 : chi0.get_chi0_q())
     {
         const double freq = freq_qJQchi0.first;
         for (auto &q_JQchi0 : freq_qJQchi0.second)
@@ -2310,7 +2577,7 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
                     // auto &chi0_mat = Qchi0.second;
                     for (int I = 0; I != as_int(chi0.atbasis_abf.n_atoms); I++)
                     {
-                        //const size_t I = I_p.first;
+                        // const size_t I = I_p.first;
                         const size_t I_mu = abf[I];
                         pi[freq][q][I][Q].create(I_mu, Q_mu);
                         if (J != Q) pi[freq][q][I][J].create(I_mu, J_mu);
@@ -2320,7 +2587,8 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
             // if(freq==chi0.tfg.get_freq_nodes()[0])
             //     for(auto &Ip:pi[freq][q])
             //         for(auto &Jp:Ip.second)
-            //             lib_printf("  |process  %d, pi atpair: %d, %d \n",comm_h.myid,Ip.first,Jp.first);
+            //             lib_printf("  |process  %d, pi atpair: %d, %d
+            //             \n",comm_h.myid,Ip.first,Jp.first);
         }
     }
 
@@ -2329,20 +2597,21 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
     // ss<<"out_pi_rank_"<<comm_h.myid<<".txt";
     // fp.open(ss.str());
     const auto &comm_h = chi0.comm_h;
-    #ifdef OPEN_TEST_FOR_LU_DECOMPOSITION
-    // printf("success before irk_weight, pid: %d\n", mpi_comm_global_h.myid);
-    #endif
+#ifdef OPEN_TEST_FOR_LU_DECOMPOSITION
+// printf("success before irk_weight, pid: %d\n", mpi_comm_global_h.myid);
+#endif
     for (const auto &ik_vec : chi0.active_qpoints())
     {
         for (int I = 0; I != as_int(chi0.atbasis_abf.n_atoms); I++)
         {
-            #ifdef OPEN_TEST_FOR_LU_DECOMPOSITION
-            // printf("success before gather_vp_row_q irk_weight, pid: %d\n", mpi_comm_global_h.myid);
-            #endif
-            atom_mapping<ComplexMatrix>::pair_t_old Vq_row = gather_vq_row_q(chi0.atbasis_abf, comm_h, I, coulmat, ik_vec);
-            #ifdef OPEN_TEST_FOR_LU_DECOMPOSITION
-            // printf("success after gather_vp_row_q irk_weight, pid: %d\n", mpi_comm_global_h.myid);
-            #endif
+#ifdef OPEN_TEST_FOR_LU_DECOMPOSITION
+// printf("success before gather_vp_row_q irk_weight, pid: %d\n", mpi_comm_global_h.myid);
+#endif
+            atom_mapping<ComplexMatrix>::pair_t_old Vq_row =
+                gather_vq_row_q(chi0.atbasis_abf, comm_h, I, coulmat, ik_vec);
+#ifdef OPEN_TEST_FOR_LU_DECOMPOSITION
+// printf("success after gather_vp_row_q irk_weight, pid: %d\n", mpi_comm_global_h.myid);
+#endif
 
             for (auto &freq_p : chi0.get_chi0_q())
             {
@@ -2359,12 +2628,14 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
                         const size_t Q = Q_p.first;
                         auto &chi0_mat = Q_p.second;
 
-                        //const size_t I = I_p.first;
-                        //printf("cal_pi  pid: %d , IJQ:  %d  %d  %d\n", comm_h.myid, I, J, Q);
-                        //  cout<<"         pi_IQ: "<<pi_k.at(freq).at(ik_vec).at(I).at(Q)(0,0)<<"   pi_IJ: "<<pi_k.at(freq).at(ik_vec).at(I).at(J)(0,0);
+                        // const size_t I = I_p.first;
+                        // printf("cal_pi  pid: %d , IJQ:  %d  %d  %d\n", comm_h.myid, I, J, Q);
+                        //   cout<<"         pi_IQ: "<<pi_k.at(freq).at(ik_vec).at(I).at(Q)(0,0)<<"
+                        //   pi_IJ: "<<pi_k.at(freq).at(ik_vec).at(I).at(J)(0,0);
 
                         // if (freq == chi0.tfg.get_freq_nodes()[0])
-                        //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d \n", comm_h.myid, I, J, Q,1);
+                        //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d \n",
+                        //     comm_h.myid, I, J, Q,1);
                         //      << "  Vq: " << (*Vq.at(I).at(J).at(ik_vec))(0, 0) << endl;
                         pi.at(freq).at(ik_vec).at(I).at(Q) += Vq_row.at(I).at(J) * chi0_mat;
                         // if (freq == chi0.tfg.get_freq_nodes()[0])
@@ -2384,7 +2655,8 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
                         {
                             ComplexMatrix chi0_QJ = transpose(chi0_mat, 1);
                             // if (freq == chi0.tfg.get_freq_nodes()[0])
-                            //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d \n", comm_h.myid, I, J,Q,3);
+                            //     lib_printf("cal_pi  pid: %d , IJQ:  %d  %d  %d   type: %d \n",
+                            //     comm_h.myid, I, J,Q,3);
                             //      << "  Vq: " << (*Vq.at(I).at(Q).at(ik_vec))(0, 0) << endl;
                             pi.at(freq).at(ik_vec).at(I).at(J) += Vq_row.at(I).at(Q) * chi0_QJ;
                         }
@@ -2393,14 +2665,17 @@ map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
             }
         }
     }
-    //fp.close();
-    // print_complex_matrix(" first_pi_mat:",pi.at(chi0.tfg.get_freq_nodes()[0]).at({0,0,0}).at(0).at(0));
-    /* print_complex_matrix("  last_pi_mat:",pi.at(chi0.tfg.get_freq_nodes()[0]).at({0,0,0}).at(natom-1).at(natom-1)); */
+    // fp.close();
+    //  print_complex_matrix("
+    //  first_pi_mat:",pi.at(chi0.tfg.get_freq_nodes()[0]).at({0,0,0}).at(0).at(0));
+    /* print_complex_matrix("
+     * last_pi_mat:",pi.at(chi0.tfg.get_freq_nodes()[0]).at({0,0,0}).at(natom-1).at(natom-1)); */
     lib_printf("End compute_Pi_q_MPI , pid:  %d\n", chi0.comm_h.myid);
     return pi;
 }
 
-ComplexMatrix compute_Pi_freq_q_row(const AtomicBasis &atbasis_abf, const Vector3_Order<double> &ik_vec,
+ComplexMatrix compute_Pi_freq_q_row(const AtomicBasis &atbasis_abf,
+                                    const Vector3_Order<double> &ik_vec,
                                     const atom_mapping<ComplexMatrix>::pair_t_old &chi0_freq_q,
                                     const atom_mapping<ComplexMatrix>::pair_t_old &Vq_row,
                                     const vector<atpair_t> &local_atpair, const int &I)
@@ -2447,7 +2722,7 @@ ComplexMatrix compute_Pi_freq_q_row(const AtomicBasis &atbasis_abf, const Vector
     //         }
     //     }
     // }
-    //Pi_rowT
+    // Pi_rowT
     // ComplexMatrix pi_row(N_all_mu,atom_mu[I]);
     // complex<double> *pi_row_ptr=pi_row.c;
     // for(auto &Jp:pi)
@@ -2467,7 +2742,12 @@ ComplexMatrix compute_Pi_freq_q_row(const AtomicBasis &atbasis_abf, const Vector
     return pi_row;
 }
 
-ComplexMatrix compute_Pi_freq_q_row_ri(const AtomicBasis &atbasis_abf, const Vector3_Order<double> &ik_vec, const atom_mapping<ComplexMatrix>::pair_t_old &chi0_freq_q, const atpair_k_cplx_mat_t &Vq_loc, const vector<atpair_t> &local_atpair, const int &I, const Vector3_Order<double> &q)
+ComplexMatrix compute_Pi_freq_q_row_ri(const AtomicBasis &atbasis_abf,
+                                       const Vector3_Order<double> &ik_vec,
+                                       const atom_mapping<ComplexMatrix>::pair_t_old &chi0_freq_q,
+                                       const atpair_k_cplx_mat_t &Vq_loc,
+                                       const vector<atpair_t> &local_atpair, const int &I,
+                                       const Vector3_Order<double> &q)
 {
     map<size_t, ComplexMatrix> pi;
     // lib_printf("Begin cal_pi_k , pid:  %d\n", comm_h.myid);
@@ -2483,17 +2763,17 @@ ComplexMatrix compute_Pi_freq_q_row_ri(const AtomicBasis &atbasis_abf, const Vec
     {
         const size_t J = local_atpair[iap].first;
         const size_t Q = local_atpair[iap].second;
-        auto &chi0_mat= chi0_freq_q.at(J).at(Q);
-        //printf("| IN cal Pi process %d, I: %d  J: %d  Q: %d\n",comm_h.myid, I,J,Q );
-        auto tmp_pi_mat= *Vq_loc.at(I).at(J).at(q) * chi0_mat;
+        auto &chi0_mat = chi0_freq_q.at(J).at(Q);
+        // printf("| IN cal Pi process %d, I: %d  J: %d  Q: %d\n",comm_h.myid, I,J,Q );
+        auto tmp_pi_mat = *Vq_loc.at(I).at(J).at(q) * chi0_mat;
         ComplexMatrix chi0_QJ = transpose(chi0_mat, 1);
-        auto tmp_pi_mat2= *Vq_loc.at(I).at(Q).at(q) * chi0_QJ;
+        auto tmp_pi_mat2 = *Vq_loc.at(I).at(Q).at(q) * chi0_QJ;
         omp_set_lock(&pi_lock);
-        pi.at(Q)+=tmp_pi_mat;
-        if(J!=Q)
-            {
-                pi.at(J)+=tmp_pi_mat2;
-            }
+        pi.at(Q) += tmp_pi_mat;
+        if (J != Q)
+        {
+            pi.at(J) += tmp_pi_mat2;
+        }
         omp_unset_lock(&pi_lock);
     }
     omp_destroy_lock(&pi_lock);
@@ -2512,7 +2792,7 @@ ComplexMatrix compute_Pi_freq_q_row_ri(const AtomicBasis &atbasis_abf, const Vec
     //         }
     //     }
     // }
-    //Pi_rowT
+    // Pi_rowT
     // ComplexMatrix pi_row(N_all_mu,atom_mu[I]);
     // complex<double> *pi_row_ptr=pi_row.c;
     // for(auto &Jp:pi)
@@ -2532,7 +2812,10 @@ ComplexMatrix compute_Pi_freq_q_row_ri(const AtomicBasis &atbasis_abf, const Vec
     return pi_row;
 }
 
-atom_mapping<ComplexMatrix>::pair_t_old gather_vq_row_q(const AtomicBasis &atbasis_abf, const MpiCommHandler &comm_h, const int &I, const atpair_k_cplx_mat_t &coulmat, const Vector3_Order<double> &ik_vec)
+atom_mapping<ComplexMatrix>::pair_t_old gather_vq_row_q(const AtomicBasis &atbasis_abf,
+                                                        const MpiCommHandler &comm_h, const int &I,
+                                                        const atpair_k_cplx_mat_t &coulmat,
+                                                        const Vector3_Order<double> &ik_vec)
 {
     auto I_mu = atbasis_abf[I];
     const int natom = atbasis_abf.n_atoms;
@@ -2552,21 +2835,22 @@ atom_mapping<ComplexMatrix>::pair_t_old gather_vq_row_q(const AtomicBasis &atbas
         else
         {
             if (coulmat.count(J_tmp))
-                if (coulmat.at(J_tmp).count(I)) loc_vq = transpose(*coulmat.at(J_tmp).at(I).at(ik_vec), 1);
+                if (coulmat.at(J_tmp).count(I))
+                    loc_vq = transpose(*coulmat.at(J_tmp).at(I).at(ik_vec), 1);
         }
-        librpa_int::allreduce_ComplexMatrix(loc_vq,Vq_row[I][J_tmp], comm_h.comm);
+        librpa_int::allreduce_ComplexMatrix(loc_vq, Vq_row[I][J_tmp], comm_h.comm);
     }
     return Vq_row;
 }
 
-std::map<double, std::map<Vector3_Order<double>, Matz>>
-compute_Wc_freq_q(
-    Chi0 &chi0, const atpair_k_cplx_mat_t &coulmat_eps, atpair_k_cplx_mat_t &coulmat_wc, double sqrt_coulomb_threshold,
-    const vector<std::complex<double>> &epsmac_LF_imagfreq, bool debug, const char *output_dir)
+std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q(
+    Chi0 &chi0, const atpair_k_cplx_mat_t &coulmat_eps, atpair_k_cplx_mat_t &coulmat_wc,
+    double sqrt_coulomb_threshold, const vector<std::complex<double>> &epsmac_LF_imagfreq,
+    bool debug, const char *output_dir)
 {
+    using global::lib_printf;
     using std::cout;
     using std::endl;
-    using global::lib_printf;
 
     // Object to return
     map<double, std::map<Vector3_Order<double>, Matz>> Wc_freq_q;
@@ -2576,19 +2860,16 @@ compute_Wc_freq_q(
 
     const auto &comm_h = chi0.comm_h;
     const auto &abf = chi0.atbasis_abf;
-    const auto validate_coulomb_block_shape = [&](const char *stage, const int mu,
-                                                  const int nu,
-                                                  const Vector3_Order<double> &q,
-                                                  const auto &vq,
-                                                  const int n_mu,
-                                                  const int n_nu) {
+    const auto validate_coulomb_block_shape = [&](const char *stage, const int mu, const int nu,
+                                                  const Vector3_Order<double> &q, const auto &vq,
+                                                  const int n_mu, const int n_nu)
+    {
         if (vq->nr == n_mu && vq->nc == n_nu) return;
         std::ostringstream errmsg;
-        errmsg << "Coulomb block dimension mismatch while preparing " << stage
-               << " for Wc at q=(" << q.x << ", " << q.y << ", " << q.z
-               << "), atom pair (" << mu << ", " << nu << "): block shape is "
-               << vq->nr << "x" << vq->nc << " but chi0 auxiliary basis expects "
-               << n_mu << "x" << n_nu
+        errmsg << "Coulomb block dimension mismatch while preparing " << stage << " for Wc at q=("
+               << q.x << ", " << q.y << ", " << q.z << "), atom pair (" << mu << ", " << nu
+               << "): block shape is " << vq->nr << "x" << vq->nc
+               << " but chi0 auxiliary basis expects " << n_mu << "x" << n_nu
                << ". Check use_shrink_abfs/use_shrink_chi and Coulomb prefixes; "
                   "legacy shrink Coulomb files cannot be used with full-chi Wc.";
         throw LIBRPA_RUNTIME_ERROR(errmsg.str());
@@ -2600,7 +2881,8 @@ compute_Wc_freq_q(
     }
 
     comm_h.barrier();
-    // use q-points as the outmost loop, so that square root of Coulomb will not be recalculated at each frequency point
+    // use q-points as the outmost loop, so that square root of Coulomb will not be recalculated at
+    // each frequency point
     std::vector<Vector3_Order<double>> qpts(qpts_active.begin(), qpts_active.end());
 
     for (const auto &q : qpts)
@@ -2609,22 +2891,21 @@ compute_Wc_freq_q(
         char fn[80];
 
         Matz Vq_all(range_all, range_all, MAJOR::COL);
-        for (const auto &Mu_NuqVq: coulmat_eps)
+        for (const auto &Mu_NuqVq : coulmat_eps)
         {
             auto Mu = Mu_NuqVq.first;
             int n_mu = abf[Mu];
-            for ( auto &Nu_qVq: Mu_NuqVq.second )
+            for (auto &Nu_qVq : Mu_NuqVq.second)
             {
                 auto Nu = Nu_qVq.first;
-                if ( 0 == Nu_qVq.second.count(q) ) continue;
+                if (0 == Nu_qVq.second.count(q)) continue;
                 int n_nu = abf[Nu];
                 const auto &vq = Nu_qVq.second.at(q);
                 validate_coulomb_block_shape("bare Coulomb", Mu, Nu, q, vq, n_mu, n_nu);
-                for ( int i_mu = 0; i_mu != n_mu; i_mu++ )
-                    for ( int i_nu = 0; i_nu != n_nu; i_nu++ )
+                for (int i_mu = 0; i_mu != n_mu; i_mu++)
+                    for (int i_nu = 0; i_nu != n_nu; i_nu++)
                     {
-                        Vq_all(part_range[Mu] + i_mu, part_range[Nu] + i_nu) =
-                            (*vq)(i_mu, i_nu);
+                        Vq_all(part_range[Mu] + i_mu, part_range[Nu] + i_nu) = (*vq)(i_mu, i_nu);
                         Vq_all(part_range[Nu] + i_nu, part_range[Mu] + i_mu) =
                             conj((*vq)(i_mu, i_nu));
                     }
@@ -2633,12 +2914,12 @@ compute_Wc_freq_q(
         if (debug)
         {
             sprintf(fn, "Vq_all_q_%d.mtx", iq);
-            print_matrix_mm_file(Vq_all,  + fn, "", 1e-15);
+            print_matrix_mm_file(Vq_all, +fn, "", 1e-15);
         }
         const auto sqrtVq_all = power_hemat(Vq_all, 0.5, true, false, sqrt_coulomb_threshold);
         // Vq_all is now eigenvectors of the original Coulomb matrix
         // only required for Gamma point
-        const auto& Vq_eigen = Vq_all;
+        const auto &Vq_eigen = Vq_all;
         if (debug)
         {
             sprintf(fn, "sqrtVq_all_q_%d.mtx", iq);
@@ -2666,8 +2947,7 @@ compute_Wc_freq_q(
                 for (int i_mu = 0; i_mu != n_mu; i_mu++)
                     for (int i_nu = 0; i_nu != n_nu; i_nu++)
                     {
-                        Vqcut_all(part_range[Mu] + i_mu, part_range[Nu] + i_nu) =
-                            (*vq)(i_mu, i_nu);
+                        Vqcut_all(part_range[Mu] + i_mu, part_range[Nu] + i_nu) = (*vq)(i_mu, i_nu);
                         Vqcut_all(part_range[Nu] + i_nu, part_range[Mu] + i_mu) =
                             conj((*vq)(i_mu, i_nu));
                     }
@@ -2684,19 +2964,20 @@ compute_Wc_freq_q(
         {
             auto Mu = Mu_NuqVq.first;
             int n_mu = abf[Mu];
-            for ( auto &Nu_qVq: Mu_NuqVq.second )
+            for (auto &Nu_qVq : Mu_NuqVq.second)
             {
                 auto Nu = Nu_qVq.first;
-                if ( 0 == Nu_qVq.second.count(q) ) continue;
+                if (0 == Nu_qVq.second.count(q)) continue;
                 int n_nu = abf[Nu];
-                for ( int i_mu = 0; i_mu != n_mu; i_mu++ )
-                    for ( int i_nu = 0; i_nu != n_nu; i_nu++ )
-                        (*Nu_qVq.second.at(q))(i_mu, i_nu) = Vqcut_all(part_range[Mu] + i_mu, part_range[Nu] + i_nu);
+                for (int i_mu = 0; i_mu != n_mu; i_mu++)
+                    for (int i_nu = 0; i_nu != n_nu; i_nu++)
+                        (*Nu_qVq.second.at(q))(i_mu, i_nu) =
+                            Vqcut_all(part_range[Mu] + i_mu, part_range[Nu] + i_nu);
             }
         }
 
         Matz chi0fq_all(range_all, range_all, MAJOR::COL);
-        for (const auto &freq_qMuNuchi: chi0.get_chi0_q())
+        for (const auto &freq_qMuNuchi : chi0.get_chi0_q())
         {
             auto freq = freq_qMuNuchi.first;
             auto ifreq = chi0.tfg.get_freq_index(freq);
@@ -2725,15 +3006,18 @@ compute_Wc_freq_q(
                 print_matrix_mm_file(chi0fq_all, path_as_directory(output_dir) + fn, "", 1e-15);
             }
 
-            auto eps_fq = - sqrtVq_all * chi0fq_all * sqrtVq_all;
+            auto eps_fq = -sqrtVq_all * chi0fq_all * sqrtVq_all;
             if (!epsmac_LF_imagfreq.empty() && is_gamma_point(q))
             {
                 // rotate to Coulomb-diagonal basis
                 // lib_printf("Largest off-diagonal = %f\n", eps_fq.get_max_abs_offdiag());
                 // print_matrix("rotated eps_fq: ", eps_fq.real());
-                // replacing the element corresponding to largest Coulomb eigenvalue with dielectric function
+                // replacing the element corresponding to largest Coulomb eigenvalue with dielectric
+                // function
                 eps_fq = transpose(Vq_eigen, true) * eps_fq * Vq_eigen;
-                lib_printf("%22.12f %22.12f %22.12f %22.12f\n", freq, eps_fq(0, 0).real(), eps_fq(eps_fq.nr() - 1, eps_fq.nc() - 1).real(), epsmac_LF_imagfreq[ifreq].real());
+                lib_printf("%22.12f %22.12f %22.12f %22.12f\n", freq, eps_fq(0, 0).real(),
+                           eps_fq(eps_fq.nr() - 1, eps_fq.nc() - 1).real(),
+                           epsmac_LF_imagfreq[ifreq].real());
                 // eps_fq(eps_fq.nr - 1, eps_fq.nc - 1) = epsmac_LF_imagfreq[ifreq];
                 eps_fq(0, 0) = 1.0 - epsmac_LF_imagfreq[ifreq];
                 if (debug)
@@ -2776,11 +3060,11 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
 {
     using std::cout;
     using std::endl;
-    using std::set;
     using std::pair;
+    using std::set;
 
-    using global::ofs_myid;
     using global::lib_printf;
+    using global::ofs_myid;
     using global::profiler;
 
     // Object to return
@@ -2799,16 +3083,20 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
 
     global::profiler.start("compute_Wc_freq_q_blacs_init");
     const auto &desc_nabf_nabf = ad;
-    assert(desc_nabf_nabf.initialized() && desc_nabf_nabf.m() == n_abf && desc_nabf_nabf.n() == n_abf);
-    // Use a square blocksize instead max block, otherwise heev and inversion will complain about illegal parameter
-    // Maximal blocksize ensure that atom indices related to the rows/columns of a local matrix is minimized.
-    // This, however, is not optimal for matrix operations, and may lead to segment fault during
-    // MPI operations with parallel linear algebra subroutine. Thus we define an optimal blocksize
+    assert(desc_nabf_nabf.initialized() && desc_nabf_nabf.m() == n_abf &&
+           desc_nabf_nabf.n() == n_abf);
+    // Use a square blocksize instead max block, otherwise heev and inversion will complain about
+    // illegal parameter Maximal blocksize ensure that atom indices related to the rows/columns of a
+    // local matrix is minimized. This, however, is not optimal for matrix operations, and may lead
+    // to segment fault during MPI operations with parallel linear algebra subroutine. Thus we
+    // define an optimal blocksize
     ArrayDesc desc_nabf_nabf_opt(blacs_h);
     const int nb_opt = std::min(128, desc_nabf_nabf.nb());
     desc_nabf_nabf_opt.init(n_abf, n_abf, nb_opt, nb_opt, 0, 0);
-    // obtain the indices of atom-pair block necessary to build 2D block of a Hermitian/symmetric matrix
-    const auto set_IJ_nabf_nabf = get_necessary_IJ_from_block_2D_sy('U', chi0.atbasis_abf, desc_nabf_nabf);
+    // obtain the indices of atom-pair block necessary to build 2D block of a Hermitian/symmetric
+    // matrix
+    const auto set_IJ_nabf_nabf =
+        get_necessary_IJ_from_block_2D_sy('U', chi0.atbasis_abf, desc_nabf_nabf);
     const auto s0_s1 = get_s0_s1_for_comm_map2_first(set_IJ_nabf_nabf);
     // temp_block is used to collect data from IJ-pair data structure with comm_map2_first
     auto temp_block = init_local_mat<complex<double>>(desc_nabf_nabf, MAJOR::COL);
@@ -2830,17 +3118,19 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         diagnostic_alpha_wc = init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
     }
 
-    std::complex<double>* chi0_block_ptr;
-    std::complex<double>* coul_block_ptr;
-    std::complex<double>* coul_chi0_block_ptr;
-    std::complex<double>* coul_eigen_block_ptr;
-    std::complex<double>* coulwc_block_ptr;
+    std::complex<double> *chi0_block_ptr;
+    std::complex<double> *coul_block_ptr;
+    std::complex<double> *coul_chi0_block_ptr;
+    std::complex<double> *coul_eigen_block_ptr;
+    std::complex<double> *coulwc_block_ptr;
 
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
     if (use_gpu_replace_scalapack)
     {
-        desc_nabf_nabf_opt.set_ddla_desc(blacs_h.ddla_handle); // set the descriptor for the device
-        DEVICE_CHECK(deviceMallocAsync((void**)&chi0_block_ptr, chi0_block.size() * sizeof(std::complex<double>), blacs_h.ddla_handle->stream));
+        desc_nabf_nabf_opt.set_ddla_desc(blacs_h.ddla_handle);  // set the descriptor for the device
+        DEVICE_CHECK(deviceMallocAsync((void **)&chi0_block_ptr,
+                                       chi0_block.size() * sizeof(std::complex<double>),
+                                       blacs_h.ddla_handle->stream));
     }
     else
 #endif
@@ -2852,8 +3142,7 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         coulwc_block_ptr = coulwc_block.ptr();
     }
 #if defined(LIBRPA_USE_ELPA)
-    if(use_elpa_sqrt_coulomb)
-        desc_nabf_nabf_opt.set_elpa_handle(use_gpu_replace_scalapack);
+    if (use_elpa_sqrt_coulomb) desc_nabf_nabf_opt.set_elpa_handle(use_gpu_replace_scalapack);
 #endif
 
     const double mem_blocks =
@@ -2866,8 +3155,7 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
              << endl;
 
     const auto atpair_local = librpa_int::dispatch_upper_triangular_tasks(
-        natom, blacs_h.myid, blacs_h.nprows, blacs_h.npcols,
-        blacs_h.myprow, blacs_h.mypcol);
+        natom, blacs_h.myid, blacs_h.nprows, blacs_h.npcols, blacs_h.myprow, blacs_h.mypcol);
 #ifdef LIBRPA_DEBUG
     ofs_myid << get_timestamp() << " atpair_local " << atpair_local << endl;
     ofs_myid << get_timestamp() << " s0_s1 " << s0_s1 << endl;
@@ -2907,60 +3195,163 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
     const auto abf_layouts =
         chi0.atbasis_abf.build_species_basis_layouts(chi0.symmetry_context.atom_to_type);
     const bool use_symmetry_dense_chi0_collect =
-        chi0.use_symmetry_context
-        && comm_h.nprocs > 1
-        && can_symmetrize_symmetry_chi0_ibz_blocks(
-            chi0.symmetry_context, abf_layouts, atom_nabf, chi0.pbc);
+        chi0.use_symmetry_context && comm_h.nprocs > 1 &&
+        can_symmetrize_symmetry_chi0_ibz_blocks(chi0.symmetry_context, abf_layouts, atom_nabf,
+                                                chi0.pbc);
 
     vec<double> eigenvalues(n_abf);
-    const auto validate_coulomb_block_shape = [&](const char *stage, const int mu,
-                                                  const int nu,
-                                                  const Vector3_Order<double> &q,
-                                                  const auto &vq,
-                                                  const int n_mu,
-                                                  const int n_nu) {
+    const auto validate_coulomb_block_shape = [&](const char *stage, const int mu, const int nu,
+                                                  const Vector3_Order<double> &q, const auto &vq,
+                                                  const int n_mu, const int n_nu)
+    {
         if (vq->nr == n_mu && vq->nc == n_nu) return;
         std::ostringstream errmsg;
-        errmsg << "Coulomb block dimension mismatch while preparing " << stage
-               << " for Wc at q=(" << q.x << ", " << q.y << ", " << q.z
-               << "), atom pair (" << mu << ", " << nu << "): block shape is "
-               << vq->nr << "x" << vq->nc << " but chi0 auxiliary basis expects "
-               << n_mu << "x" << n_nu
+        errmsg << "Coulomb block dimension mismatch while preparing " << stage << " for Wc at q=("
+               << q.x << ", " << q.y << ", " << q.z << "), atom pair (" << mu << ", " << nu
+               << "): block shape is " << vq->nr << "x" << vq->nc
+               << " but chi0 auxiliary basis expects " << n_mu << "x" << n_nu
                << ". Check use_shrink_abfs/use_shrink_chi and Coulomb prefixes; "
                   "legacy shrink Coulomb files cannot be used with full-chi Wc.";
         throw LIBRPA_RUNTIME_ERROR(errmsg.str());
     };
     global::profiler.stop("compute_Wc_freq_q_blacs_init");
-    librpa_int::global::lib_printf_root("Time for Wc initialization (seconds, Wall/CPU): %f %f\n",
-            global::profiler.get_wall_time_last("compute_Wc_freq_q_blacs_init"),
-            global::profiler.get_cpu_time_last("compute_Wc_freq_q_blacs_init"));
+    librpa_int::global::lib_printf_root(
+        "Time for Wc initialization (seconds, Wall/CPU): %f %f\n",
+        global::profiler.get_wall_time_last("compute_Wc_freq_q_blacs_init"),
+        global::profiler.get_cpu_time_last("compute_Wc_freq_q_blacs_init"));
 
     global::profiler.start("compute_Wc_freq_q_work");
 #ifdef LIBRPA_USE_LIBRI
     const bool strict_2d_requested =
         strict_2d_complete_wc_requested(replace_w_head, option_dielect_func,
                                         df_headwing != nullptr && df_headwing->use_2d_dielectric);
+    const auto omega0_dump_directory =
+        strict_2d_omega0_diagnostic_directory(std::getenv("LIBRPA_STRICT2D_OMEGA0_MODEL_DUMP_DIR"));
+    const auto omega0_override_directories = strict_2d_omega0_override_directories(
+        std::getenv("LIBRPA_STRICT2D_OMEGA0_WC_OVERRIDE_DIR"),
+        std::getenv("LIBRPA_STRICT2D_OMEGA0_AUX_WC_OVERRIDE_DIR"));
+    const auto finite_q_matrix_dump_directory = strict_2d_omega0_diagnostic_directory(
+        std::getenv("LIBRPA_STRICT2D_FINITE_Q_MATRIX_DUMP_DIR"));
+    if ((!omega0_dump_directory.empty() || !omega0_override_directories.coulomb_basis.empty() ||
+         !omega0_override_directories.auxiliary_basis.empty()) &&
+        !strict_2d_requested)
+        throw LIBRPA_RUNTIME_ERROR(
+            "strict 2D Omega0 diagnostics require the complete-Wc Gamma route");
+    if (!omega0_override_directories.auxiliary_basis.empty() && use_gpu_replace_scalapack)
+        throw LIBRPA_RUNTIME_ERROR(
+            "strict 2D auxiliary-basis Omega0 override is a CPU-only diagnostic");
     if (output_2d_finite_q_diagnostics && !strict_2d_requested)
         throw LIBRPA_RUNTIME_ERROR("output_2d_finite_q_diagnostics requires strict 2D complete-Wc");
+    if (!finite_q_matrix_dump_directory.empty() && !output_2d_finite_q_diagnostics)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_STRICT2D_FINITE_Q_MATRIX_DUMP_DIR requires strict 2D diagnostics");
+    if (!finite_q_matrix_dump_directory.empty() && use_gpu_replace_scalapack)
+        throw LIBRPA_RUNTIME_ERROR("strict 2D finite-q matrix dump is a CPU-only diagnostic");
+    if (!finite_q_matrix_dump_directory.empty() && comm_h.is_root())
+        std::cout << "Writing read-only strict 2D finite-q matrix diagnostics under "
+                  << finite_q_matrix_dump_directory << std::endl;
     constexpr double diagnostic_inverse_dielectric_alpha = 0.25;
+    const bool use_alpha_wc_diagnostic =
+        strict_2d_alpha_wc_diagnostic_requested(std::getenv("LIBRPA_STRICT2D_ALPHA_WC_DIAG"));
+    const bool use_first_shell_analytic_wc_diagnostic =
+        strict_2d_first_shell_analytic_wc_diagnostic_requested(
+            std::getenv("LIBRPA_STRICT2D_FIRST_SHELL_ANALYTIC_WC_DIAG"));
+    const auto first_shell_wc_block_diagnostic = strict_2d_first_shell_wc_block_diagnostic(
+        std::getenv("LIBRPA_STRICT2D_FIRST_SHELL_WC_BLOCK_DIAG"));
+    const bool use_first_shell_wc_block_diagnostic =
+        first_shell_wc_block_diagnostic != Strict2dWcBlock::full;
+    if (use_alpha_wc_diagnostic && !output_2d_finite_q_diagnostics)
+        throw LIBRPA_RUNTIME_ERROR("LIBRPA_STRICT2D_ALPHA_WC_DIAG requires strict 2D diagnostics");
+    if (use_alpha_wc_diagnostic && use_gpu_replace_scalapack)
+        throw LIBRPA_RUNTIME_ERROR("LIBRPA_STRICT2D_ALPHA_WC_DIAG is a CPU-only diagnostic");
+    if (use_alpha_wc_diagnostic && comm_h.is_root())
+        std::cout << "Strict 2D diagnostic replaces finite-q Wc with epsilon^-1=0.25 I."
+                  << std::endl;
+    if (use_first_shell_analytic_wc_diagnostic && !output_2d_finite_q_diagnostics)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_STRICT2D_FIRST_SHELL_ANALYTIC_WC_DIAG requires strict 2D diagnostics");
+    if (use_first_shell_analytic_wc_diagnostic && use_gpu_replace_scalapack)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_STRICT2D_FIRST_SHELL_ANALYTIC_WC_DIAG is a CPU-only diagnostic");
+    if (use_first_shell_analytic_wc_diagnostic && use_alpha_wc_diagnostic)
+        throw LIBRPA_RUNTIME_ERROR(
+            "strict 2D alpha and first-shell analytic Wc diagnostics are mutually exclusive");
+    if (use_first_shell_wc_block_diagnostic && !output_2d_finite_q_diagnostics)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_STRICT2D_FIRST_SHELL_WC_BLOCK_DIAG requires strict 2D diagnostics");
+    if (use_first_shell_wc_block_diagnostic && use_gpu_replace_scalapack)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_STRICT2D_FIRST_SHELL_WC_BLOCK_DIAG is a CPU-only diagnostic");
+    if (use_first_shell_wc_block_diagnostic &&
+        (use_alpha_wc_diagnostic || use_first_shell_analytic_wc_diagnostic))
+        throw LIBRPA_RUNTIME_ERROR(
+            "strict 2D first-shell Wc block diagnostic cannot be combined with Wc replacement diagnostics");
+    double first_q_norm = std::numeric_limits<double>::infinity();
+    if (use_first_shell_analytic_wc_diagnostic || use_first_shell_wc_block_diagnostic)
+    {
+        for (const auto &q : qpts)
+        {
+            const auto minimum_q = strict_2d_minimum_image_q(chi0.pbc, q);
+            const double q_norm = std::hypot(minimum_q.x, minimum_q.y);
+            if (q_norm > 1.0e-12) first_q_norm = std::min(first_q_norm, q_norm);
+        }
+        if (!std::isfinite(first_q_norm))
+            throw LIBRPA_RUNTIME_ERROR(
+                "strict 2D first-shell analytic Wc diagnostic found no finite q");
+        if (comm_h.is_root())
+        {
+            if (use_first_shell_analytic_wc_diagnostic)
+                std::cout << "Strict 2D diagnostic replaces the first nonzero q shell with the "
+                             "complete analytic small-q Wc matrix; q_physical="
+                          << strict_2d_physical_q(first_q_norm) << std::endl;
+            else
+            {
+                const char *mode = first_shell_wc_block_diagnostic == Strict2dWcBlock::head
+                                       ? "head"
+                                   : first_shell_wc_block_diagnostic == Strict2dWcBlock::wing
+                                       ? "wing"
+                                       : "body";
+                std::cout << "Strict 2D diagnostic keeps only the " << mode
+                          << " block of numerical Wc on the first nonzero q shell; q_physical="
+                          << strict_2d_physical_q(first_q_norm) << std::endl;
+            }
+        }
+    }
     std::vector<std::complex<double>> gamma_head_vector;
     int gamma_n_nonsingular = 0;
     std::ofstream finite_q_diagnostics;
+    std::ofstream raw_gamma_chi0_diagnostics;
     std::ofstream gamma_wc_diagnostics;
+    std::ofstream gamma_wc_transform_diagnostics;
     int diagnostic_output_ready = 1;
     if (output_2d_finite_q_diagnostics && comm_h.is_root())
     {
         finite_q_diagnostics.open(path_as_directory(output_dir) + "strict2d_finite_q_scaling.csv",
                                   std::ios::out | std::ios::trunc);
+        raw_gamma_chi0_diagnostics.open(
+            path_as_directory(output_dir) + "strict2d_raw_gamma_chi0.csv",
+            std::ios::out | std::ios::trunc);
         gamma_wc_diagnostics.open(path_as_directory(output_dir) + "strict2d_gamma_wc_blocks.csv",
                                   std::ios::out | std::ios::trunc);
-        diagnostic_output_ready = finite_q_diagnostics && gamma_wc_diagnostics ? 1 : 0;
+        gamma_wc_transform_diagnostics.open(
+            path_as_directory(output_dir) + "strict2d_gamma_wc_transform.csv",
+            std::ios::out | std::ios::trunc);
+        diagnostic_output_ready =
+            finite_q_diagnostics && raw_gamma_chi0_diagnostics && gamma_wc_diagnostics &&
+                    gamma_wc_transform_diagnostics
+                ? 1
+                : 0;
         if (diagnostic_output_ready)
         {
             finite_q_diagnostics << strict_2d_finite_q_diagnostics_header() << '\n'
                                  << std::scientific << std::setprecision(16);
+            raw_gamma_chi0_diagnostics << strict_2d_raw_gamma_chi0_diagnostics_header() << '\n'
+                                       << std::scientific << std::setprecision(16);
             gamma_wc_diagnostics << strict_2d_gamma_wc_diagnostics_header() << '\n'
                                  << std::scientific << std::setprecision(16);
+            gamma_wc_transform_diagnostics << strict_2d_gamma_wc_transform_diagnostics_header()
+                                           << '\n'
+                                           << std::scientific << std::setprecision(16);
         }
     }
     if (output_2d_finite_q_diagnostics)
@@ -3007,10 +3398,12 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         {
             size_t n_singular_coulwc;
             // LibRI tensor for communication, release once done
-            std::map<int, std::map<std::pair<int, std::array<double, 3>>, RI::Tensor<complex<double>>>> couleps_libri;
+            std::map<int,
+                     std::map<std::pair<int, std::array<double, 3>>, RI::Tensor<complex<double>>>>
+                couleps_libri;
             global::profiler.start("epsilon_prepare_coulwc_sqrt_1", "Setup libRI object");
 
-            for (const auto& Mu_coulmat: coulmat_wc)
+            for (const auto &Mu_coulmat : coulmat_wc)
             {
                 const auto Mu = Mu_coulmat.first;
                 for (const auto &Nu_coulmat : Mu_coulmat.second)
@@ -3030,7 +3423,8 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             global::profiler.stop("epsilon_prepare_coulwc_sqrt_1");
 
             global::profiler.start("epsilon_prepare_coulwc_sqrt_2", "libRI Communicate");
-            const auto IJq_coul = RI::Communicate_Tensors_Map_Judge::comm_map2_first(comm_h.comm, couleps_libri, s0_s1.first, s0_s1.second);
+            const auto IJq_coul = RI::Communicate_Tensors_Map_Judge::comm_map2_first(
+                comm_h.comm, couleps_libri, s0_s1.first, s0_s1.second);
             global::profiler.stop("epsilon_prepare_coulwc_sqrt_2");
 
             global::profiler.start("epsilon_prepare_coulwc_sqrt_3", "Collect 2D-block from IJ");
@@ -3042,9 +3436,9 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             //         coulwc_block, desc_nabf_nabf, chi0.atbasis_abf, IJ.first,
             //         IJ.second, true, CONE, IJq_coul.at(I).at({J, qa}).ptr(), MAJOR::ROW);
             // }
-            collect_block_from_ALL_IJ_Tensor_sparse_zero_missing(
-                temp_block, desc_nabf_nabf, chi0.atbasis_abf, qa, true, C_ONE, IJq_coul,
-                MAJOR::ROW);
+            collect_block_from_ALL_IJ_Tensor_sparse_zero_missing(temp_block, desc_nabf_nabf,
+                                                                 chi0.atbasis_abf, qa, true, C_ONE,
+                                                                 IJq_coul, MAJOR::ROW);
             ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1, desc_nabf_nabf.desc,
                                           coulwc_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
                                           blacs_h.ictxt);
@@ -3055,26 +3449,31 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                 LaConnector::power_hemat_la_real(
                     coulwc_block, desc_nabf_nabf_opt, coul_eigen_block, desc_nabf_nabf_opt,
                     n_singular_coulwc, eigenvalues.c, 0.5, sqrt_coulomb_threshold,
-                    use_gpu_replace_scalapack, use_elpa_sqrt_coulomb, (double*)chi0_block_ptr + chi0_block.size(), 
-                (double*)chi0_block_ptr, (double*)coul_chi0_block_ptr);
+                    use_gpu_replace_scalapack, use_elpa_sqrt_coulomb,
+                    (double *)chi0_block_ptr + chi0_block.size(), (double *)chi0_block_ptr,
+                    (double *)coul_chi0_block_ptr);
             }
             else
             {
 #if defined(LIBRPA_USE_CUDA) || defined(LIBRPA_USE_HIP)
-                if(use_gpu_replace_scalapack)
-                    DEVICE_CHECK(deviceMallocAsync((void**)&coul_block_ptr, coul_block.size() * sizeof(std::complex<double>), blacs_h.ddla_handle->stream));
+                if (use_gpu_replace_scalapack)
+                    DEVICE_CHECK(deviceMallocAsync((void **)&coul_block_ptr,
+                                                   coul_block.size() * sizeof(std::complex<double>),
+                                                   blacs_h.ddla_handle->stream));
 #endif
-                LaConnector::power_hemat_la(
-                    coulwc_block, desc_nabf_nabf_opt, coul_eigen_block, desc_nabf_nabf_opt,
-                    n_singular_coulwc, eigenvalues.c, 0.5, sqrt_coulomb_threshold, use_gpu_replace_scalapack,
-                    use_elpa_sqrt_coulomb, coul_block_ptr, chi0_block_ptr, coul_chi0_block_ptr);
+                LaConnector::power_hemat_la(coulwc_block, desc_nabf_nabf_opt, coul_eigen_block,
+                                            desc_nabf_nabf_opt, n_singular_coulwc, eigenvalues.c,
+                                            0.5, sqrt_coulomb_threshold, use_gpu_replace_scalapack,
+                                            use_elpa_sqrt_coulomb, coul_block_ptr, chi0_block_ptr,
+                                            coul_chi0_block_ptr);
             }
             global::profiler.stop("epsilon_prepare_coulwc_sqrt_4");
         }
         global::profiler.stop("epsilon_prepare_coulwc_sqrt");
-        librpa_int::global::lib_printf_root("Time to prepare sqrt root of Coulomb for Wc(q) (seconds, Wall/CPU): %f %f\n",
-                global::profiler.get_wall_time_last("epsilon_prepare_coulwc_sqrt"),
-                global::profiler.get_cpu_time_last("epsilon_prepare_coulwc_sqrt"));
+        librpa_int::global::lib_printf_root(
+            "Time to prepare sqrt root of Coulomb for Wc(q) (seconds, Wall/CPU): %f %f\n",
+            global::profiler.get_wall_time_last("epsilon_prepare_coulwc_sqrt"),
+            global::profiler.get_cpu_time_last("epsilon_prepare_coulwc_sqrt"));
 
         global::profiler.start("epsilon_prepare_couleps_sqrt", "Prepare sqrt of bare Coulomb");
         // collect the block elements of coulomb matrices
@@ -3085,10 +3484,11 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                 couleps_libri;
             if (debug_output) ofs_myid << get_timestamp() << " Start build couleps_libri" << endl;
 
-            for (const auto& Mu_coulmat: coulmat_eps)
+            for (const auto &Mu_coulmat : coulmat_eps)
             {
                 const auto Mu = Mu_coulmat.first;
-                for(const auto& Nu_coulmat : Mu_coulmat.second){
+                for (const auto &Nu_coulmat : Mu_coulmat.second)
+                {
                     const auto Nu = Nu_coulmat.first;
                     const auto &Vq = coulmat_eps.at(Mu).at(Nu).at(q);
                     const auto n_mu = chi0.atbasis_abf.get_atom_nb(Mu);
@@ -3118,16 +3518,17 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             // ofs_myid << "Owned blocks\n";
             // print_keys(ofs_myid, couleps_libri);
             // comm_h.barrier();
-            const auto IJq_coul = RI::Communicate_Tensors_Map_Judge::comm_map2_first(comm_h.comm, couleps_libri, s0_s1.first, s0_s1.second);
+            const auto IJq_coul = RI::Communicate_Tensors_Map_Judge::comm_map2_first(
+                comm_h.comm, couleps_libri, s0_s1.first, s0_s1.second);
             if (debug_output)
                 ofs_myid << get_timestamp() << " Done collect couleps_libri, collected blocks"
                          << endl;
 
             if (debug_output)
                 ofs_myid << get_timestamp() << " Start construct couleps 2D block" << endl;
-            collect_block_from_ALL_IJ_Tensor_sparse_zero_missing(
-                temp_block, desc_nabf_nabf, chi0.atbasis_abf, qa, true, C_ONE, IJq_coul,
-                MAJOR::ROW);
+            collect_block_from_ALL_IJ_Tensor_sparse_zero_missing(temp_block, desc_nabf_nabf,
+                                                                 chi0.atbasis_abf, qa, true, C_ONE,
+                                                                 IJq_coul, MAJOR::ROW);
             ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1, desc_nabf_nabf.desc,
                                           coul_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
                                           blacs_h.ictxt);
@@ -3148,13 +3549,15 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             // choice of power_hemat_blacs_real/power_hemat_blacs_desc
             // leads to sub-meV difference
             sqrtveig_blacs = LaConnector::power_hemat_la_real(
-                coul_block, desc_nabf_nabf_opt, coul_eigen_block, desc_nabf_nabf_opt,
-                n_singular, eigenvalues.c, 0.5, sqrt_coulomb_threshold,
-                use_gpu_replace_scalapack, use_elpa_sqrt_coulomb, (double*)chi0_block_ptr + chi0_block.size(), 
-                (double*)chi0_block_ptr, (double*)coul_chi0_block_ptr);
+                coul_block, desc_nabf_nabf_opt, coul_eigen_block, desc_nabf_nabf_opt, n_singular,
+                eigenvalues.c, 0.5, sqrt_coulomb_threshold, use_gpu_replace_scalapack,
+                use_elpa_sqrt_coulomb, (double *)chi0_block_ptr + chi0_block.size(),
+                (double *)chi0_block_ptr, (double *)coul_chi0_block_ptr);
 #if defined(LIBRPA_USE_CUDA) || defined(LIBRPA_USE_HIP)
-            if(use_gpu_replace_scalapack)
-                DEVICE_CHECK(deviceMallocAsync((void**)&coul_block_ptr, coul_block.size() * sizeof(std::complex<double>), blacs_h.ddla_handle->stream));
+            if (use_gpu_replace_scalapack)
+                DEVICE_CHECK(deviceMallocAsync((void **)&coul_block_ptr,
+                                               coul_block.size() * sizeof(std::complex<double>),
+                                               blacs_h.ddla_handle->stream));
 #endif
             if (replace_w_head && option_dielect_func == 3)
             {
@@ -3167,15 +3570,21 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         else
         {
             sqrtveig_blacs = LaConnector::power_hemat_la(
-                coul_block, desc_nabf_nabf_opt, coul_eigen_block, desc_nabf_nabf_opt,
-                n_singular, eigenvalues.c, 0.5, sqrt_coulomb_threshold, use_gpu_replace_scalapack,
+                coul_block, desc_nabf_nabf_opt, coul_eigen_block, desc_nabf_nabf_opt, n_singular,
+                eigenvalues.c, 0.5, sqrt_coulomb_threshold, use_gpu_replace_scalapack,
                 use_elpa_sqrt_coulomb, coul_block_ptr, chi0_block_ptr, coul_chi0_block_ptr);
         }
         double finite_q_head_overlap = std::numeric_limits<double>::quiet_NaN();
+        double finite_q_coulomb_head_eigenvalue =
+            std::numeric_limits<double>::quiet_NaN();
+        int finite_q_head_column = -1;
         if (output_2d_finite_q_diagnostics)
         {
-            const auto current_head =
-                collect_normalized_blacs_column(coul_eigen_block, desc_nabf_nabf_opt, 0, comm_h);
+            const int head_column = strict_2d_head_eigenvector_column(eigenvalues.c, n_abf);
+            finite_q_head_column = head_column;
+            finite_q_coulomb_head_eigenvalue = eigenvalues.c[head_column];
+            const auto current_head = collect_normalized_blacs_column(
+                coul_eigen_block, desc_nabf_nabf_opt, head_column, comm_h);
             if (is_gamma_point(q))
                 gamma_head_vector = current_head;
             else
@@ -3191,6 +3600,20 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         // imaginary frequency is not prepared
         if (epsmac_LF_imagfreq.empty() || !is_gamma_point(q)) sqrtveig_blacs.clear();
         const size_t n_nonsingular = n_abf - n_singular;
+        if (is_gamma_point(q) && !omega0_dump_directory.empty())
+        {
+            print_matrix_mm_file_parallel(omega0_dump_directory + "gamma_coulomb_basis.mtx",
+                                          coul_eigen_block, desc_nabf_nabf_opt,
+                                          "fixed Gamma full-Ewald Coulomb eigenvectors", 0.0);
+            if (comm_h.is_root())
+            {
+                std::ofstream metadata(omega0_dump_directory + "gamma_basis_metadata.txt");
+                if (!metadata)
+                    throw LIBRPA_RUNTIME_ERROR("cannot open strict 2D Omega0 Gamma-basis metadata");
+                metadata << "n_abf=" << n_abf << '\n' << "n_nonsingular=" << n_nonsingular << '\n';
+            }
+            comm_h.barrier();
+        }
         if (strict_2d_complete_wc_gamma)
         {
             const int n_coulomb = as_int(n_nonsingular);
@@ -3210,7 +3633,8 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                              "Coulomb basis."
                           << std::endl;
         }
-        if (output_2d_finite_q_diagnostics && is_gamma_point(q))
+        if ((output_2d_finite_q_diagnostics || use_first_shell_analytic_wc_diagnostic) &&
+            is_gamma_point(q))
         {
             gamma_coulomb_basis = coul_eigen_block.copy();
             gamma_n_nonsingular = as_int(n_nonsingular);
@@ -3255,20 +3679,27 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             }
         }
         global::profiler.stop("epsilon_prepare_couleps_sqrt");
-        librpa_int::global::lib_printf_root("Time to prepare sqrt root of Coulomb for Epsilon(q) (seconds, Wall/CPU): %f %f\n",
-                global::profiler.get_wall_time_last("epsilon_prepare_couleps_sqrt"),
-                global::profiler.get_cpu_time_last("epsilon_prepare_couleps_sqrt"));
+        librpa_int::global::lib_printf_root(
+            "Time to prepare sqrt root of Coulomb for Epsilon(q) (seconds, Wall/CPU): %f %f\n",
+            global::profiler.get_wall_time_last("epsilon_prepare_couleps_sqrt"),
+            global::profiler.get_cpu_time_last("epsilon_prepare_couleps_sqrt"));
         if (debug_output) ofs_myid << get_timestamp() << " Done couleps sqrt\n";
         std::flush(ofs_myid);
 #if defined(LIBRPA_USE_CUDA) || defined(LIBRPA_USE_HIP)
-        if(use_gpu_replace_scalapack)
-            DEVICE_CHECK(deviceMallocAsync((void**)&coul_chi0_block_ptr, coul_chi0_block.size() * sizeof(std::complex<double>), blacs_h.ddla_handle->stream));
-#endif    
+        if (use_gpu_replace_scalapack)
+            DEVICE_CHECK(deviceMallocAsync((void **)&coul_chi0_block_ptr,
+                                           coul_chi0_block.size() * sizeof(std::complex<double>),
+                                           blacs_h.ddla_handle->stream));
+#endif
         for (const auto &freq : chi0.tfg.get_freq_nodes())
         {
             const auto ifreq = chi0.tfg.get_freq_index(freq);
             std::complex<double> finite_q_p_head = std::numeric_limits<double>::quiet_NaN();
             Strict2dBlockMetrics finite_q_p_metrics;
+            Strict2dBlockMetrics finite_q_chi0_metrics;
+            Strict2dBlockMetrics current_basis_p_metrics;
+            Strict2dBlockMetrics current_basis_chi0_metrics;
+            Strict2dBlockMetrics analytic_finite_q_wc_metrics;
             global::profiler.start("epsilon_wc_work_q_omega");
             global::profiler.start("epsilon_prepare_chi0_2d", "Prepare Chi0 2D block");
             chi0_block.zero_out();
@@ -3285,15 +3716,15 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                     if (chi0.use_symmetry_context)
                     {
                         chi0_wq = symmetrize_symmetry_chi0_ibz_blocks_if_needed(
-                            comm_h, chi0.symmetry_context, abf_layouts, chi0_wq, q,
-                            chi0.pbc, atom_nabf);
+                            comm_h, chi0.symmetry_context, abf_layouts, chi0_wq, q, chi0.pbc,
+                            atom_nabf);
                     }
                 }
                 else if (use_symmetry_dense_chi0_collect)
                 {
                     chi0_wq = symmetrize_symmetry_chi0_ibz_blocks_if_needed(
-                        comm_h, chi0.symmetry_context, abf_layouts, chi0_wq, q,
-                        chi0.pbc, atom_nabf);
+                        comm_h, chi0.symmetry_context, abf_layouts, chi0_wq, q, chi0.pbc,
+                        atom_nabf);
                 }
 
                 if (use_symmetry_dense_chi0_collect)
@@ -3350,8 +3781,8 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                     global::profiler.start("epsilon_prepare_chi0_2d_collect_block",
                                            LIBRPA_VERBOSE_DEBUG);
                     collect_block_from_ALL_IJ_Tensor_sparse_zero_missing(
-                        temp_block, desc_nabf_nabf, chi0.atbasis_abf, qa, true, C_ONE,
-                        IJq_chi0, MAJOR::ROW);
+                        temp_block, desc_nabf_nabf, chi0.atbasis_abf, qa, true, C_ONE, IJq_chi0,
+                        MAJOR::ROW);
                     ScalapackConnector::pgemr2d_f(n_abf, n_abf, temp_block.ptr(), 1, 1,
                                                   desc_nabf_nabf.desc, chi0_block.ptr(), 1, 1,
                                                   desc_nabf_nabf_opt.desc, blacs_h.ictxt);
@@ -3364,18 +3795,62 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                     chi0.free_chi0_q(freq, q);
                 }
                 std::ostringstream chi0_debug_name;
-                chi0_debug_name << std::fixed << std::setprecision(10)
-                                << "chi0_block_qx_" << q.x << "_qy_" << q.y << "_qz_"
-                                << q.z << "_freq_" << ifreq << ".mtx";
+                chi0_debug_name << std::fixed << std::setprecision(10) << "chi0_block_qx_" << q.x
+                                << "_qy_" << q.y << "_qz_" << q.z << "_freq_" << ifreq << ".mtx";
                 dump_blacs_debug_matrix(debug, output_dir, chi0_debug_name.str(), chi0_block,
                                         desc_nabf_nabf_opt, "");
             }
             global::profiler.stop("epsilon_prepare_chi0_2d");
 
+            if (output_2d_finite_q_diagnostics && is_gamma_point(q))
+            {
+                project_blacs_matrix_in_basis(
+                    chi0_block, coul_eigen_block, desc_nabf_nabf_opt, n_abf,
+                    diagnostic_projection_work, diagnostic_projection);
+                const auto raw_gamma_chi0_metrics = collect_strict_2d_block_metrics(
+                    diagnostic_projection, desc_nabf_nabf_opt, n_abf, comm_h,
+                    finite_q_head_column);
+                if (comm_h.is_root())
+                    raw_gamma_chi0_diagnostics
+                        << ifreq << ',' << freq << ',' << finite_q_head_column << ','
+                        << raw_gamma_chi0_metrics.head.real() << ','
+                        << raw_gamma_chi0_metrics.head.imag() << ','
+                        << raw_gamma_chi0_metrics.head_body_frobenius << ','
+                        << raw_gamma_chi0_metrics.body_head_frobenius << ','
+                        << raw_gamma_chi0_metrics.body_body_frobenius << ',' << n_abf << '\n';
+            }
+
+            if (output_2d_finite_q_diagnostics && ifreq == 0 && !is_gamma_point(q))
+            {
+                project_blacs_matrix_in_basis(
+                    chi0_block, gamma_coulomb_basis, desc_nabf_nabf_opt,
+                    gamma_n_nonsingular, diagnostic_projection_work, diagnostic_projection);
+                finite_q_chi0_metrics = collect_strict_2d_block_metrics(
+                    diagnostic_projection, desc_nabf_nabf_opt, gamma_n_nonsingular, comm_h);
+                project_blacs_matrix_in_basis(
+                    chi0_block, coul_eigen_block, desc_nabf_nabf_opt,
+                    n_abf, diagnostic_projection_work, diagnostic_projection);
+                current_basis_chi0_metrics = collect_strict_2d_block_metrics(
+                    diagnostic_projection, desc_nabf_nabf_opt, n_abf, comm_h,
+                    finite_q_head_column);
+            }
+            if (!finite_q_matrix_dump_directory.empty() &&
+                strict_2d_should_dump_finite_q_matrix(iq, ifreq, is_gamma_point(q)))
+            {
+                std::ostringstream filename;
+                filename << finite_q_matrix_dump_directory << "chi0_aux_iq_" << std::setw(3)
+                         << std::setfill('0') << iq << ".mtx";
+                print_matrix_mm_file_parallel(filename.str(), chi0_block,
+                                              desc_nabf_nabf_opt,
+                                              "numerical chi0 in the auxiliary basis", 0.0);
+            }
+
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
             if (use_gpu_replace_scalapack)
             {
-                DEVICE_CHECK(deviceMemcpyAsync(chi0_block_ptr, chi0_block.ptr(), chi0_block.size() * sizeof(complex<double>), deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
+                DEVICE_CHECK(deviceMemcpyAsync(
+                    chi0_block_ptr, chi0_block.ptr(), chi0_block.size() * sizeof(complex<double>),
+                    deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
             }
 #endif
             // for Gamma point, overwrite the head term
@@ -3383,12 +3858,15 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             {
                 profiler.start("epsilon_compute_eps", "Compute dielectric matrix");
 
-                std::complex<double>* sqrtveig_blacs_ptr;
+                std::complex<double> *sqrtveig_blacs_ptr;
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
                 if (use_gpu_replace_scalapack)
                 {
                     sqrtveig_blacs_ptr = coul_block_ptr;
-                    DEVICE_CHECK(deviceMemcpyAsync(sqrtveig_blacs_ptr, sqrtveig_blacs.ptr(), sqrtveig_blacs.size() * sizeof(complex<double>), deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
+                    DEVICE_CHECK(deviceMemcpyAsync(sqrtveig_blacs_ptr, sqrtveig_blacs.ptr(),
+                                                   sqrtveig_blacs.size() * sizeof(complex<double>),
+                                                   deviceMemcpyHostToDevice,
+                                                   blacs_h.ddla_handle->stream));
                 }
                 else
 #endif
@@ -3400,21 +3878,24 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                 global::profiler.start("epsilon_compute_eps_pgemm_1", LIBRPA_VERBOSE_DEBUG);
                 // rotate to Coulomb-eigenvector basis
                 // descending order
-                LaConnector::pgemm(
-                    'N', 'N', n_abf, n_nonsingular, n_abf, {1.0, 0.0}, chi0_block_ptr, 1, 1,
-                    desc_nabf_nabf_opt, sqrtveig_blacs_ptr, 1, 1, desc_nabf_nabf_opt,
-                    {0.0, 0.0}, coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
-                LaConnector::pgemm(
-                    'C', 'N', n_nonsingular, n_nonsingular, n_abf, {-1.0, 0.0},
-                    sqrtveig_blacs_ptr, 1, 1, desc_nabf_nabf_opt, coul_chi0_block_ptr,
-                     1, 1, desc_nabf_nabf_opt, {0.0, 0.0}, chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
+                LaConnector::pgemm('N', 'N', n_abf, n_nonsingular, n_abf, {1.0, 0.0},
+                                   chi0_block_ptr, 1, 1, desc_nabf_nabf_opt, sqrtveig_blacs_ptr, 1,
+                                   1, desc_nabf_nabf_opt, {0.0, 0.0}, coul_chi0_block_ptr, 1, 1,
+                                   desc_nabf_nabf_opt);
+                LaConnector::pgemm('C', 'N', n_nonsingular, n_nonsingular, n_abf, {-1.0, 0.0},
+                                   sqrtveig_blacs_ptr, 1, 1, desc_nabf_nabf_opt,
+                                   coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt, {0.0, 0.0},
+                                   chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
 
                 if (option_dielect_func == 3)
                 {
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
                     if (use_gpu_replace_scalapack)
                     {
-                        DEVICE_CHECK(deviceMemcpyAsync(chi0_block.ptr(), chi0_block_ptr, chi0_block.size() * sizeof(complex<double>), deviceMemcpyDeviceToHost, blacs_h.ddla_handle->stream));
+                        DEVICE_CHECK(deviceMemcpyAsync(chi0_block.ptr(), chi0_block_ptr,
+                                                       chi0_block.size() * sizeof(complex<double>),
+                                                       deviceMemcpyDeviceToHost,
+                                                       blacs_h.ddla_handle->stream));
                         DEVICE_CHECK(deviceStreamSynchronize(blacs_h.ddla_handle->stream));
                     }
 #endif
@@ -3432,18 +3913,22 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                     // Inversion is performed here
                     // TODO: check location of "head" term
                     if (df_headwing == nullptr)
-                        throw LIBRPA_RUNTIME_ERROR("Head/wing dielectric function is not initialized");
+                        throw LIBRPA_RUNTIME_ERROR(
+                            "Head/wing dielectric function is not initialized");
                     if (strict_2d_complete_wc_gamma)
-                        df_headwing->rewrite_strict_2d_wc(chi0_block, ifreq,
-                                                          desc_nabf_nabf_opt, coulwc_block);
+                        df_headwing->rewrite_strict_2d_wc(chi0_block, ifreq, desc_nabf_nabf_opt,
+                                                          coulwc_block);
                     else
                         df_headwing->rewrite_eps(chi0_block, ifreq, desc_nabf_nabf_opt);
-                    
+
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
-                if (use_gpu_replace_scalapack)
-                {
-                    DEVICE_CHECK(deviceMemcpyAsync(chi0_block_ptr, chi0_block.ptr(), chi0_block.size() * sizeof(complex<double>), deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
-                }
+                    if (use_gpu_replace_scalapack)
+                    {
+                        DEVICE_CHECK(deviceMemcpyAsync(chi0_block_ptr, chi0_block.ptr(),
+                                                       chi0_block.size() * sizeof(complex<double>),
+                                                       deviceMemcpyHostToDevice,
+                                                       blacs_h.ddla_handle->stream));
+                    }
 #endif
                     // if (debug)
                     // {
@@ -3459,14 +3944,21 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                     const int jlo = desc_nabf_nabf_opt.indx_g2l_c(0);
                     if (ilo >= 0 && jlo >= 0)
                     {
-                        ofs_myid << get_timestamp() << " Perform the head element overwrite" << endl;
-                        const std::complex<double> head_correction = epsmac_LF_imagfreq[ifreq] - 1.0;
+                        ofs_myid << get_timestamp() << " Perform the head element overwrite"
+                                 << endl;
+                        const std::complex<double> head_correction =
+                            epsmac_LF_imagfreq[ifreq] - 1.0;
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
-                    if(use_gpu_replace_scalapack){
-                        DEVICE_CHECK(deviceMemcpyAsync(chi0_block_ptr + ilo + jlo * desc_nabf_nabf_opt.lld(), &head_correction, sizeof(std::complex<double>), deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
-                    }else
+                        if (use_gpu_replace_scalapack)
+                        {
+                            DEVICE_CHECK(deviceMemcpyAsync(
+                                chi0_block_ptr + ilo + jlo * desc_nabf_nabf_opt.lld(),
+                                &head_correction, sizeof(std::complex<double>),
+                                deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
+                        }
+                        else
 #endif
-                        chi0_block(ilo, jlo) = head_correction;
+                            chi0_block(ilo, jlo) = head_correction;
                     }
                 }
                 global::profiler.stop("epsilon_compute_eps_pgemm_1");
@@ -3474,19 +3966,52 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
                 if (use_gpu_replace_scalapack)
                 {
-                    coul_eigen_block_ptr = coul_block_ptr; // reuse device buffer, sqrtveig no longer needed
-                    DEVICE_CHECK(deviceMemcpyAsync(coul_eigen_block_ptr, coul_eigen_block.ptr(), coul_eigen_block.size() * sizeof(complex<double>), deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
+                    coul_eigen_block_ptr =
+                        coul_block_ptr;  // reuse device buffer, sqrtveig no longer needed
+                    DEVICE_CHECK(
+                        deviceMemcpyAsync(coul_eigen_block_ptr, coul_eigen_block.ptr(),
+                                          coul_eigen_block.size() * sizeof(complex<double>),
+                                          deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
                 }
 #endif
                 global::profiler.start("epsilon_compute_eps_pgemm_2", LIBRPA_VERBOSE_DEBUG);
                 LaConnector::pgemm('N', 'N', n_abf, n_nonsingular, n_nonsingular, {1.0, 0.0},
-                        coul_eigen_block_ptr, 1, 1, desc_nabf_nabf_opt,
-                        chi0_block_ptr, 1, 1, desc_nabf_nabf_opt, {0.0, 0.0},
-                        coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
+                                   coul_eigen_block_ptr, 1, 1, desc_nabf_nabf_opt, chi0_block_ptr,
+                                   1, 1, desc_nabf_nabf_opt, {0.0, 0.0}, coul_chi0_block_ptr, 1, 1,
+                                   desc_nabf_nabf_opt);
                 LaConnector::pgemm('N', 'C', n_abf, n_abf, n_nonsingular, {1.0, 0.0},
-                        coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt,
-                        coul_eigen_block_ptr, 1, 1, desc_nabf_nabf_opt, {0.0, 0.0},
-                        chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
+                                   coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt,
+                                   coul_eigen_block_ptr, 1, 1, desc_nabf_nabf_opt, {0.0, 0.0},
+                                   chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
+                if (strict_2d_complete_wc_gamma &&
+                    !omega0_override_directories.auxiliary_basis.empty())
+                {
+                    std::ostringstream filename;
+                    filename << omega0_override_directories.auxiliary_basis << "omega0_wc_ifreq_"
+                             << std::setw(3) << std::setfill('0') << ifreq << ".bin";
+                    std::vector<std::complex<double>> full_matrix;
+                    if (comm_h.is_root())
+                        full_matrix = read_strict_2d_omega0_override_binary(filename.str(), n_abf);
+                    else
+                        full_matrix.resize(static_cast<std::size_t>(n_abf) * n_abf);
+                    comm_h.bcast(full_matrix.data(), static_cast<int>(full_matrix.size()), 0);
+#pragma omp parallel for schedule(static) collapse(2)
+                    for (int i = 0; i != n_abf; ++i)
+                    {
+                        for (int j = 0; j != n_abf; ++j)
+                        {
+                            const int ilo = desc_nabf_nabf_opt.indx_g2l_r(i);
+                            const int jlo = desc_nabf_nabf_opt.indx_g2l_c(j);
+                            if (ilo >= 0 && jlo >= 0)
+                                chi0_block(ilo, jlo) =
+                                    full_matrix[static_cast<std::size_t>(i) * n_abf + j];
+                        }
+                    }
+                    if (ifreq == 0 && comm_h.is_root())
+                        std::cout << "Using externally averaged strict 2D complete Wc matrices "
+                                     "in the full auxiliary basis from "
+                                  << omega0_override_directories.auxiliary_basis << std::endl;
+                }
                 global::profiler.stop("epsilon_compute_eps_pgemm_2");
 
                 if (option_dielect_func != 3)
@@ -3497,12 +4022,15 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                 }
                 profiler.stop("epsilon_compute_eps");
             }
-            else // !(epsmac_LF_imagfreq.size() > 0 && is_gamma_point(q))
+            else  // !(epsmac_LF_imagfreq.size() > 0 && is_gamma_point(q))
             {
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
                 if (use_gpu_replace_scalapack)
                 {
-                    DEVICE_CHECK(deviceMemcpyAsync(coul_block_ptr, coul_block.ptr(), coul_block.size() * sizeof(std::complex<double>), deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
+                    DEVICE_CHECK(deviceMemcpyAsync(coul_block_ptr, coul_block.ptr(),
+                                                   coul_block.size() * sizeof(std::complex<double>),
+                                                   deviceMemcpyHostToDevice,
+                                                   blacs_h.ddla_handle->stream));
                 }
 #endif
                 profiler.start("epsilon_compute_eps", "Compute dielectric matrix");
@@ -3537,6 +4065,23 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                         diagnostic_projection, desc_nabf_nabf_opt, gamma_n_nonsingular, comm_h);
                     finite_q_p_metrics.head *= -1.0;
                     finite_q_p_head = finite_q_p_metrics.head;
+                    project_blacs_matrix_in_basis(
+                        chi0_block, coul_eigen_block, desc_nabf_nabf_opt,
+                        n_abf, diagnostic_projection_work, diagnostic_projection);
+                    current_basis_p_metrics = collect_strict_2d_block_metrics(
+                        diagnostic_projection, desc_nabf_nabf_opt, n_abf, comm_h,
+                        finite_q_head_column);
+                    current_basis_p_metrics.head *= -1.0;
+                }
+                if (!finite_q_matrix_dump_directory.empty() &&
+                    strict_2d_should_dump_finite_q_matrix(iq, ifreq, is_gamma_point(q)))
+                {
+                    std::ostringstream filename;
+                    filename << finite_q_matrix_dump_directory << "minus_p_aux_iq_"
+                             << std::setw(3) << std::setfill('0') << iq << ".mtx";
+                    print_matrix_mm_file_parallel(
+                        filename.str(), chi0_block, desc_nabf_nabf_opt,
+                        "-sqrt(V) chi0 sqrt(V) before adding the identity", 0.0);
                 }
                 // add 1 to diagonal to get dielectric matrix, varepsilon
                 LaConnector::pdam(1.0, chi0_block_ptr, desc_nabf_nabf_opt);
@@ -3574,9 +4119,9 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             // }
             // debug end
             std::ostringstream epsinv_debug_name;
-            epsinv_debug_name << std::fixed << std::setprecision(10)
-                              << "epsinv_minus_identity_qx_" << q.x << "_qy_" << q.y
-                              << "_qz_" << q.z << "_freq_" << ifreq << ".mtx";
+            epsinv_debug_name << std::fixed << std::setprecision(10) << "epsinv_minus_identity_qx_"
+                              << q.x << "_qy_" << q.y << "_qz_" << q.z << "_freq_" << ifreq
+                              << ".mtx";
             dump_blacs_debug_matrix(debug, output_dir, epsinv_debug_name.str(), chi0_block,
                                     desc_nabf_nabf_opt, "", 1e-10);
 
@@ -3589,28 +4134,30 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                                  "average."
                               << std::endl;
             }
-            else if (epsmac_LF_imagfreq.size() > 0 && is_gamma_point(q)
-                     && option_dielect_func == 3)
+            else if (epsmac_LF_imagfreq.size() > 0 && is_gamma_point(q) && option_dielect_func == 3)
             {
-                // Dielectric matrix is already inverted, only multiply by square root coulwc from both sides
+                // Dielectric matrix is already inverted, only multiply by square root coulwc from
+                // both sides
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
-                if(use_gpu_replace_scalapack)
+                if (use_gpu_replace_scalapack)
                 {
                     coulwc_block_ptr = coul_block_ptr;
-                    DEVICE_CHECK(deviceMemcpyAsync(coulwc_block_ptr, coulwc_block.ptr(), coulwc_block.size() * sizeof(complex<double>), deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
+                    DEVICE_CHECK(deviceMemcpyAsync(coulwc_block_ptr, coulwc_block.ptr(),
+                                                   coulwc_block.size() * sizeof(complex<double>),
+                                                   deviceMemcpyHostToDevice,
+                                                   blacs_h.ddla_handle->stream));
                 }
 #endif
                 LaConnector::pdam(-1.0, chi0_block_ptr, desc_nabf_nabf_opt);
                 global::profiler.start("epsilon_multiply_coulwc_1", "Multiply truncated Coulomb",
-                                      LIBRPA_VERBOSE_DEBUG);
-                LaConnector::pgemm('N', 'N', n_abf, n_abf, n_abf, {1.0, 0.0},
-                        coulwc_block_ptr, 1, 1, desc_nabf_nabf_opt,
-                        chi0_block_ptr, 1, 1, desc_nabf_nabf_opt, {0.0, 0.0},
-                        coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
-                LaConnector::pgemm('N', 'N', n_abf, n_abf, n_abf, {1.0, 0.0},
-                        coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt,
-                        coulwc_block_ptr, 1, 1, desc_nabf_nabf_opt, {0.0, 0.0},
-                        chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
+                                       LIBRPA_VERBOSE_DEBUG);
+                LaConnector::pgemm('N', 'N', n_abf, n_abf, n_abf, {1.0, 0.0}, coulwc_block_ptr, 1,
+                                   1, desc_nabf_nabf_opt, chi0_block_ptr, 1, 1, desc_nabf_nabf_opt,
+                                   {0.0, 0.0}, coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
+                LaConnector::pgemm('N', 'N', n_abf, n_abf, n_abf, {1.0, 0.0}, coul_chi0_block_ptr,
+                                   1, 1, desc_nabf_nabf_opt, coulwc_block_ptr, 1, 1,
+                                   desc_nabf_nabf_opt, {0.0, 0.0}, chi0_block_ptr, 1, 1,
+                                   desc_nabf_nabf_opt);
                 global::profiler.stop("epsilon_multiply_coulwc_1");
             }
             else
@@ -3622,12 +4169,19 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                 if (use_gpu_replace_scalapack)
                 {
                     coulwc_block_ptr = coul_block_ptr;
-                    DEVICE_CHECK(deviceMemcpyAsync(coulwc_block_ptr, coulwc_block.ptr(), coulwc_block.size() * sizeof(std::complex<double>), deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
-                    DEVICE_CHECK(deviceMemcpyAsync(coul_chi0_block_ptr, coulwc_block_ptr, coulwc_block.size() * sizeof(std::complex<double>), deviceMemcpyDeviceToDevice, blacs_h.ddla_handle->stream));
+                    DEVICE_CHECK(
+                        deviceMemcpyAsync(coulwc_block_ptr, coulwc_block.ptr(),
+                                          coulwc_block.size() * sizeof(std::complex<double>),
+                                          deviceMemcpyHostToDevice, blacs_h.ddla_handle->stream));
+                    DEVICE_CHECK(
+                        deviceMemcpyAsync(coul_chi0_block_ptr, coulwc_block_ptr,
+                                          coulwc_block.size() * sizeof(std::complex<double>),
+                                          deviceMemcpyDeviceToDevice, blacs_h.ddla_handle->stream));
                 }
                 else
 #endif
-                memcpy(coul_chi0_block_ptr, coulwc_block_ptr, coulwc_block.size() * sizeof(std::complex<double>));
+                    memcpy(coul_chi0_block_ptr, coulwc_block_ptr,
+                           coulwc_block.size() * sizeof(std::complex<double>));
                 int info = 0;
                 if (use_cholesky_gw_wc)
                 {
@@ -3637,16 +4191,16 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                 }
                 else
                 {
-                    LaConnector::pgesv(n_abf, n_abf, chi0_block_ptr, 1, 1,
-                                       desc_nabf_nabf_opt, coul_chi0_block_ptr, 1, 1,
-                                       desc_nabf_nabf_opt, info);
+                    LaConnector::pgesv(n_abf, n_abf, chi0_block_ptr, 1, 1, desc_nabf_nabf_opt,
+                                       coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt, info);
                 }
                 assert(info == 0);
-                LaConnector::axpy(coulwc_block.size(), {-1.0, 0.0}, coulwc_block_ptr, 1, coul_chi0_block_ptr, 1, blacs_h);
+                LaConnector::axpy(coulwc_block.size(), {-1.0, 0.0}, coulwc_block_ptr, 1,
+                                  coul_chi0_block_ptr, 1, blacs_h);
                 global::profiler.stop("epsilon_solver_coulwc_1");
 
-                global::profiler.start("epsilon_multiply_coulwc_2",
-                                       "Multiply truncated Coulomb", LIBRPA_VERBOSE_DEBUG);
+                global::profiler.start("epsilon_multiply_coulwc_2", "Multiply truncated Coulomb",
+                                       LIBRPA_VERBOSE_DEBUG);
                 LaConnector::pgemm('N', 'N', n_abf, n_abf, n_abf, {1.0, 0.0}, coulwc_block_ptr, 1,
                                    1, desc_nabf_nabf_opt, coul_chi0_block_ptr, 1, 1,
                                    desc_nabf_nabf_opt, {0.0, 0.0}, chi0_block_ptr, 1, 1,
@@ -3657,14 +4211,14 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
 #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
             if (use_gpu_replace_scalapack)
             {
-                DEVICE_CHECK(deviceMemcpyAsync(chi0_block.ptr(), chi0_block_ptr,
-                                                chi0_block.size() * sizeof(complex<double>),
-                                                deviceMemcpyDeviceToHost,
-                                                blacs_h.ddla_handle->stream));
+                DEVICE_CHECK(deviceMemcpyAsync(
+                    chi0_block.ptr(), chi0_block_ptr, chi0_block.size() * sizeof(complex<double>),
+                    deviceMemcpyDeviceToHost, blacs_h.ddla_handle->stream));
                 DEVICE_CHECK(deviceStreamSynchronize(blacs_h.ddla_handle->stream));
             }
 #endif
             Strict2dBlockMetrics wc_metrics;
+            Strict2dBlockMetrics current_basis_wc_metrics;
             const bool collect_wc_metrics =
                 output_2d_finite_q_diagnostics && (ifreq == 0 || is_gamma_point(q));
             if (collect_wc_metrics)
@@ -3674,6 +4228,121 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                                               diagnostic_projection);
                 wc_metrics = collect_strict_2d_block_metrics(
                     diagnostic_projection, desc_nabf_nabf_opt, gamma_n_nonsingular, comm_h);
+                if (!is_gamma_point(q))
+                {
+                    project_blacs_matrix_in_basis(
+                        chi0_block, coul_eigen_block, desc_nabf_nabf_opt,
+                        n_abf, diagnostic_projection_work, diagnostic_projection);
+                    current_basis_wc_metrics = collect_strict_2d_block_metrics(
+                        diagnostic_projection, desc_nabf_nabf_opt, n_abf, comm_h,
+                        finite_q_head_column);
+                }
+            }
+            if (output_2d_finite_q_diagnostics && ifreq == 0 && !is_gamma_point(q))
+            {
+                const auto minimum_q = strict_2d_minimum_image_q(chi0.pbc, q);
+                const double q_internal = std::hypot(minimum_q.x, minimum_q.y);
+                diagnostic_projection.zero_out();
+                df_headwing->rewrite_strict_2d_wc_at_q(
+                    diagnostic_projection, ifreq, desc_nabf_nabf_opt,
+                    minimum_q.x / q_internal, minimum_q.y / q_internal,
+                    strict_2d_physical_q(q_internal));
+                analytic_finite_q_wc_metrics = collect_strict_2d_block_metrics(
+                    diagnostic_projection, desc_nabf_nabf_opt, gamma_n_nonsingular, comm_h);
+            }
+            if (!finite_q_matrix_dump_directory.empty() &&
+                strict_2d_should_dump_finite_q_matrix(iq, ifreq, is_gamma_point(q)))
+            {
+                std::ostringstream filename;
+                filename << finite_q_matrix_dump_directory << "wc_aux_iq_" << std::setw(3)
+                         << std::setfill('0') << iq << ".mtx";
+                print_matrix_mm_file_parallel(filename.str(), chi0_block,
+                                              desc_nabf_nabf_opt,
+                                              "screened interaction Wc in the auxiliary basis",
+                                              0.0);
+            }
+            if (use_alpha_wc_diagnostic && !is_gamma_point(q))
+            {
+                std::copy(diagnostic_alpha_wc.ptr(),
+                          diagnostic_alpha_wc.ptr() + diagnostic_alpha_wc.size(), chi0_block.ptr());
+                if (ifreq == 0 && comm_h.is_root())
+                    std::cout << "Applied epsilon^-1=0.25 I Wc reference at finite q=(" << qf.x
+                              << ", " << qf.y << ", " << qf.z << ")." << std::endl;
+            }
+            if (use_first_shell_analytic_wc_diagnostic && !is_gamma_point(q))
+            {
+                const auto minimum_q = strict_2d_minimum_image_q(chi0.pbc, q);
+                const double q_internal = std::hypot(minimum_q.x, minimum_q.y);
+                if (classify_strict_2d_qshell(q_internal, first_q_norm) ==
+                    Strict2dQshellRegion::first)
+                {
+                    const double qhat_x = minimum_q.x / q_internal;
+                    const double qhat_y = minimum_q.y / q_internal;
+                    diagnostic_projection.zero_out();
+                    df_headwing->rewrite_strict_2d_wc_at_q(diagnostic_projection, ifreq,
+                                                           desc_nabf_nabf_opt, qhat_x, qhat_y,
+                                                           strict_2d_physical_q(q_internal));
+                    ScalapackConnector::pgemm_f(
+                        'N', 'N', n_abf, gamma_n_nonsingular, gamma_n_nonsingular, C_ONE,
+                        gamma_coulomb_basis.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
+                        diagnostic_projection.ptr(), 1, 1, desc_nabf_nabf_opt.desc, C_ZERO,
+                        diagnostic_projection_work.ptr(), 1, 1, desc_nabf_nabf_opt.desc);
+                    ScalapackConnector::pgemm_f('N', 'C', n_abf, n_abf, gamma_n_nonsingular, C_ONE,
+                                                diagnostic_projection_work.ptr(), 1, 1,
+                                                desc_nabf_nabf_opt.desc, gamma_coulomb_basis.ptr(),
+                                                1, 1, desc_nabf_nabf_opt.desc, C_ZERO,
+                                                chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc);
+                    if (ifreq == 0 && comm_h.is_root())
+                        std::cout << "Applied complete analytic small-q Wc to first shell at q=("
+                                  << qf.x << ", " << qf.y << ", " << qf.z << ")." << std::endl;
+                }
+            }
+            if (use_first_shell_wc_block_diagnostic && !is_gamma_point(q))
+            {
+                const auto minimum_q = strict_2d_minimum_image_q(chi0.pbc, q);
+                const double q_internal = std::hypot(minimum_q.x, minimum_q.y);
+                if (classify_strict_2d_qshell(q_internal, first_q_norm) ==
+                    Strict2dQshellRegion::first)
+                {
+                    project_blacs_matrix_in_basis(
+                        chi0_block, coul_eigen_block, desc_nabf_nabf_opt, n_abf,
+                        diagnostic_projection_work, diagnostic_projection);
+#pragma omp parallel for schedule(static) collapse(2)
+                    for (int row = 0; row != n_abf; ++row)
+                    {
+                        for (int column = 0; column != n_abf; ++column)
+                        {
+                            if (strict_2d_wc_block_keeps(first_shell_wc_block_diagnostic, row,
+                                                        column, finite_q_head_column))
+                                continue;
+                            const int local_row = desc_nabf_nabf_opt.indx_g2l_r(row);
+                            const int local_column = desc_nabf_nabf_opt.indx_g2l_c(column);
+                            if (local_row >= 0 && local_column >= 0)
+                                diagnostic_projection(local_row, local_column) = 0.0;
+                        }
+                    }
+                    ScalapackConnector::pgemm_f(
+                        'N', 'N', n_abf, n_abf, n_abf, C_ONE, coul_eigen_block.ptr(), 1, 1,
+                        desc_nabf_nabf_opt.desc, diagnostic_projection.ptr(), 1, 1,
+                        desc_nabf_nabf_opt.desc, C_ZERO, diagnostic_projection_work.ptr(), 1, 1,
+                        desc_nabf_nabf_opt.desc);
+                    ScalapackConnector::pgemm_f(
+                        'N', 'C', n_abf, n_abf, n_abf, C_ONE,
+                        diagnostic_projection_work.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
+                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc, C_ZERO,
+                        chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc);
+                    if (ifreq == 0 && comm_h.is_root())
+                    {
+                        const char *mode =
+                            first_shell_wc_block_diagnostic == Strict2dWcBlock::head
+                                ? "head"
+                            : first_shell_wc_block_diagnostic == Strict2dWcBlock::wing ? "wing"
+                                                                                      : "body";
+                        std::cout << "Applied first-shell numerical Wc " << mode
+                                  << "-block diagnostic at q=(" << qf.x << ", " << qf.y << ", "
+                                  << qf.z << ")." << std::endl;
+                    }
+                }
             }
             if (output_2d_finite_q_diagnostics && is_gamma_point(q))
             {
@@ -3695,31 +4364,91 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                         << q_weight * wc_metrics.head_body_frobenius << ','
                         << q_weight * wc_metrics.body_head_frobenius << ','
                         << q_weight * wc_metrics.body_body_frobenius << '\n';
+                const double scale = df_headwing->get_strict_2d_pw_to_auxiliary_scale();
+                const auto pw_head_analytic = df_headwing->get_strict_2d_pw_wc_head_average(ifreq);
+                const auto aux_head_expected = scale * scale * pw_head_analytic;
+                const auto pw_head_roundtrip = wc_metrics.head / (scale * scale);
+                const double relative_error = std::abs(wc_metrics.head - aux_head_expected) /
+                                              std::max(std::abs(aux_head_expected), 1.0e-30);
+                if (comm_h.is_root())
+                    gamma_wc_transform_diagnostics
+                        << ifreq << ',' << freq << ',' << scale << ',' << pw_head_analytic.real()
+                        << ',' << pw_head_analytic.imag() << ',' << aux_head_expected.real() << ','
+                        << aux_head_expected.imag() << ',' << wc_metrics.head.real() << ','
+                        << wc_metrics.head.imag() << ',' << pw_head_roundtrip.real() << ','
+                        << pw_head_roundtrip.imag() << ',' << relative_error << '\n';
             }
             if (output_2d_finite_q_diagnostics && ifreq == 0 && !is_gamma_point(q))
             {
-                const double q_internal = std::hypot(q.x, q.y);
+                const auto minimum_q = strict_2d_minimum_image_q(chi0.pbc, q);
+                const double q_internal = std::hypot(minimum_q.x, minimum_q.y);
                 const double q_physical = strict_2d_physical_q(q_internal);
                 if (!(q_physical > 0.0) || !std::isfinite(q_physical))
                     throw LIBRPA_RUNTIME_ERROR(
                         "strict 2D finite-q diagnostic encountered invalid q");
-                const double qhat_x = q.x / q_internal;
-                const double qhat_y = q.y / q_internal;
+                const double qhat_x = minimum_q.x / q_internal;
+                const double qhat_y = minimum_q.y / q_internal;
                 const auto reference =
-                    df_headwing->get_strict_2d_finite_q_reference(ifreq, q.x, q.y);
+                    df_headwing->get_strict_2d_finite_q_reference(ifreq, minimum_q.x, minimum_q.y);
                 const auto wc_head = wc_metrics.head;
                 const double q_weight = chi0.q_weight(q);
                 const auto p_over_q = finite_q_p_head / q_physical;
+                const auto chi0_over_q2 =
+                    finite_q_chi0_metrics.head / (q_physical * q_physical);
+                const auto current_basis_p_over_q =
+                    current_basis_p_metrics.head / q_physical;
+                const auto current_basis_chi0_over_q2 =
+                    current_basis_chi0_metrics.head / (q_physical * q_physical);
+                const auto current_basis_q_wc_head =
+                    q_physical * current_basis_wc_metrics.head;
                 const auto analytic_p_over_q = -reference.epsilon_minus_identity_over_q;
                 if (comm_h.is_root())
                     finite_q_diagnostics
                         << iq << ',' << qf.x << ',' << qf.y << ',' << qf.z << ',' << q_physical
                         << ',' << qhat_x << ',' << qhat_y << ',' << q_weight << ','
-                        << finite_q_head_overlap << ',' << finite_q_p_head.real() << ','
+                        << finite_q_head_overlap << ',' << finite_q_coulomb_head_eigenvalue << ','
+                        << q_physical * finite_q_coulomb_head_eigenvalue << ','
+                        << finite_q_head_column << ','
+                        << finite_q_p_head.real() << ','
                         << finite_q_p_head.imag() << ',' << p_over_q.real() << ','
                         << p_over_q.imag() << ',' << finite_q_p_metrics.head_body_frobenius << ','
                         << finite_q_p_metrics.body_head_frobenius << ','
-                        << finite_q_p_metrics.body_body_frobenius << ',' << analytic_p_over_q.real()
+                        << finite_q_p_metrics.body_body_frobenius << ','
+                        << finite_q_chi0_metrics.head.real() << ','
+                        << finite_q_chi0_metrics.head.imag() << ',' << chi0_over_q2.real() << ','
+                        << chi0_over_q2.imag() << ','
+                        << finite_q_chi0_metrics.head_body_frobenius << ','
+                        << finite_q_chi0_metrics.body_head_frobenius << ','
+                        << finite_q_chi0_metrics.body_body_frobenius << ','
+                        << current_basis_p_metrics.head.real() << ','
+                        << current_basis_p_metrics.head.imag() << ','
+                        << current_basis_p_over_q.real() << ','
+                        << current_basis_p_over_q.imag() << ','
+                        << current_basis_p_metrics.head_body_frobenius << ','
+                        << current_basis_p_metrics.body_head_frobenius << ','
+                        << current_basis_p_metrics.body_body_frobenius << ','
+                        << current_basis_chi0_metrics.head.real() << ','
+                        << current_basis_chi0_metrics.head.imag() << ','
+                        << current_basis_chi0_over_q2.real() << ','
+                        << current_basis_chi0_over_q2.imag() << ','
+                        << current_basis_wc_metrics.head.real() << ','
+                        << current_basis_wc_metrics.head.imag() << ','
+                        << current_basis_wc_metrics.head_body_frobenius << ','
+                        << current_basis_wc_metrics.body_head_frobenius << ','
+                        << current_basis_wc_metrics.body_body_frobenius << ','
+                        << current_basis_q_wc_head.real() << ','
+                        << current_basis_q_wc_head.imag() << ','
+                        << q_weight * current_basis_wc_metrics.head.real() << ','
+                        << q_weight * current_basis_wc_metrics.head.imag() << ','
+                        << q_weight * current_basis_wc_metrics.head_body_frobenius << ','
+                        << q_weight * current_basis_wc_metrics.body_head_frobenius << ','
+                        << q_weight * current_basis_wc_metrics.body_body_frobenius << ','
+                        << analytic_finite_q_wc_metrics.head.real() << ','
+                        << analytic_finite_q_wc_metrics.head.imag() << ','
+                        << analytic_finite_q_wc_metrics.head_body_frobenius << ','
+                        << analytic_finite_q_wc_metrics.body_head_frobenius << ','
+                        << analytic_finite_q_wc_metrics.body_body_frobenius << ','
+                        << analytic_p_over_q.real()
                         << ',' << analytic_p_over_q.imag() << ',' << wc_head.real() << ','
                         << wc_head.imag() << ',' << wc_metrics.head_body_frobenius << ','
                         << wc_metrics.body_head_frobenius << ',' << wc_metrics.body_body_frobenius
@@ -3737,21 +4466,22 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                         << q_weight * wc_metrics.body_body_frobenius << '\n';
             }
             // convert back to initial distribution
-            ScalapackConnector::pgemr2d_f(n_abf, n_abf, chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
-                                        temp_block.ptr(), 1, 1, desc_nabf_nabf.desc, blacs_h.ictxt);
+            ScalapackConnector::pgemr2d_f(n_abf, n_abf, chi0_block.ptr(), 1, 1,
+                                          desc_nabf_nabf_opt.desc, temp_block.ptr(), 1, 1,
+                                          desc_nabf_nabf.desc, blacs_h.ictxt);
             // lib_printf("chi0_block\n%s", str(chi0_block).c_str());
             global::profiler.stop("epsilon_wc_work_q_omega");
             // now temp_block contains the screened Coulomb interaction Wc (i.e. W-V)
             // under the desired array descriptor
             Wc_freq_q[freq][q] = temp_block.copy();
 
-            librpa_int::global::lib_printf_root("Time for Wc(i_q=%d, i_omega=%d) (seconds, Wall/CPU): %f %f\n",
-                    iq + 1, ifreq + 1,
-                    global::profiler.get_wall_time_last("epsilon_wc_work_q_omega"),
-                    global::profiler.get_cpu_time_last("epsilon_wc_work_q_omega"));
+            librpa_int::global::lib_printf_root(
+                "Time for Wc(i_q=%d, i_omega=%d) (seconds, Wall/CPU): %f %f\n", iq + 1, ifreq + 1,
+                global::profiler.get_wall_time_last("epsilon_wc_work_q_omega"),
+                global::profiler.get_cpu_time_last("epsilon_wc_work_q_omega"));
         }
 #if defined(LIBRPA_USE_CUDA) || defined(LIBRPA_USE_HIP)
-        if(use_gpu_replace_scalapack)
+        if (use_gpu_replace_scalapack)
         {
             DEVICE_CHECK(deviceFreeAsync(coul_chi0_block_ptr, blacs_h.ddla_handle->stream));
             DEVICE_CHECK(deviceFreeAsync(coul_block_ptr, blacs_h.ddla_handle->stream));
@@ -3762,27 +4492,26 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
 #else
     throw std::logic_error("need compilation with LibRI");
 #endif
-    #if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
+#if defined(LIBRPA_USE_HIP) || defined(LIBRPA_USE_CUDA)
     if (use_gpu_replace_scalapack)
     {
         DEVICE_CHECK(deviceFreeAsync(chi0_block_ptr, blacs_h.ddla_handle->stream));
     }
-    #endif
+#endif
     global::profiler.stop("compute_Wc_freq_q_work");
-    librpa_int::global::lib_printf_root("Time for Wc computation (seconds, Wall/CPU): %f %f\n",
-            global::profiler.get_wall_time_last("compute_Wc_freq_q_work"),
-            global::profiler.get_cpu_time_last("compute_Wc_freq_q_work"));
+    librpa_int::global::lib_printf_root(
+        "Time for Wc computation (seconds, Wall/CPU): %f %f\n",
+        global::profiler.get_wall_time_last("compute_Wc_freq_q_work"),
+        global::profiler.get_cpu_time_last("compute_Wc_freq_q_work"));
 
     return Wc_freq_q;
 }
 
-void unfold_Wc_freq_q_blacs(
-    std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
-    std::map<Vector3_Order<double>, ComplexMatrix> &sinvS,
-    const vector<Vector3_Order<double>> &qlist,
-    const BlacsCtxtHandler &blacs_h,
-    const ArrayDesc &desc_small,
-    const ArrayDesc &desc_full)
+void unfold_Wc_freq_q_blacs(std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
+                            std::map<Vector3_Order<double>, ComplexMatrix> &sinvS,
+                            const vector<Vector3_Order<double>> &qlist,
+                            const BlacsCtxtHandler &blacs_h, const ArrayDesc &desc_small,
+                            const ArrayDesc &desc_full)
 {
     using global::profiler;
 
@@ -3808,7 +4537,8 @@ void unfold_Wc_freq_q_blacs(
                 throw LIBRPA_RUNTIME_ERROR("Cannot unfold Wc: missing shrink_sinvS q-point");
             const auto &U = sinvS_iter->second;
             if (U.nr != n_small || U.nc != n_full)
-                throw LIBRPA_RUNTIME_ERROR("Cannot unfold Wc: shrink_sinvS dimensions do not match descriptors");
+                throw LIBRPA_RUNTIME_ERROR(
+                    "Cannot unfold Wc: shrink_sinvS dimensions do not match descriptors");
 
             u_block.zero_out();
             Wc_u.zero_out();
@@ -3826,28 +4556,22 @@ void unfold_Wc_freq_q_blacs(
             }
 
             profiler.start("unfold_Wc_q_1");
-            ScalapackConnector::pgemm_f('N', 'N', n_small, n_full, n_small,
-                                        1.0, q_iter->second.ptr(), 1, 1,
-                                        desc_small.desc, u_block.ptr(), 1, 1,
-                                        desc_sl.desc, 0.0, Wc_u.ptr(), 1, 1,
-                                        desc_sl.desc);
+            ScalapackConnector::pgemm_f('N', 'N', n_small, n_full, n_small, 1.0,
+                                        q_iter->second.ptr(), 1, 1, desc_small.desc, u_block.ptr(),
+                                        1, 1, desc_sl.desc, 0.0, Wc_u.ptr(), 1, 1, desc_sl.desc);
             profiler.stop("unfold_Wc_q_1");
             profiler.start("unfold_Wc_q_2");
-            ScalapackConnector::pgemm_f('C', 'N', n_full, n_full, n_small,
-                                        1.0, u_block.ptr(), 1, 1,
-                                        desc_sl.desc, Wc_u.ptr(), 1, 1,
-                                        desc_sl.desc, 0.0,
-                                        Wc_full_block.ptr(), 1, 1,
-                                        desc_full.desc);
+            ScalapackConnector::pgemm_f('C', 'N', n_full, n_full, n_small, 1.0, u_block.ptr(), 1, 1,
+                                        desc_sl.desc, Wc_u.ptr(), 1, 1, desc_sl.desc, 0.0,
+                                        Wc_full_block.ptr(), 1, 1, desc_full.desc);
             profiler.stop("unfold_Wc_q_2");
             q_iter->second = Wc_full_block.copy();
         }
     }
 }
 
-static void fill_blacs_local_from_dense(Matz& local_matrix,
-                                        const ArrayDesc& desc,
-                                        const ComplexMatrix& dense_matrix)
+static void fill_blacs_local_from_dense(Matz &local_matrix, const ArrayDesc &desc,
+                                        const ComplexMatrix &dense_matrix)
 {
     if (dense_matrix.nr != desc.m() || dense_matrix.nc != desc.n())
     {
@@ -3865,9 +4589,8 @@ static void fill_blacs_local_from_dense(Matz& local_matrix,
     }
 }
 
-static Matz rotate_symmetry_blacs_wq(const Matz& Wq_rep,
-                                     const ArrayDesc& desc,
-                                     const ComplexMatrix& transform_dense,
+static Matz rotate_symmetry_blacs_wq(const Matz &Wq_rep, const ArrayDesc &desc,
+                                     const ComplexMatrix &transform_dense,
                                      const bool use_time_reversal)
 {
     if (desc.m() != desc.n())
@@ -3886,32 +4609,26 @@ static Matz rotate_symmetry_blacs_wq(const Matz& Wq_rep,
         transform_conj.conj();
         auto Wq_conj = Wq_rep.copy();
         Wq_conj.conj();
-        ScalapackConnector::pgemm_f('N', 'N', n, n, n, 1.0,
-                                    transform_conj.ptr(), 1, 1, desc.desc,
-                                    Wq_conj.ptr(), 1, 1, desc.desc,
-                                    0.0, tmp.ptr(), 1, 1, desc.desc);
-        ScalapackConnector::pgemm_f('N', 'T', n, n, n, 1.0,
-                                    tmp.ptr(), 1, 1, desc.desc,
-                                    transform.ptr(), 1, 1, desc.desc,
-                                    0.0, Wq_member.ptr(), 1, 1, desc.desc);
+        ScalapackConnector::pgemm_f('N', 'N', n, n, n, 1.0, transform_conj.ptr(), 1, 1, desc.desc,
+                                    Wq_conj.ptr(), 1, 1, desc.desc, 0.0, tmp.ptr(), 1, 1,
+                                    desc.desc);
+        ScalapackConnector::pgemm_f('N', 'T', n, n, n, 1.0, tmp.ptr(), 1, 1, desc.desc,
+                                    transform.ptr(), 1, 1, desc.desc, 0.0, Wq_member.ptr(), 1, 1,
+                                    desc.desc);
     }
     else
     {
-        ScalapackConnector::pgemm_f('N', 'N', n, n, n, 1.0,
-                                    transform.ptr(), 1, 1, desc.desc,
-                                    Wq_rep.ptr(), 1, 1, desc.desc,
-                                    0.0, tmp.ptr(), 1, 1, desc.desc);
-        ScalapackConnector::pgemm_f('N', 'C', n, n, n, 1.0,
-                                    tmp.ptr(), 1, 1, desc.desc,
-                                    transform.ptr(), 1, 1, desc.desc,
-                                    0.0, Wq_member.ptr(), 1, 1, desc.desc);
+        ScalapackConnector::pgemm_f('N', 'N', n, n, n, 1.0, transform.ptr(), 1, 1, desc.desc,
+                                    Wq_rep.ptr(), 1, 1, desc.desc, 0.0, tmp.ptr(), 1, 1, desc.desc);
+        ScalapackConnector::pgemm_f('N', 'C', n, n, n, 1.0, tmp.ptr(), 1, 1, desc.desc,
+                                    transform.ptr(), 1, 1, desc.desc, 0.0, Wq_member.ptr(), 1, 1,
+                                    desc.desc);
     }
     return Wq_member;
 }
 
-static Matz restore_symmetry_blacs_wq_to_star_source(const Matz& Wq_source,
-                                                     const ArrayDesc& desc,
-                                                     const ComplexMatrix& source_transform_dense,
+static Matz restore_symmetry_blacs_wq_to_star_source(const Matz &Wq_source, const ArrayDesc &desc,
+                                                     const ComplexMatrix &source_transform_dense,
                                                      const bool source_uses_time_reversal)
 {
     if (desc.m() != desc.n())
@@ -3930,36 +4647,30 @@ static Matz restore_symmetry_blacs_wq_to_star_source(const Matz& Wq_source,
         Wq_effective.conj();
     }
 
-    ScalapackConnector::pgemm_f('C', 'N', n, n, n, 1.0,
-                                source_transform.ptr(), 1, 1, desc.desc,
-                                Wq_effective.ptr(), 1, 1, desc.desc,
-                                0.0, tmp.ptr(), 1, 1, desc.desc);
-    ScalapackConnector::pgemm_f('N', 'N', n, n, n, 1.0,
-                                tmp.ptr(), 1, 1, desc.desc,
-                                source_transform.ptr(), 1, 1, desc.desc,
-                                0.0, Wq_star.ptr(), 1, 1, desc.desc);
+    ScalapackConnector::pgemm_f('C', 'N', n, n, n, 1.0, source_transform.ptr(), 1, 1, desc.desc,
+                                Wq_effective.ptr(), 1, 1, desc.desc, 0.0, tmp.ptr(), 1, 1,
+                                desc.desc);
+    ScalapackConnector::pgemm_f('N', 'N', n, n, n, 1.0, tmp.ptr(), 1, 1, desc.desc,
+                                source_transform.ptr(), 1, 1, desc.desc, 0.0, Wq_star.ptr(), 1, 1,
+                                desc.desc);
     return Wq_star;
 }
 
 static std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
-    const std::map<Vector3_Order<double>, Matz>& Wq_rep_map,
-    const PeriodicBoundaryData& pbc,
-    const SymmetryQPointView& qpoint_view,
-    const SymmetryContext& symmetry_context,
-    const AtomicBasis& atbasis_Wc,
-    const ArrayDesc& ad_Wc)
+    const std::map<Vector3_Order<double>, Matz> &Wq_rep_map, const PeriodicBoundaryData &pbc,
+    const SymmetryQPointView &qpoint_view, const SymmetryContext &symmetry_context,
+    const AtomicBasis &atbasis_Wc, const ArrayDesc &ad_Wc)
 {
     const auto atom_nabf = build_atom_nabf_map(atbasis_Wc);
-    const auto abf_layouts =
-        atbasis_Wc.build_species_basis_layouts(symmetry_context.atom_to_type);
-    if (!symmetry_species_layouts_match_atom_counts(
-            abf_layouts, symmetry_context.atom_to_type, atom_nabf))
+    const auto abf_layouts = atbasis_Wc.build_species_basis_layouts(symmetry_context.atom_to_type);
+    if (!symmetry_species_layouts_match_atom_counts(abf_layouts, symmetry_context.atom_to_type,
+                                                    atom_nabf))
     {
         throw LIBRPA_RUNTIME_ERROR("Dense Wc symmetry restore ABF layout mismatch");
     }
 
     std::map<Vector3_Order<double>, Matz> Wq_full_map;
-    for (const auto& q_rep : qpoint_view.representatives)
+    for (const auto &q_rep : qpoint_view.representatives)
     {
         const auto Wq_iter = find_matching_symmetry_qpoint(Wq_rep_map, q_rep);
         if (Wq_iter == Wq_rep_map.end())
@@ -3968,12 +4679,11 @@ static std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
         }
         const Vector3_Order<double> q_rep_frac =
             restrict_fractional_coordinate(Vector3_Order<double>{pbc.latvec * q_rep});
-        const auto& star =
-            find_symmetry_kstar_for_kpoint(symmetry_context.kstars, q_rep_frac,
-                                           "dense Wc q-star restore");
-        const auto& members = qpoint_view.members.at(q_rep);
-        auto find_star_member_index = [](const SymmetryKStar& star,
-                                         const Vector3_Order<double>& q_frac)
+        const auto &star = find_symmetry_kstar_for_kpoint(symmetry_context.kstars, q_rep_frac,
+                                                          "dense Wc q-star restore");
+        const auto &members = qpoint_view.members.at(q_rep);
+        auto find_star_member_index =
+            [](const SymmetryKStar &star, const Vector3_Order<double> &q_frac)
         {
             for (std::size_t imember = 0; imember != star.members.size(); ++imember)
             {
@@ -3987,9 +4697,10 @@ static std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
         const auto source_member_index = find_star_member_index(star, q_rep_frac);
         if (source_member_index == star.members.size())
         {
-            throw LIBRPA_RUNTIME_ERROR("Dense Wc symmetry restore could not find the representative in its q-star");
+            throw LIBRPA_RUNTIME_ERROR(
+                "Dense Wc symmetry restore could not find the representative in its q-star");
         }
-        const auto& source_member = star.members[source_member_index];
+        const auto &source_member = star.members[source_member_index];
         const auto source_transform = build_symmetry_kspace_operator_transform_matrix(
             symmetry_context, abf_layouts, source_member, atom_nabf, star.k_ibz,
             source_member.time_reversal, &q_rep_frac);
@@ -3998,16 +4709,17 @@ static std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
 
         for (std::size_t imember = 0; imember != members.size(); ++imember)
         {
-            const auto& q_member = members[imember];
+            const auto &q_member = members[imember];
             const Vector3_Order<double> q_member_frac =
                 restrict_fractional_coordinate(Vector3_Order<double>{pbc.latvec * q_member});
             const Vector3_Order<double> q_member_internal{q_member_frac * pbc.G};
             const auto star_member_index = find_star_member_index(star, q_member_frac);
             if (star_member_index == star.members.size())
             {
-                throw LIBRPA_RUNTIME_ERROR("Dense Wc symmetry restore could not match a q-star member");
+                throw LIBRPA_RUNTIME_ERROR(
+                    "Dense Wc symmetry restore could not match a q-star member");
             }
-            const auto& member = star.members[star_member_index];
+            const auto &member = star.members[star_member_index];
             if (star_member_index == source_member_index)
             {
                 Wq_full_map[q_member_internal] = Wq_iter->second.copy();
@@ -4015,11 +4727,10 @@ static std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
             }
 
             const auto transform = build_symmetry_kspace_operator_transform_matrix(
-                symmetry_context, abf_layouts, member, atom_nabf, star.k_ibz,
-                member.time_reversal, &q_member_frac);
+                symmetry_context, abf_layouts, member, atom_nabf, star.k_ibz, member.time_reversal,
+                &q_member_frac);
             Wq_full_map[q_member_internal] =
-                rotate_symmetry_blacs_wq(Wq_star_source, ad_Wc, transform,
-                                         member.time_reversal);
+                rotate_symmetry_blacs_wq(Wq_star_source, ad_Wc, transform, member.time_reversal);
         }
     }
     return Wq_full_map;
@@ -4027,18 +4738,14 @@ static std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
 
 std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(
     const MpiCommHandler &comm_h, map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
-    const PeriodicBoundaryData &pbc, bool remove_freq_q,
-    const SymmetryQPointView *qpoint_view,
-    const SymmetryContext *symmetry_context,
-    const AtomicBasis *atbasis_Wc,
-    const ArrayDesc *ad_Wc)
+    const PeriodicBoundaryData &pbc, bool remove_freq_q, const SymmetryQPointView *qpoint_view,
+    const SymmetryContext *symmetry_context, const AtomicBasis *atbasis_Wc, const ArrayDesc *ad_Wc)
 {
-    using librpa_int::global::ofs_myid;
     using librpa_int::global::lib_printf;
+    using librpa_int::global::ofs_myid;
 
     map<double, std::map<Vector3_Order<int>, Matz>> Wc_freq_R;
-    if (comm_h.is_root())
-        lib_printf("Converting Wc q,w -> R,t\n");
+    if (comm_h.is_root()) lib_printf("Converting Wc q,w -> R,t\n");
     comm_h.barrier();
     const auto n_k_points = pbc.get_n_cells_bvk();
     const auto &Rlist = pbc.Rlist;
@@ -4054,7 +4761,7 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(
             const auto &freq = it_freq->first;
             auto &map_q_mat = it_freq->second;
             assert(map_q_mat.size() < 2);
-            for (auto it_q = map_q_mat.begin(); it_q != map_q_mat.end(); )
+            for (auto it_q = map_q_mat.begin(); it_q != map_q_mat.end();)
             {
                 const Vector3_Order<int> center{0, 0, 0};
                 Wc_freq_R[freq][center] = it_q->second;
@@ -4093,14 +4800,13 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(
     const auto &klist_full = pbc.klist_full;
     if (static_cast<int>(klist_full.size()) != n_k_points)
     {
-        throw LIBRPA_RUNTIME_ERROR(
-            "full-BZ k-point list size is inconsistent with the BvK grid");
+        throw LIBRPA_RUNTIME_ERROR("full-BZ k-point list size is inconsistent with the BvK grid");
     }
     const bool use_full_crystal_restore =
-        qpoint_view != nullptr
-        && qpoint_view->restore_mode == SymmetryQPointRestoreMode::FULL_CRYSTAL;
-    if (use_full_crystal_restore
-        && (symmetry_context == nullptr || atbasis_Wc == nullptr || ad_Wc == nullptr))
+        qpoint_view != nullptr &&
+        qpoint_view->restore_mode == SymmetryQPointRestoreMode::FULL_CRYSTAL;
+    if (use_full_crystal_restore &&
+        (symmetry_context == nullptr || atbasis_Wc == nullptr || ad_Wc == nullptr))
     {
         throw LIBRPA_RUNTIME_ERROR("Dense Wc symmetry restore is missing symmetry inputs");
     }
@@ -4112,26 +4818,30 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(
         for (int ir = 0; ir < n_k_points; ir++)
         {
             const auto &R = Rlist[ir];
-            const auto ang = - klist_full[ik] * (R * latvec) * TWO_PI;
+            const auto ang = -klist_full[ik] * (R * latvec) * TWO_PI;
             coeff_k2r(ik, ir) = complex<double>(cos(ang), sin(ang));
         }
     }
     coeff_k2r *= 1.0 / n_k_points;
     // if (librpa_int::global::myid_global == 0) cout << coeff_k2r << endl;
 
-    // Divide into batches to limit the memory consumption of temporary matrices for Fourier transform
-    // Maximal 1GB per process for HPC usage, about 500 * 500 elements with 216 k-points (6x6x6)
+    // Divide into batches to limit the memory consumption of temporary matrices for Fourier
+    // transform Maximal 1GB per process for HPC usage, about 500 * 500 elements with 216 k-points
+    // (6x6x6)
     const auto maxbytes_tmpmat = gbytes;
     // A valid BLACS rank can own no local matrix elements when the matrix is smaller than the
     // process grid. Keep the batch divisor positive; zero local data then gives zero batches.
-    const auto size_batch_max = std::max<std::size_t>(
-        1, std::min(maxbytes_tmpmat / sizeof(cplxdb) / n_k_points, size));
+    const auto size_batch_max =
+        std::max<std::size_t>(1, std::min(maxbytes_tmpmat / sizeof(cplxdb) / n_k_points, size));
     const auto n_data_batches = ceil_div(size, size_batch_max);
-    const auto n_r_batch_max = std::min(maxbytes_tmpmat / sizeof(cplxdb) / size_batch_max, as_size(n_k_points));
+    const auto n_r_batch_max =
+        std::min(maxbytes_tmpmat / sizeof(cplxdb) / size_batch_max, as_size(n_k_points));
     const auto n_r_batches = ceil_div(as_size(n_k_points), n_r_batch_max);
 
-    global::ofs_myid << "size_batch_max/n_r_batch_max " << size_batch_max << " " << n_r_batch_max << std::endl;
-    global::ofs_myid << "n_data_batches/n_r_batches " << n_data_batches << " " << n_r_batches << std::endl;
+    global::ofs_myid << "size_batch_max/n_r_batch_max " << size_batch_max << " " << n_r_batch_max
+                     << std::endl;
+    global::ofs_myid << "n_data_batches/n_r_batches " << n_data_batches << " " << n_r_batches
+                     << std::endl;
 
     std::vector<cplxdb> kmat(size_batch_max * n_k_points);
     std::vector<cplxdb> rmat(size_batch_max * n_r_batch_max);
@@ -4140,26 +4850,27 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(
     {
         const auto freq = it_freq->first;
         const bool use_full_crystal_restore_this_freq =
-            use_full_crystal_restore
-            && it_freq->second.size() == qpoint_view->representatives.size();
+            use_full_crystal_restore &&
+            it_freq->second.size() == qpoint_view->representatives.size();
         std::map<Vector3_Order<double>, Matz> restored_map_q_mat;
         if (use_full_crystal_restore_this_freq)
         {
             restored_map_q_mat = restore_symmetry_dense_wq_map(
                 it_freq->second, pbc, *qpoint_view, *symmetry_context, *atbasis_Wc, *ad_Wc);
-            for (const auto& q_full : klist_full)
+            for (const auto &q_full : klist_full)
             {
-                if (find_matching_internal_qpoint(restored_map_q_mat, pbc, q_full)
-                    == restored_map_q_mat.end())
+                if (find_matching_internal_qpoint(restored_map_q_mat, pbc, q_full) ==
+                    restored_map_q_mat.end())
                 {
-                    throw LIBRPA_RUNTIME_ERROR("Dense Wc symmetry restore did not cover the full q grid");
+                    throw LIBRPA_RUNTIME_ERROR(
+                        "Dense Wc symmetry restore did not cover the full q grid");
                 }
             }
         }
-        const auto& map_q_mat =
+        const auto &map_q_mat =
             use_full_crystal_restore_this_freq ? restored_map_q_mat : it_freq->second;
         // initialize
-        for (const auto &R: Rlist)
+        for (const auto &R : Rlist)
         {
             Wc_freq_R[freq][R] = Matz(nr, nc, major_orig);
         }
@@ -4177,57 +4888,59 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(
                 std::fill(kmat.begin(), kmat.end(), cplxdb{0.0, 0.0});
                 if (use_full_crystal_restore_this_freq)
                 {
-                    #pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic)
                     for (int iq = 0; iq < n_k_points; iq++)
                     {
-                        const auto& q = klist_full[static_cast<std::size_t>(iq)];
+                        const auto &q = klist_full[static_cast<std::size_t>(iq)];
                         const auto it = find_matching_internal_qpoint(map_q_mat, pbc, q);
                         if (it == map_q_mat.end())
                         {
                             continue;
                         }
-                        const auto& mat = it->second;
+                        const auto &mat = it->second;
                         memcpy(kmat.data() + static_cast<std::size_t>(iq) * size_batch_max,
                                mat.ptr() + displ_data, size_this_batch * sizeof(cplxdb));
                     }
                 }
                 else
                 {
-                    #pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic)
                     for (size_t iq = 0; iq < pbc.klist_coul.size(); iq++)
                     {
                         const auto &q = pbc.klist_coul[iq];
                         auto it = map_q_mat.find(q);
                         if (it == map_q_mat.end()) continue;
                         const auto &mat = it->second;
-                        for (const auto &q_fbz: pbc.map_irk_ks.at(q))
+                        for (const auto &q_fbz : pbc.map_irk_ks.at(q))
                         {
                             const auto iq = pbc.get_k_index_full(q_fbz);
                             if (q_fbz == q)
                             {
-                                memcpy(kmat.data() + iq * size_batch_max,
-                                       mat.ptr() + displ_data, size_this_batch * sizeof(cplxdb));
+                                memcpy(kmat.data() + iq * size_batch_max, mat.ptr() + displ_data,
+                                       size_this_batch * sizeof(cplxdb));
                             }
-                            else // assume q_fbz = -q: mat(-q) = conjgate(mat(q))
+                            else  // assume q_fbz = -q: mat(-q) = conjgate(mat(q))
                             {
                                 Matz tmp(size_this_batch, 1, mat.ptr() + displ_data);
-                                memcpy(kmat.data() + iq * size_batch_max,
-                                       tmp.conj().ptr(),
+                                memcpy(kmat.data() + iq * size_batch_max, tmp.conj().ptr(),
                                        size_this_batch * sizeof(cplxdb));
                             }
                         }
                     }
                 }
                 // Transform
-                LapackConnector::gemm_f('N', 'N', size_this_batch, n_r_this_batch, n_k_points,
-                                        1.0, kmat.data(), size_batch_max, coeff_k2r.ptr() + n_k_points * displ_r, n_k_points,
-                                        0.0, rmat.data(), size_batch_max);
-                // Add to the mapping
-                #pragma omp parallel for schedule(dynamic)
+                LapackConnector::gemm_f('N', 'N', size_this_batch, n_r_this_batch, n_k_points, 1.0,
+                                        kmat.data(), size_batch_max,
+                                        coeff_k2r.ptr() + n_k_points * displ_r, n_k_points, 0.0,
+                                        rmat.data(), size_batch_max);
+// Add to the mapping
+#pragma omp parallel for schedule(dynamic)
                 for (size_t ir_this = 0; ir_this < n_r_this_batch; ir_this++)
                 {
                     auto ir = displ_r + ir_this;
-                    memcpy(Wc_freq_R[freq][Rlist[ir]].ptr() + displ_data, rmat.data() + size_batch_max * ir_this, sizeof(cplxdb) * size_this_batch);
+                    memcpy(Wc_freq_R[freq][Rlist[ir]].ptr() + displ_data,
+                           rmat.data() + size_batch_max * ir_this,
+                           sizeof(cplxdb) * size_this_batch);
                 }
             }
         }
@@ -4254,12 +4967,10 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(
 std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
     const MpiCommHandler &comm_h,
     std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
-    const PeriodicBoundaryData &pbc, const TFGrids &tfg, bool remove_freq_q,
-    bool output_wc_rf, int ifreq_output_wc_start, int ifreq_output_wc_end,
-    bool output_wc_rf_atom_pair, const std::string &output_dir,
-    const ArrayDesc *ad_Wc, const AtomicBasis *atbasis_Wc,
-    const SymmetryQPointView *qpoint_view,
-    const SymmetryContext *symmetry_context)
+    const PeriodicBoundaryData &pbc, const TFGrids &tfg, bool remove_freq_q, bool output_wc_rf,
+    int ifreq_output_wc_start, int ifreq_output_wc_end, bool output_wc_rf_atom_pair,
+    const std::string &output_dir, const ArrayDesc *ad_Wc, const AtomicBasis *atbasis_Wc,
+    const SymmetryQPointView *qpoint_view, const SymmetryContext *symmetry_context)
 {
     using std::endl;
 
@@ -4294,12 +5005,13 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
 
     librpa_int::global::lib_printf_root("Converting Wc(q,w) -> W(R,t)\n");
     global::ofs_myid << "Converting Wc(q,w) -> W(R,t)" << std::endl;
-    global::ofs_myid << "major_orig_row ? " << std::boolalpha << (major_orig == MAJOR::ROW) << std::endl;
+    global::ofs_myid << "major_orig_row ? " << std::boolalpha << (major_orig == MAJOR::ROW)
+                     << std::endl;
     comm_h.barrier();
 
     // Perform Fourier transform first, then inverse cosine transform
-    auto Wc_freq_R = FT_Wc_freq_q(comm_h, Wc_freq_q, pbc, remove_freq_q,
-                                  qpoint_view, symmetry_context, atbasis_Wc, ad_Wc);
+    auto Wc_freq_R = FT_Wc_freq_q(comm_h, Wc_freq_q, pbc, remove_freq_q, qpoint_view,
+                                  symmetry_context, atbasis_Wc, ad_Wc);
     if (output_wc_rf)
     {
         if (ad_Wc == nullptr)
@@ -4308,9 +5020,9 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
             throw LIBRPA_RUNTIME_ERROR("output_wc_rf_atom_pair needs a Wc atomic basis");
         if (ifreq_output_wc_start < 0)
             throw LIBRPA_RUNTIME_ERROR("ifreq_output_wc_start must be non-negative");
-        if (ifreq_output_wc_end >= 0 &&
-            ifreq_output_wc_end <= ifreq_output_wc_start)
-            throw LIBRPA_RUNTIME_ERROR("ifreq_output_wc_end must be negative or greater than ifreq_output_wc_start");
+        if (ifreq_output_wc_end >= 0 && ifreq_output_wc_end <= ifreq_output_wc_start)
+            throw LIBRPA_RUNTIME_ERROR(
+                "ifreq_output_wc_end must be negative or greater than ifreq_output_wc_start");
         if (ifreq_output_wc_start >= as_int(n_freq))
             throw LIBRPA_RUNTIME_ERROR("ifreq_output_wc_start is outside the Wc frequency grid");
 
@@ -4321,8 +5033,8 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
         IndexScheduler sched;
         if (output_wc_rf_atom_pair)
         {
-            const auto map_atpairs_balanced =
-                get_balanced_ap_distribution_for_consec_descriptor(*atbasis_Wc, *atbasis_Wc, *ad_Wc);
+            const auto map_atpairs_balanced = get_balanced_ap_distribution_for_consec_descriptor(
+                *atbasis_Wc, *atbasis_Wc, *ad_Wc);
             sched.init(map_atpairs_balanced, *atbasis_Wc, *atbasis_Wc, *ad_Wc,
                        major_orig == MAJOR::ROW);
         }
@@ -4343,13 +5055,12 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
                     for (const auto &[IJ, Wc_block] : pair_mat)
                     {
                         std::ostringstream ss;
-                        std::string info = "Wc at iR " + std::to_string(iR) + " ( " + std::to_string(R.x) +
-                                           " " + std::to_string(R.y) + " " + std::to_string(R.z) +
-                                           " ) and ifreq " + std::to_string(ifreq) + " ( " +
-                                           std::to_string(freq) + " a.u. )";
-                        ss << path_as_directory(output_dir)
-                           << "Wc_Mu_" << IJ.first << "_Nu_" << IJ.second
-                           << "_iR_" << iR << "_ifreq_" << ifreq << ".mtx";
+                        std::string info =
+                            "Wc at iR " + std::to_string(iR) + " ( " + std::to_string(R.x) + " " +
+                            std::to_string(R.y) + " " + std::to_string(R.z) + " ) and ifreq " +
+                            std::to_string(ifreq) + " ( " + std::to_string(freq) + " a.u. )";
+                        ss << path_as_directory(output_dir) << "Wc_Mu_" << IJ.first << "_Nu_"
+                           << IJ.second << "_iR_" << iR << "_ifreq_" << ifreq << ".mtx";
                         print_matrix_mm_file(Wc_block, ss.str(), info, 1e-10);
                     }
                     continue;
@@ -4360,10 +5071,8 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
                                    " " + std::to_string(R.y) + " " + std::to_string(R.z) +
                                    " ) and ifreq " + std::to_string(ifreq) + " ( " +
                                    std::to_string(freq) + " a.u. )";
-                ss << path_as_directory(output_dir)
-                   << "Wc_iR_" << std::setfill('0') << std::setw(5) << iR
-                   << "_ifreq_" << std::setfill('0') << std::setw(5) << ifreq
-                   << ".mtx";
+                ss << path_as_directory(output_dir) << "Wc_iR_" << std::setfill('0') << std::setw(5)
+                   << iR << "_ifreq_" << std::setfill('0') << std::setw(5) << ifreq << ".mtx";
                 print_matrix_mm_file_parallel(ss.str(), Wc, *ad_Wc, info, 1e-10);
             }
         }
@@ -4376,13 +5085,15 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
     //     ss << Params::output_dir << "Wc_freq_R"
     //         << "_itau_" << std::setfill('0') << std::setw(5) << 0
     //         << "_iR_" << std::setfill('0') << std::setw(5) << 0 << ".csc";
-    //     librpa_int::utils::write_matrix_elsi_csc_parallel(ss.str(), Wc, librpa_int::envs::array_desc_abf_global);
+    //     librpa_int::utils::write_matrix_elsi_csc_parallel(ss.str(), Wc,
+    //     librpa_int::envs::array_desc_abf_global);
     // }
-    // Switch to [R][freq] mapping to allow release the intermediate data on-the-fly during inverse cosine transformation
+    // Switch to [R][freq] mapping to allow release the intermediate data on-the-fly during inverse
+    // cosine transformation
     std::map<Vector3_Order<int>, std::map<double, Matz>> Wc_R_freq;
-    for (auto &[freq, Wc_R]: Wc_freq_R)
+    for (auto &[freq, Wc_R] : Wc_freq_R)
     {
-        for (auto &[R, Wc]: Wc_R)
+        for (auto &[R, Wc] : Wc_R)
         {
             Wc_R_freq[R].emplace(freq, std::move(Wc));
         }
@@ -4400,15 +5111,17 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
     }
     // global::ofs_myid << coeff_f2t << std::endl;
 
-    // To balance performance and memory consumption, we divide basis x Rlist into batches as row indices.
-    // Maximal 1GB per process for HPC usage ~ 4 R-vector with 16 frequency points for 1000x1000 matrix.
+    // To balance performance and memory consumption, we divide basis x Rlist into batches as row
+    // indices. Maximal 1GB per process for HPC usage ~ 4 R-vector with 16 frequency points for
+    // 1000x1000 matrix.
     const auto maxbytes_tmpmat = gbytes;
     size_t size_batch_max, n_data_batches;
     size_t n_r_batch_max, n_r_batches;
     const auto n_r_batches_with_whole_size = maxbytes_tmpmat / sizeof(cplxdb) / size / n_freq;
     if (n_r_batches_with_whole_size < 1)
     {
-        // large basis case, the transform must be performed for each slice of the matrix at one R-vector.
+        // large basis case, the transform must be performed for each slice of the matrix at one
+        // R-vector.
         n_r_batch_max = 1;
         n_r_batches = n_k_points;
         size_batch_max = std::min(maxbytes_tmpmat / sizeof(cplxdb) / n_freq, size);
@@ -4419,7 +5132,8 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
         // Whole matrix for at least one R-vector can be transformed at once.
         size_batch_max = size;
         n_data_batches = 1;
-        n_r_batch_max = std::min(maxbytes_tmpmat / sizeof(cplxdb) / n_freq / size, as_size(n_k_points));
+        n_r_batch_max =
+            std::min(maxbytes_tmpmat / sizeof(cplxdb) / n_freq / size, as_size(n_k_points));
         n_r_batches = ceil_div(as_size(n_k_points), n_r_batch_max);
     }
 
@@ -4427,8 +5141,10 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
     std::vector<cplxdb> fmat(row_max * n_freq);
     std::vector<cplxdb> tmat(row_max * n_freq);
 
-    global::ofs_myid << "size_batch_max/n_r_batch_max " << size_batch_max << " " << n_r_batch_max << endl;
-    global::ofs_myid << "n_data_batches/n_r_batches " << n_data_batches << " " << n_r_batches << endl;
+    global::ofs_myid << "size_batch_max/n_r_batch_max " << size_batch_max << " " << n_r_batch_max
+                     << endl;
+    global::ofs_myid << "n_data_batches/n_r_batches " << n_data_batches << " " << n_r_batches
+                     << endl;
     global::ofs_myid << "row_max " << row_max << endl;
 
     // Loop over R-vector batches
@@ -4442,7 +5158,7 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
         {
             const auto ir = disp_r + ir_this;
             const auto &R = Rlist[ir];
-            for (const auto &tau: tfg.get_time_nodes())
+            for (const auto &tau : tfg.get_time_nodes())
             {
                 Wc_tau_R[tau][R] = Matz(nr, nc, major_orig);
                 Wc_tau_R[tau][R] = cplxdb{0.0, 0.0};
@@ -4455,8 +5171,8 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
             const size_t displ_data = i_data_batch * size_batch_max;
             const size_t size_this_batch = std::min(size_batch_max, size - displ_data);
             const size_t row_this = size_this_batch * n_r_this_batch;
-            // Copy raw matrix to transform
-            #pragma omp parallel for collapse(2) schedule(dynamic)
+// Copy raw matrix to transform
+#pragma omp parallel for collapse(2) schedule(dynamic)
             for (size_t ir_this = 0; ir_this < n_r_this_batch; ir_this++)
             {
                 for (size_t ifreq = 0; ifreq < n_freq; ifreq++)
@@ -4465,17 +5181,17 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
                     const auto &R = Rlist[disp_r + ir_this];
                     const auto &mat = Wc_R_freq.at(R).at(freq);
                     memcpy(fmat.data() + ifreq * row_max + ir_this * size_this_batch,
-                           mat.ptr() + size_batch_max * i_data_batch, size_this_batch * sizeof(cplxdb));
+                           mat.ptr() + size_batch_max * i_data_batch,
+                           size_this_batch * sizeof(cplxdb));
                 }
             }
             // Transform
-            LapackConnector::gemm_f('N', 'N', row_this, n_freq, n_freq,
-                                    C_ONE, fmat.data(), row_max, coeff_f2t.ptr(), n_freq,
-                                    C_ZERO, tmat.data(), row_max);
-            // librpa_int::global::ofs_myid << tmat << endl;
+            LapackConnector::gemm_f('N', 'N', row_this, n_freq, n_freq, C_ONE, fmat.data(), row_max,
+                                    coeff_f2t.ptr(), n_freq, C_ZERO, tmat.data(), row_max);
+// librpa_int::global::ofs_myid << tmat << endl;
 
-            // Copy back
-            #pragma omp parallel for collapse(2) schedule(dynamic)
+// Copy back
+#pragma omp parallel for collapse(2) schedule(dynamic)
             for (size_t itau = 0; itau < n_freq; itau++)
             {
                 for (size_t ir_this = 0; ir_this < n_r_this_batch; ir_this++)
@@ -4504,21 +5220,20 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> CT_FT_Wc_freq_q(
     return Wc_tau_R;
 }
 
-
 map<double, atom_mapping<std::map<Vector3_Order<int>, matrix_m<complex<double>>>>::pair_t_old>
 CT_FT_Wc_q2R_freq2time(
-    const MpiCommHandler &comm_h,
-    const AtomicBasis &atbasis_abf,
-    map<double, atom_mapping<std::map<Vector3_Order<double>, matrix_m<complex<double>>>>::pair_t_old>
+    const MpiCommHandler &comm_h, const AtomicBasis &atbasis_abf,
+    map<double,
+        atom_mapping<std::map<Vector3_Order<double>, matrix_m<complex<double>>>>::pair_t_old>
         &Wc_freq_q,
     const TFGrids &tfg, const PeriodicBoundaryData &pbc, const vector<Vector3_Order<int>> &Rlist,
     const std::string &output_dir)
 {
-    using std::pair;
-    using global::profiler;
+    using global::lib_printf;
     using global::lib_printf_coll;
     using global::lib_printf_root;
-    using global::lib_printf;
+    using global::profiler;
+    using std::pair;
 
     // major of Wc_freq_q input and Wc_tau_R output
     const MAJOR major_Wc = MAJOR::ROW;
@@ -4526,7 +5241,8 @@ CT_FT_Wc_q2R_freq2time(
 
     map<double, atom_mapping<std::map<Vector3_Order<int>, matrix_m<complex<double>>>>::pair_t_old>
         Wc_tau_R, Wc_freq_R;
-    if (!tfg.has_time_grids()) throw LIBRPA_RUNTIME_ERROR("TFGrids object does not have time grids");
+    if (!tfg.has_time_grids())
+        throw LIBRPA_RUNTIME_ERROR("TFGrids object does not have time grids");
     const int ngrids = tfg.get_n_grids();
     std::set<std::pair<atom_t, atom_t>> atpairs_unique;
 
@@ -4542,7 +5258,7 @@ CT_FT_Wc_q2R_freq2time(
         auto &Wc = Wc_freq_q.at(freq);
         vector<atom_t> iatoms_row;
         for (const auto &Mu_NuqWc : Wc) iatoms_row.push_back(Mu_NuqWc.first);
-        for (auto iatom_row: iatoms_row)
+        for (auto iatom_row : iatoms_row)
         {
             vector<atom_t> iatoms_col;
             for (const auto &Nu_qWc : Wc.at(iatom_row))
@@ -4556,10 +5272,10 @@ CT_FT_Wc_q2R_freq2time(
                 for (const auto &q_Wc : Wc.at(iatom_row).at(iatom_col))
                 {
                     assert(q_Wc.second.major() == major_Wc);
-                    if(iatom_row != iatom_col)
+                    if (iatom_row != iatom_col)
                         Wc[iatom_col][iatom_row][q_Wc.first] = q_Wc.second.get_transpose(true);
-                    else // Hermitize the diagonal blocks
-                    {                        
+                    else  // Hermitize the diagonal blocks
+                    {
                         auto Wc_mat = q_Wc.second;
                         Wc_mat = (Wc_mat + Wc_mat.get_transpose(true)) * 0.5;
                         Wc[iatom_row][iatom_row][q_Wc.first] = Wc_mat;
@@ -4587,14 +5303,14 @@ CT_FT_Wc_q2R_freq2time(
                 const auto Nu = atpair_unique.second;
                 const int n_nu = atbasis_abf[Nu];
                 Wc_freq_R[freq][Mu][Nu][R] = matrix_m<complex<double>>(n_mu, n_nu, major_Wc);
-                ifreqtau_R_atpair_all.push_back({{ifreq, R}, atpair_unique});// ifreq is same as itauR
+                ifreqtau_R_atpair_all.push_back(
+                    {{ifreq, R}, atpair_unique});  // ifreq is same as itauR
             }
         }
     }
 
-    lib_printf_coll("Task %4d: distributing %d {I, J, R, freq} on %d threads\n",
-                    comm_h.myid, ifreqtau_R_atpair_all.size(),
-                    omp_get_max_threads());
+    lib_printf_coll("Task %4d: distributing %d {I, J, R, freq} on %d threads\n", comm_h.myid,
+                    ifreqtau_R_atpair_all.size(), omp_get_max_threads());
 
 #pragma omp parallel for schedule(dynamic)
     for (auto ifreqR_atpair : ifreqtau_R_atpair_all)
@@ -4664,9 +5380,8 @@ CT_FT_Wc_q2R_freq2time(
         }
     }
 
-    lib_printf_coll("Task %4d: distributing %d {I, J, R, tau} on %d threads\n",
-        comm_h.myid, ifreqtau_R_atpair_all.size(),
-        omp_get_max_threads());
+    lib_printf_coll("Task %4d: distributing %d {I, J, R, tau} on %d threads\n", comm_h.myid,
+                    ifreqtau_R_atpair_all.size(), omp_get_max_threads());
 
 #pragma omp parallel for schedule(dynamic)
     for (auto itauR_atpair : ifreqtau_R_atpair_all)
@@ -4713,25 +5428,25 @@ CT_FT_Wc_q2R_freq2time(
 
 map<double, atom_mapping<std::map<Vector3_Order<double>, matrix_m<complex<double>>>>::pair_t_old>
 CT_Wc_freq2time_q(
-    const MpiCommHandler &comm_h,
-    const AtomicBasis &atbasis_abf,
+    const MpiCommHandler &comm_h, const AtomicBasis &atbasis_abf,
     const map<double,
               atom_mapping<std::map<Vector3_Order<double>, matrix_m<complex<double>>>>::pair_t_old>
         &Wc_freq_q,
     const TFGrids &tfg, const int &n_k_points, const vector<Vector3_Order<int>> &Rlist,
     const vector<Vector3_Order<double>> &qlist)
 {
-    using std::set;
-    using std::pair;
-    using global::lib_printf_root;
     using global::lib_printf_coll;
+    using global::lib_printf_root;
+    using std::pair;
+    using std::set;
     // major of Wc_freq_q input and Wc_tau_R output
     const MAJOR major_Wc = MAJOR::ROW;
 
     map<double,
         atom_mapping<std::map<Vector3_Order<double>, matrix_m<complex<double>>>>::pair_t_old>
         Wc_tau_q;
-    if (!tfg.has_time_grids()) throw LIBRPA_RUNTIME_ERROR("TFGrids object does not have time grids");
+    if (!tfg.has_time_grids())
+        throw LIBRPA_RUNTIME_ERROR("TFGrids object does not have time grids");
     const int ngrids = tfg.get_n_grids();
 
     lib_printf_root("Converting Wc(q,w) -> W(q,t)\n");
@@ -4772,9 +5487,8 @@ CT_Wc_freq2time_q(
         }
     }
 
-    lib_printf_coll("Task %4d: distributing %d {I, J, R, tau} on %d threads\n",
-                    comm_h.myid, itau_atpair_all.size(),
-                    omp_get_max_threads());
+    lib_printf_coll("Task %4d: distributing %d {I, J, R, tau} on %d threads\n", comm_h.myid,
+                    itau_atpair_all.size(), omp_get_max_threads());
 
 #pragma omp parallel for schedule(dynamic)
     for (auto itau_atpair : itau_atpair_all)
@@ -4822,19 +5536,16 @@ CT_Wc_freq2time_q(
 
 /// @brief Wc(q,w) -> Wc(R,w) or Wc(q,t) -> W(R,t)
 atom_mapping<std::map<Vector3_Order<int>, matrix_m<complex<double>>>>::pair_t_old FT_Wc_q2R(
-    const MpiCommHandler &comm_h,
-    const AtomicBasis &atbasis_abf,
+    const MpiCommHandler &comm_h, const AtomicBasis &atbasis_abf,
     const SymmetryContext &symmetry_context,
-    const atom_mapping<std::map<Vector3_Order<double>, matrix_m<cplxdb>>>::pair_t_old
-        &Wc_q,
-    const TFGrids &, const PeriodicBoundaryData &pbc, const vector<Vector3_Order<int>> &Rlist, const bool,
-    const std::string &,
-    const bool use_symmetry_context)
+    const atom_mapping<std::map<Vector3_Order<double>, matrix_m<cplxdb>>>::pair_t_old &Wc_q,
+    const TFGrids &, const PeriodicBoundaryData &pbc, const vector<Vector3_Order<int>> &Rlist,
+    const bool, const std::string &, const bool use_symmetry_context)
 {
-    using global::lib_printf_root;
     using global::lib_printf_coll;
-    using std::set;
+    using global::lib_printf_root;
     using std::pair;
+    using std::set;
 
     // major of Wc_freq_q input and Wc_tau_R output
     const MAJOR major_Wc = MAJOR::ROW;
@@ -4846,16 +5557,13 @@ atom_mapping<std::map<Vector3_Order<int>, matrix_m<complex<double>>>>::pair_t_ol
     comm_h.barrier();
 
     const auto atom_nabf = build_atom_nabf_map(atbasis_abf);
-    const auto abf_layouts =
-        atbasis_abf.build_species_basis_layouts(symmetry_context.atom_to_type);
-    if (use_symmetry_context
-        && can_use_symmetry_qstar_wr_restore(
-            symmetry_context, abf_layouts, atom_nabf, pbc))
+    const auto abf_layouts = atbasis_abf.build_species_basis_layouts(symmetry_context.atom_to_type);
+    if (use_symmetry_context &&
+        can_use_symmetry_qstar_wr_restore(symmetry_context, abf_layouts, atom_nabf, pbc))
     {
-        lib_printf_root(
-            "GW symmetry accumulates full `W(R)` directly from IBZ q-stars\n");
-        Wc_R = accumulate_symmetry_full_wr_from_ibz_q(
-            comm_h, symmetry_context, abf_layouts, Wc_q, pbc, Rlist, atom_nabf);
+        lib_printf_root("GW symmetry accumulates full `W(R)` directly from IBZ q-stars\n");
+        Wc_R = accumulate_symmetry_full_wr_from_ibz_q(comm_h, symmetry_context, abf_layouts, Wc_q,
+                                                      pbc, Rlist, atom_nabf);
         comm_h.barrier();
         lib_printf_root("Done converting Wc q -> R\n");
         return Wc_R;
@@ -4891,9 +5599,8 @@ atom_mapping<std::map<Vector3_Order<int>, matrix_m<complex<double>>>>::pair_t_ol
         }
     }
 
-    lib_printf_coll("Task %4d: distributing %d {I, J, R} on %d threads\n",
-                    comm_h.myid, iR_atpair_all.size(),
-                    omp_get_max_threads());
+    lib_printf_coll("Task %4d: distributing %d {I, J, R} on %d threads\n", comm_h.myid,
+                    iR_atpair_all.size(), omp_get_max_threads());
 
 #pragma omp parallel for schedule(dynamic)
     for (auto iR_atpair : iR_atpair_all)

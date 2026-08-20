@@ -3,6 +3,8 @@
 
 // Standard C++ headers
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -850,6 +852,135 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
                                       epsmac_LF_imagfreq, debug, opts.output_dir);
     }
 
+    const char *qshell_mode_env = std::getenv("LIBRPA_STRICT2D_QSHELL_DIAG");
+    const char *qradial_mode_env = std::getenv("LIBRPA_STRICT2D_QRADIAL_DIAG");
+    const bool qshell_mode_enabled = qshell_mode_env != nullptr && qshell_mode_env[0] != '\0';
+    const bool qradial_mode_enabled = qradial_mode_env != nullptr && qradial_mode_env[0] != '\0';
+    if (qshell_mode_enabled && qradial_mode_enabled)
+        throw LIBRPA_RUNTIME_ERROR(
+            "strict 2D q-shell and radial-q diagnostics are mutually exclusive");
+    if (qshell_mode_enabled)
+    {
+        if (!strict_2d_complete_wc
+            || opts.output_2d_finite_q_diagnostics != LIBRPA_SWITCH_ON)
+            throw LIBRPA_RUNTIME_ERROR(
+                "LIBRPA_STRICT2D_QSHELL_DIAG requires strict 2D finite-q diagnostics");
+        if (Wc_freq_q.empty() || Wc_freq_q.begin()->second.empty())
+            throw LIBRPA_RUNTIME_ERROR("strict 2D q-shell diagnostic received empty Wc");
+
+        const std::string qshell_mode(qshell_mode_env);
+        Strict2dQshellRegion selected_region;
+        if (qshell_mode == "gamma")
+            selected_region = Strict2dQshellRegion::gamma;
+        else if (qshell_mode == "first")
+            selected_region = Strict2dQshellRegion::first;
+        else if (qshell_mode == "rest")
+            selected_region = Strict2dQshellRegion::rest;
+        else
+            throw LIBRPA_RUNTIME_ERROR(
+                "LIBRPA_STRICT2D_QSHELL_DIAG must be gamma, first, or rest");
+
+        double first_q_norm = std::numeric_limits<double>::infinity();
+        for (const auto &[q, Wc]: Wc_freq_q.begin()->second)
+        {
+            const auto minimum_q = strict_2d_minimum_image_q(pds->pbc, q);
+            const double q_norm = std::hypot(minimum_q.x, minimum_q.y);
+            if (q_norm > 1.0e-12) first_q_norm = std::min(first_q_norm, q_norm);
+        }
+        if (!std::isfinite(first_q_norm))
+            throw LIBRPA_RUNTIME_ERROR("strict 2D q-shell diagnostic found no finite q");
+
+        std::size_t kept_q = 0;
+        const std::size_t total_q = Wc_freq_q.begin()->second.size();
+        for (const auto &[q, Wc]: Wc_freq_q.begin()->second)
+        {
+            const auto minimum_q = strict_2d_minimum_image_q(pds->pbc, q);
+            const auto region = classify_strict_2d_qshell(std::hypot(minimum_q.x, minimum_q.y),
+                                                           first_q_norm);
+            if (region == selected_region) ++kept_q;
+        }
+        for (auto &[frequency, q_Wc]: Wc_freq_q)
+        {
+            for (auto &[q, Wc]: q_Wc)
+            {
+                const auto minimum_q = strict_2d_minimum_image_q(pds->pbc, q);
+                const auto region = classify_strict_2d_qshell(
+                    std::hypot(minimum_q.x, minimum_q.y), first_q_norm);
+                if (region != selected_region) Wc.zero_out();
+            }
+        }
+        if (pds->comm_h.is_root())
+            lib_printf("strict 2D q-shell diagnostic: mode=%s first_q_internal=%.16e "
+                       "first_q_physical=%.16e kept_q=%zu total_q=%zu\n",
+                       qshell_mode.c_str(), first_q_norm, TWO_PI * first_q_norm,
+                       kept_q, total_q);
+    }
+    if (qradial_mode_enabled)
+    {
+        if (!strict_2d_complete_wc
+            || opts.output_2d_finite_q_diagnostics != LIBRPA_SWITCH_ON)
+            throw LIBRPA_RUNTIME_ERROR(
+                "LIBRPA_STRICT2D_QRADIAL_DIAG requires strict 2D finite-q diagnostics");
+        if (Wc_freq_q.empty() || Wc_freq_q.begin()->second.empty())
+            throw LIBRPA_RUNTIME_ERROR("strict 2D radial-q diagnostic received empty Wc");
+
+        const std::string qradial_mode(qradial_mode_env);
+        Strict2dQradialRegion selected_region = Strict2dQradialRegion::far;
+        bool select_corner = false;
+        if (qradial_mode == "near")
+            selected_region = Strict2dQradialRegion::near;
+        else if (qradial_mode == "middle")
+            selected_region = Strict2dQradialRegion::middle;
+        else if (qradial_mode == "far")
+            selected_region = Strict2dQradialRegion::far;
+        else if (qradial_mode == "corner")
+            select_corner = true;
+        else
+            throw LIBRPA_RUNTIME_ERROR(
+                "LIBRPA_STRICT2D_QRADIAL_DIAG must be near, middle, far, or corner");
+
+        double first_q_norm = std::numeric_limits<double>::infinity();
+        for (const auto &[q, Wc]: Wc_freq_q.begin()->second)
+        {
+            const auto minimum_q = strict_2d_minimum_image_q(pds->pbc, q);
+            const double q_norm = std::hypot(minimum_q.x, minimum_q.y);
+            if (q_norm > 1.0e-12) first_q_norm = std::min(first_q_norm, q_norm);
+        }
+        if (!std::isfinite(first_q_norm))
+            throw LIBRPA_RUNTIME_ERROR("strict 2D radial-q diagnostic found no finite q");
+
+        std::size_t kept_q = 0;
+        const std::size_t total_q = Wc_freq_q.begin()->second.size();
+        for (const auto &[q, Wc]: Wc_freq_q.begin()->second)
+        {
+            const auto minimum_q = strict_2d_minimum_image_q(pds->pbc, q);
+            const double q_norm = std::hypot(minimum_q.x, minimum_q.y);
+            const bool selected = select_corner
+                                      ? strict_2d_qradial_is_corner(q_norm, first_q_norm)
+                                      : classify_strict_2d_qradial(q_norm, first_q_norm) ==
+                                            selected_region;
+            if (selected) ++kept_q;
+        }
+        for (auto &[frequency, q_Wc]: Wc_freq_q)
+        {
+            for (auto &[q, Wc]: q_Wc)
+            {
+                const auto minimum_q = strict_2d_minimum_image_q(pds->pbc, q);
+                const double q_norm = std::hypot(minimum_q.x, minimum_q.y);
+                const bool selected = select_corner
+                                          ? strict_2d_qradial_is_corner(q_norm, first_q_norm)
+                                          : classify_strict_2d_qradial(q_norm, first_q_norm) ==
+                                                selected_region;
+                if (!selected) Wc.zero_out();
+            }
+        }
+        if (pds->comm_h.is_root())
+            lib_printf("strict 2D radial-q diagnostic: mode=%s first_q_internal=%.16e "
+                       "first_q_physical=%.16e kept_q=%zu total_q=%zu\n",
+                       qradial_mode.c_str(), first_q_norm, TWO_PI * first_q_norm,
+                       kept_q, total_q);
+    }
+
     std::map<double, atom_mapping<std::map<Vector3_Order<double>, Matz>>::pair_t_old>
         Wc_freq_q_atom_pair;
     if (use_shrink_abfs)
@@ -883,9 +1014,21 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
 
     initialize_ds_g0w0(*pds, opts);
     profiler.start("g0w0_sigc_IJ", "Build real-space correlation self-energy");
+    const bool direct_compressed_sigc = should_contract_sigc_in_compressed_abfs(
+        use_shrink_abfs, std::getenv("LIBRPA_DIRECT_COMPRESSED_SIGC_DIAG"));
+    const auto &sigc_basis_aux =
+        direct_compressed_sigc ? pds->basis_aux_shrink : pds->basis_aux;
+    const auto &sigc_cs = direct_compressed_sigc ? pds->cs_data_shrink : pds->cs_data;
+    const auto &sigc_desc_abf = direct_compressed_sigc ? pds->desc_abf_shrink : pds->desc_abf;
+    if (direct_compressed_sigc)
+    {
+        global::lib_printf_root(
+            "Diagnostic: contracting Sigma_c directly in the compressed auxiliary basis; "
+            "Wc unfolding and full-ABF Cs are bypassed\n");
+    }
     // HACK: choice of space-time is hard-coded. May need to change when more approaches are implemented
     pds->p_g0w0->build_spacetime(
-        routing, pds->basis_aux, pds->cs_data, Wc_freq_q, pds->desc_abf,
+        routing, sigc_basis_aux, sigc_cs, Wc_freq_q, sigc_desc_abf,
         use_shrink_abfs ? &Wc_freq_q_atom_pair : nullptr,
         use_shrink_abfs ? &pds->sinvS : nullptr,
         use_shrink_abfs ? &pds->basis_aux_shrink : nullptr,

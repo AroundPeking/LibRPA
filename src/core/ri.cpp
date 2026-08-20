@@ -1,5 +1,7 @@
 #include "ri.h"
 
+#include <stdexcept>
+#include <string>
 #include <memory.h>
 
 // #include "../math/utils_matrix_mpi.h"
@@ -10,6 +12,16 @@
 
 namespace librpa_int
 {
+
+bool force_complex_spacetime_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0')
+        return false;
+    if (std::string(value) == "enabled")
+        return true;
+    throw std::invalid_argument(
+        "LIBRPA_FORCE_COMPLEX_SPACETIME_DIAG accepts only the explicit value 'enabled'");
+}
 
 // int n_irk_points;
 // int natom;

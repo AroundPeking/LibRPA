@@ -10,22 +10,26 @@
 #include <utility>
 #include <vector>
 
-#include "../math/vector3_order.h"
 #include "../math/matrix_m.h"
+#include "../math/vector3_order.h"
 #include "../mpi/base_blacs.h"
 #include "../mpi/kpoint_blacs_parallel_context.h"
 #include "atom.h"
 #include "atomic_basis.h"
-#include "symmetry_context.h"
 #include "meanfield.h"
 #include "pbc.h"
 #include "qpoint_view.h"
 #include "ri.h"
+#include "symmetry_context.h"
 #include "timefreq.h"
 
-namespace librpa_int {
+namespace librpa_int
+{
 
 bool rspace_symmetry_has_complete_band_space(const MeanField &mf, int n_bands);
+bool disable_chi0_rspace_symmetry_diagnostic_requested(const char *value);
+bool use_gamma_shrink_transform_diagnostic_requested(const char *value);
+double chi0_spacetime_spin_scale(int n_spinor, int n_spins);
 
 //! Object to handle calculation of independent repsonse function (\f$\chi_0\f$)
 class Chi0
@@ -40,8 +44,10 @@ private:
      *        and larger than zero correspond to unoccpued GF.
      * @note: May need to use ComplexMatrix for GF.
      */
-    std::map<int,
-        std::map<int, std::map<int, atom_mapping<std::map<Vector3_Order<int>, std::map<double, matrix>>>::pair_t_old>>>
+    std::map<
+        int,
+        std::map<int, std::map<int, atom_mapping<std::map<Vector3_Order<int>,
+                                                          std::map<double, matrix>>>::pair_t_old>>>
         gf_is_R_tau;
 
     //! R on which the space-time GF are created, used for atom-pair and rtau routings
@@ -51,7 +57,8 @@ private:
     std::vector<std::pair<atpair_t, Vector3_Order<int>>> IJRs_gf_local;
 
     //! chi0 data in frequency domain and reciprocal space, [omega][q]
-    std::map<double, std::map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>> chi0_q;
+    std::map<double, std::map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
+        chi0_q;
     SymmetryQPointView qpoint_view_;
 
     void build_gf_Rt(Vector3_Order<int> R, double tau);
@@ -75,28 +82,31 @@ private:
     void build_chi0_q_space_time_R_tau_routing(const Cs_LRI &Cs,
                                                const std::vector<atpair_t> &atpairs_ABF);
     template <typename Tdata>
-    void build_chi0_q_space_time_LibRI_routing(const Cs_LRI &Cs,
-                                               const std::vector<atpair_t> &atpairs_ABF,
-                                               const AtomicBasis &abf_Cs,
-                                               std::map<Vector3_Order<double>, ComplexMatrix> &sinvS,
-                                               const BlacsCtxtHandler &blacs_ctxt_h);
+    void build_chi0_q_space_time_LibRI_routing(
+        const Cs_LRI &Cs, const std::vector<atpair_t> &atpairs_ABF, const AtomicBasis &abf_Cs,
+        std::map<Vector3_Order<double>, ComplexMatrix> &sinvS,
+        const BlacsCtxtHandler &blacs_ctxt_h);
 
-    //! Internal procedure to compute chi0_q in the conventional method, i.e. in frequency domain and reciprocal space
+    //! Internal procedure to compute chi0_q in the conventional method, i.e. in frequency domain
+    //! and reciprocal space
     // TODO: implement the conventional method
-    void build_chi0_q_conventional(const Cs_LRI &Cs,
-                                   const std::vector<atpair_t> &atpairs_ABF);
+    void build_chi0_q_conventional(const Cs_LRI &Cs, const std::vector<atpair_t> &atpairs_ABF);
     /*!
-     * s_alpha and s_beta are the spin component of unoccupied Green's function, G_{alpha, beta}(tau)
-     * correspondingly, occupied GF G_{beta, alpha}(-tau) will be used. itau must be positive.
+     * s_alpha and s_beta are the spin component of unoccupied Green's function, G_{alpha,
+     * beta}(tau) correspondingly, occupied GF G_{beta, alpha}(-tau) will be used. itau must be
+     * positive.
      */
-    matrix compute_chi0_s_munu_tau_R(const atpair_R_mat_t &Cs_IJR,
-                                     int spin_channel, int isoc1, int isoc2,
-                                     atom_t mu, atom_t nu, double tau, Vector3_Order<int> R);
+    matrix compute_chi0_s_munu_tau_R(const atpair_R_mat_t &Cs_IJR, int spin_channel, int isoc1,
+                                     int isoc2, atom_t mu, atom_t nu, double tau,
+                                     Vector3_Order<int> R);
     // copy some reshape method inside chi0, test performance
-    /* matrix reshape_Cs(const size_t n1, const size_t n2, const size_t n3, const std::shared_ptr<matrix> &Cs); */
-    /* matrix reshape_dim_Cs(const size_t n1, const size_t n2, const size_t n3, const std::shared_ptr<matrix> &Cs);//(n1*n2,n3) -> (n1,n2*n3) */
+    /* matrix reshape_Cs(const size_t n1, const size_t n2, const size_t n3, const
+     * std::shared_ptr<matrix> &Cs); */
+    /* matrix reshape_dim_Cs(const size_t n1, const size_t n2, const size_t n3, const
+     * std::shared_ptr<matrix> &Cs);//(n1*n2,n3) -> (n1,n2*n3) */
     /* matrix reshape_mat(const size_t n1, const size_t n2, const size_t n3, const matrix &mat); */
-    /* matrix reshape_mat_21(const size_t n1, const size_t n2, const size_t n3, const matrix &mat); //(n1,n2*n3) -> (n1*n2,n3) */
+    /* matrix reshape_mat_21(const size_t n1, const size_t n2, const size_t n3, const matrix &mat);
+     * //(n1,n2*n3) -> (n1*n2,n3) */
 
 public:
     const MeanField &mf;
@@ -121,27 +131,34 @@ public:
 
     Chi0(const MeanField &mf_in, const AtomicBasis &atbasis_wfc_in,
          const AtomicBasis &atbasis_abf_in, const PeriodicBoundaryData &pbc_in,
-         const SymmetryContext &symmetry_context_in,
-         const TFGrids &tfg_in, const KPointBlacsParallelContext &kblacs_ctxt_in,
-         const ArrayDesc &desc_wfc_in, bool is_mf_eigvec_k_distributed,
-         bool use_symmetry_context_in = true);
-    ~Chi0() {};
-    //! Build the independent response function in q-omega domain for ABFs on the atom pairs atpair_ABF and q-vectors in qlist
-    void build(LibrpaParallelRouting routing,
-               const Cs_LRI &Cs,
-               const std::vector<atpair_t> &atpair_ABF,
-               const AtomicBasis &abf_Cs,
+         const SymmetryContext &symmetry_context_in, const TFGrids &tfg_in,
+         const KPointBlacsParallelContext &kblacs_ctxt_in, const ArrayDesc &desc_wfc_in,
+         bool is_mf_eigvec_k_distributed, bool use_symmetry_context_in = true);
+    ~Chi0(){};
+    //! Build the independent response function in q-omega domain for ABFs on the atom pairs
+    //! atpair_ABF and q-vectors in qlist
+    void build(LibrpaParallelRouting routing, const Cs_LRI &Cs,
+               const std::vector<atpair_t> &atpair_ABF, const AtomicBasis &abf_Cs,
                std::map<Vector3_Order<double>, ComplexMatrix> &sinvS,
                const BlacsCtxtHandler &blacs_ctxt_h);
-    const std::map<double, std::map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>> & get_chi0_q() const { return chi0_q; }
+    const std::map<double,
+                   std::map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>> &
+    get_chi0_q() const
+    {
+        return chi0_q;
+    }
     const SymmetryQPointView &qpoint_view() const { return qpoint_view_; }
-    const std::vector<Vector3_Order<double>> &active_qpoints() const { return qpoint_view_.representatives; }
+    const std::vector<Vector3_Order<double>> &active_qpoints() const
+    {
+        return qpoint_view_.representatives;
+    }
     double q_weight(const Vector3_Order<double> &q) const { return qpoint_view_.weights.at(q); }
     void free_chi0_q(const double freq, const Vector3_Order<double> q);
 
     void unfold_abfs_Wc(
         std::map<Vector3_Order<double>, ComplexMatrix> &sinvS,
-        std::map<double, atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old> &Wc,
+        std::map<double, atom_mapping<std::map<Vector3_Order<double>,
+                                               matrix_m<std::complex<double>>>>::pair_t_old> &Wc,
         const std::vector<Vector3_Order<double>> &qlist, const AtomicBasis &abf_unfold,
         const BlacsCtxtHandler &blacs_ctxt_h);
     void unfold_abfs_Wc_q(
@@ -151,4 +168,4 @@ public:
         const BlacsCtxtHandler &blacs_ctxt_h);
 };
 
-}
+}  // namespace librpa_int

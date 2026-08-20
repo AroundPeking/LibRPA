@@ -3,7 +3,12 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstdint>
+#include <cstring>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <utility>
@@ -35,6 +40,59 @@ namespace librpa_int
 
 using RI::Tensor;
 using RI::Communicate_Tensors_Map_Judge::comm_map2_first;
+
+std::string strict_2d_omega0_diagnostic_directory(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return {};
+    std::string directory(value);
+    if (directory.back() != '/') directory.push_back('/');
+    return directory;
+}
+
+Strict2dOmega0OverrideDirectories strict_2d_omega0_override_directories(
+    const char *coulomb_basis, const char *auxiliary_basis)
+{
+    Strict2dOmega0OverrideDirectories directories{
+        strict_2d_omega0_diagnostic_directory(coulomb_basis),
+        strict_2d_omega0_diagnostic_directory(auxiliary_basis)};
+    if (!directories.coulomb_basis.empty() && !directories.auxiliary_basis.empty())
+        throw std::invalid_argument(
+            "strict 2D Omega0 Coulomb-basis and auxiliary-basis overrides are mutually "
+            "exclusive");
+    return directories;
+}
+
+std::vector<std::complex<double>> read_strict_2d_omega0_override_binary(
+    const std::string &path, const int expected_dimension)
+{
+    if (expected_dimension <= 0)
+        throw std::invalid_argument("strict 2D Omega0 override dimension must be positive");
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("cannot open strict 2D Omega0 override: " + path);
+
+    char magic[8]{};
+    std::int32_t rows = 0, cols = 0;
+    input.read(magic, sizeof(magic));
+    input.read(reinterpret_cast<char *>(&rows), sizeof(rows));
+    input.read(reinterpret_cast<char *>(&cols), sizeof(cols));
+    const char expected_magic[8] = {'L', 'R', '2', 'D', 'W', 'C', '0', '1'};
+    if (!input || std::memcmp(magic, expected_magic, sizeof(magic)) != 0)
+        throw std::runtime_error("invalid strict 2D Omega0 override header: " + path);
+    if (rows != expected_dimension || cols != expected_dimension)
+        throw std::runtime_error("strict 2D Omega0 override dimension mismatch: " + path);
+
+    const std::size_t count = static_cast<std::size_t>(rows) * cols;
+    std::vector<double> interleaved(2 * count);
+    input.read(reinterpret_cast<char *>(interleaved.data()),
+               static_cast<std::streamsize>(interleaved.size() * sizeof(double)));
+    if (!input || input.peek() != std::ifstream::traits_type::eof())
+        throw std::runtime_error("invalid strict 2D Omega0 override payload: " + path);
+
+    std::vector<std::complex<double>> matrix(count);
+    for (std::size_t i = 0; i != count; ++i)
+        matrix[i] = {interleaved[2 * i], interleaved[2 * i + 1]};
+    return matrix;
+}
 
 std::complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_pi, int *ipiv,
                                              int &info);
@@ -443,6 +501,226 @@ const ComplexMatrix &direct_full_bz_wfc_for_kstar_member(
         throw std::runtime_error("direct_full_bz_wfc: invalid PyATB full-BZ eigenvector entry");
     }
     return *wfc;
+}
+
+namespace
+{
+
+ComplexMatrix weighted_wfc_gram(const ComplexMatrix &wfc,
+                                const std::vector<double> &band_scales)
+{
+    if (wfc.nr != static_cast<int>(band_scales.size()))
+        throw std::invalid_argument("weighted WFC Gram scale count does not match bands");
+    ComplexMatrix gram(wfc.nc, wfc.nc);
+    for (int ib = 0; ib != wfc.nr; ++ib)
+    {
+        const double scale = band_scales[static_cast<std::size_t>(ib)];
+        for (int iao = 0; iao != wfc.nc; ++iao)
+        {
+            for (int jao = 0; jao != wfc.nc; ++jao)
+            {
+                gram(iao, jao) +=
+                    scale * wfc(ib, iao) * std::conj(wfc(ib, jao));
+            }
+        }
+    }
+    return gram;
+}
+
+double matrix_frobenius(const ComplexMatrix &matrix)
+{
+    double norm_squared = 0.0;
+    for (int i = 0; i != matrix.nr; ++i)
+        for (int j = 0; j != matrix.nc; ++j) norm_squared += std::norm(matrix(i, j));
+    return std::sqrt(norm_squared);
+}
+
+WeightedWfcGramComparison compare_gram_matrices(const ComplexMatrix &direct,
+                                                 const ComplexMatrix &restored)
+{
+    if (direct.nr != restored.nr || direct.nc != restored.nc)
+        throw std::invalid_argument("weighted WFC Gram matrices have inconsistent dimensions");
+    const auto difference = restored - direct;
+    WeightedWfcGramComparison metrics;
+    metrics.direct_frobenius = matrix_frobenius(direct);
+    metrics.restored_frobenius = matrix_frobenius(restored);
+    metrics.difference_frobenius = matrix_frobenius(difference);
+    metrics.relative_frobenius =
+        metrics.difference_frobenius / std::max(metrics.direct_frobenius, 1.0e-300);
+    metrics.maximum_absolute_difference = difference.get_max_abs();
+    return metrics;
+}
+
+}  // namespace
+
+WeightedWfcGramComparison compare_weighted_wfc_grams(
+    const ComplexMatrix &direct_wfc, const ComplexMatrix &restored_wfc,
+    const std::vector<double> &band_scales)
+{
+    if (direct_wfc.nr != restored_wfc.nr || direct_wfc.nc != restored_wfc.nc)
+        throw std::invalid_argument("weighted WFC Gram matrices have inconsistent dimensions");
+    const auto direct = weighted_wfc_gram(direct_wfc, band_scales);
+    const auto restored = weighted_wfc_gram(restored_wfc, band_scales);
+    return compare_gram_matrices(direct, restored);
+}
+
+bool output_gw_gf_kstar_wfc_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_OUTPUT_GW_GF_KSTAR_WFC_DIAG accepts only the explicit value 'enabled'");
+}
+
+bool stop_after_gw_gf_kstar_wfc_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_STOP_AFTER_GW_GF_KSTAR_WFC_DIAG accepts only the explicit value 'enabled'");
+}
+
+int gw_gf_kstar_wfc_diagnostic_active_kpoints(const int meanfield_kpoints,
+                                               const int production_kpoints,
+                                               const int coordinate_kpoints)
+{
+    if (meanfield_kpoints <= 0 || production_kpoints != meanfield_kpoints ||
+        coordinate_kpoints != meanfield_kpoints)
+        throw std::invalid_argument(
+            "GW G k-star WFC diagnostic has inconsistent active k-point counts");
+    return meanfield_kpoints;
+}
+
+void diele_func::output_gw_gf_kstar_wfc_comparison() const
+{
+    if (!output_gw_gf_kstar_wfc_diagnostic_requested(
+            std::getenv("LIBRPA_OUTPUT_GW_GF_KSTAR_WFC_DIAG")))
+        return;
+    if (!comm_h.is_root()) return;
+    if (!has_direct_full_bz_headwing_inputs() || symmetry_context_ == nullptr)
+        throw LIBRPA_RUNTIME_ERROR(
+            "GW G k-star WFC diagnostic requires full-BZ PyATB WFC and symmetry metadata");
+
+    const auto layouts =
+        atomic_basis_wfc_.build_species_basis_layouts(symmetry_context_->atom_to_type);
+    if (!can_restore_symmetry_kstar_meanfield(*symmetry_context_, layouts, meanfield_df,
+                                               kfrac_band, atom_nw))
+        throw LIBRPA_RUNTIME_ERROR("GW G k-star WFC diagnostic cannot restore this meanfield");
+    if (!gw_meanfield_reference_.initialized())
+        throw LIBRPA_RUNTIME_ERROR("GW G k-star WFC diagnostic is missing production meanfield");
+    const int n_active = gw_gf_kstar_wfc_diagnostic_active_kpoints(
+        meanfield_df.get_n_kpoints(), gw_meanfield_reference_.get_n_kpoints(),
+        static_cast<int>(kfrac_band.size()));
+    const auto targets = build_symmetry_kstar_member_kfrac_targets(*symmetry_context_, pbc_);
+    const double n_full = static_cast<double>(symmetry_context_->count_kstar_members());
+    const double active_to_full = static_cast<double>(n_active) / n_full;
+    std::ofstream output("strict2d_gw_gf_kstar_wfc.csv");
+    if (!output) throw LIBRPA_RUNTIME_ERROR("cannot open GW G k-star WFC diagnostic output");
+    std::ofstream matrix_output("strict2d_gw_gf_kstar_matrix.csv");
+    if (!matrix_output)
+        throw LIBRPA_RUNTIME_ERROR("cannot open GW G k-star matrix diagnostic output");
+    output << "rank,source,ik_ibz,imember,ik_full,kx,ky,kz,branch,tau_abs,direct_frobenius,"
+              "restored_frobenius,difference_frobenius,relative_frobenius,"
+              "maximum_absolute_difference\n";
+    matrix_output
+        << "rank,source,ik_ibz,imember,ik_full,spatial_isym,time_reversal,member_kx,member_ky,"
+           "member_kz,target_kx,target_ky,target_kz,gshift_x,gshift_y,gshift_z,branch,tau_abs,"
+           "direct_frobenius,restored_frobenius,difference_frobenius,relative_frobenius,"
+           "maximum_absolute_difference\n";
+    output << std::scientific << std::setprecision(16);
+    matrix_output << std::scientific << std::setprecision(16);
+
+    std::size_t local_rows = 0;
+    double local_max_relative = 0.0;
+    double local_max_absolute = 0.0;
+    for (int ik_ibz = 0; ik_ibz != n_active; ++ik_ibz)
+    {
+        const auto *wfc_pyatb_ibz = meanfield_df.find_wfc(0, 0, ik_ibz);
+        const auto *wfc_production_ibz = gw_meanfield_reference_.find_wfc(0, 0, ik_ibz);
+        if (wfc_pyatb_ibz == nullptr && wfc_production_ibz == nullptr) continue;
+        const auto &star = find_symmetry_kstar_for_ibz_kpoint(*symmetry_context_,
+                                                              kfrac_band[ik_ibz]);
+        for (std::size_t imember = 0; imember != star.members.size(); ++imember)
+        {
+            const auto &member = star.members[imember];
+            const auto &k_bz = targets.empty() ? member.k_bz : targets[ik_ibz][imember];
+            const auto &direct = direct_full_bz_wfc_for_kstar_member(
+                direct_full_bz_wfc_, direct_full_bz_velocity_member_source_ik_, 0, 0, ik_ibz,
+                imember);
+            const int ik_full = direct_full_bz_velocity_member_source_ik_[ik_ibz][imember];
+
+            for (const auto source : {std::string{"pyatb_ibz"},
+                                      std::string{"production_ibz"}})
+            {
+                const auto *wfc_ibz =
+                    source == "pyatb_ibz" ? wfc_pyatb_ibz : wfc_production_ibz;
+                if (wfc_ibz == nullptr) continue;
+                const auto &source_meanfield =
+                    source == "pyatb_ibz" ? meanfield_df : gw_meanfield_reference_;
+                const double scale_spin =
+                    0.5 * source_meanfield.get_n_spins() * source_meanfield.get_n_spinor();
+                for (const double tau : {1.0, -1.0})
+                {
+                    std::vector<double> scales(static_cast<std::size_t>(n_states), 0.0);
+                    for (int ib = 0; ib != n_states; ++ib)
+                    {
+                        const double occupied =
+                            source_meanfield.get_weight()[0](ik_ibz, ib) * active_to_full *
+                            scale_spin;
+                        const double prefactor =
+                            tau > 0.0 ? std::max(0.0, 1.0 / n_full - occupied) : occupied;
+                        double exponent =
+                            -tau * (source_meanfield.get_eigenvals()[0](ik_ibz, ib) -
+                                    source_meanfield.get_efermi());
+                        exponent = std::min(0.0, exponent);
+                        scales[static_cast<std::size_t>(ib)] =
+                            std::exp(exponent) * prefactor;
+                    }
+                    const auto restored = rotate_headwing_wfc_to_kstar_member(
+                        *symmetry_context_, member, layouts, atom_nw, kfrac_band[ik_ibz],
+                        *wfc_ibz, &k_bz);
+                    const auto metrics = compare_weighted_wfc_grams(direct, restored, scales);
+                    const auto direct_gram = weighted_wfc_gram(direct, scales);
+                    const auto ibz_gram = weighted_wfc_gram(*wfc_ibz, scales);
+                    const auto restored_gram = rotate_symmetry_kspace_matrix(
+                        *symmetry_context_, layouts, member, ibz_gram, atom_nw,
+                        kfrac_band[ik_ibz], member.time_reversal, &k_bz);
+                    const auto matrix_metrics = compare_gram_matrices(direct_gram, restored_gram);
+                    const auto gshift_x = static_cast<int>(std::llround(k_bz.x - member.k_bz.x));
+                    const auto gshift_y = static_cast<int>(std::llround(k_bz.y - member.k_bz.y));
+                    const auto gshift_z = static_cast<int>(std::llround(k_bz.z - member.k_bz.z));
+                    output << comm_h.myid << ',' << source << ',' << ik_ibz << ',' << imember
+                           << ',' << ik_full << ',' << k_bz.x << ',' << k_bz.y << ',' << k_bz.z
+                           << ',' << (tau > 0.0 ? "empty" : "occupied") << ",1.0,"
+                           << metrics.direct_frobenius << ',' << metrics.restored_frobenius << ','
+                           << metrics.difference_frobenius << ',' << metrics.relative_frobenius
+                           << ',' << metrics.maximum_absolute_difference << '\n';
+                    matrix_output
+                        << comm_h.myid << ',' << source << ',' << ik_ibz << ',' << imember << ','
+                        << ik_full << ',' << member.spatial_isym << ','
+                        << (member.time_reversal ? 1 : 0) << ',' << member.k_bz.x << ','
+                        << member.k_bz.y << ',' << member.k_bz.z << ',' << k_bz.x << ',' << k_bz.y
+                        << ',' << k_bz.z << ',' << gshift_x << ',' << gshift_y << ',' << gshift_z
+                        << ',' << (tau > 0.0 ? "empty" : "occupied") << ",1.0,"
+                        << matrix_metrics.direct_frobenius << ','
+                        << matrix_metrics.restored_frobenius << ','
+                        << matrix_metrics.difference_frobenius << ','
+                        << matrix_metrics.relative_frobenius << ','
+                        << matrix_metrics.maximum_absolute_difference << '\n';
+                    local_max_relative =
+                        std::max(local_max_relative, metrics.relative_frobenius);
+                    local_max_absolute =
+                        std::max(local_max_absolute, metrics.maximum_absolute_difference);
+                    ++local_rows;
+                }
+            }
+        }
+    }
+    output.close();
+    matrix_output.close();
+    std::cout << "GW G k-star WFC diagnostic: rows=" << local_rows
+              << ", max_relative_frobenius=" << local_max_relative
+              << ", max_absolute_difference=" << local_max_absolute << std::endl;
 }
 
 void initialize_velocity_matrix(velocity_matrix_t &velocity, const int n_spins,
@@ -1069,6 +1347,13 @@ void diele_func::init_wing(double coulomb_eigen_threshold, const atpair_k_cplx_m
     this->Lind.resize(3, 3, MAJOR::COL);
     this->strict_2d_lind_by_freq.clear();
     this->strict_2d_lind_by_freq.resize(n_omega);
+    this->strict_2d_body_inv_by_freq.clear();
+    this->strict_2d_body_inv_by_freq.resize(n_omega);
+    this->strict_2d_bw_by_freq.clear();
+    this->strict_2d_bw_by_freq.resize(n_omega);
+    this->strict_2d_wb_by_freq.clear();
+    this->strict_2d_wb_by_freq.resize(n_omega);
+    this->strict_2d_regular_coulomb_basis.clear();
     for (int iomega = 0; iomega != n_omega; iomega++)
     {
         wing_mu[iomega].resize(n_abf, 3, MAJOR::COL);
@@ -3125,6 +3410,10 @@ void diele_func::cal_strict_2d_wc(const int ifreq, ArrayDesc &desc_nabf_nabf_opt
     const int nleb = as_int(qw_leb.size());
     construct_L(ifreq, desc_body);
     strict_2d_lind_by_freq.at(ifreq) = Lind.copy();
+    strict_2d_body_inv_by_freq.at(ifreq) = body_inv.copy();
+    strict_2d_bw_by_freq.at(ifreq) = bw.copy();
+    strict_2d_wb_by_freq.at(ifreq) = wb.copy();
+    strict_2d_regular_coulomb_basis = regular_coulomb_basis.copy();
 
     std::vector<std::complex<double>> i0_weights(nleb);
     std::vector<std::complex<double>> i1_weights(nleb);
@@ -3142,6 +3431,9 @@ void diele_func::cal_strict_2d_wc(const int ifreq, ArrayDesc &desc_nabf_nabf_opt
             qw_leb[ileb] * physical_qmax[ileb] * physical_qmax[ileb] / (2.0 * gamma_area);
         wc_head += -TWO_PI * a * i0_weights[ileb];
     }
+    if (strict_2d_pw_wc_head_average_.size() <= static_cast<std::size_t>(ifreq))
+        strict_2d_pw_wc_head_average_.resize(static_cast<std::size_t>(ifreq) + 1);
+    strict_2d_pw_wc_head_average_[static_cast<std::size_t>(ifreq)] = wc_head;
 
     if (ifreq == 0 && mpi_comm_global_h.is_root())
     {
@@ -3237,6 +3529,82 @@ void diele_func::cal_strict_2d_wc(const int ifreq, ArrayDesc &desc_nabf_nabf_opt
         chi0(ilo_head, jlo_head) =
             pw_to_auxiliary_scale * pw_to_auxiliary_scale * wc_head;
 
+    const auto omega0_dump_directory = strict_2d_omega0_diagnostic_directory(
+        std::getenv("LIBRPA_STRICT2D_OMEGA0_MODEL_DUMP_DIR"));
+    if (!omega0_dump_directory.empty())
+    {
+        std::ostringstream suffix;
+        suffix << "_ifreq_" << std::setw(3) << std::setfill('0') << ifreq;
+        print_matrix_mm_file_parallel(
+            omega0_dump_directory + "body_inv" + suffix.str() + ".mtx", body_inv, desc_body,
+            "strict 2D body inverse", 0.0);
+        print_matrix_mm_file_parallel(
+            omega0_dump_directory + "regular_body_sqrt" + suffix.str() + ".mtx",
+            regular_body_sqrt, desc_body, "strict 2D regular Coulomb square root", 0.0);
+        print_matrix_mm_file_parallel(
+            omega0_dump_directory + "analytic_wc" + suffix.str() + ".mtx", chi0,
+            desc_nabf_nabf_opt, "strict 2D analytic complete-Wc average", 0.0);
+        if (mpi_comm_global_h.is_root())
+        {
+            print_matrix_mm_file(bw, omega0_dump_directory + "bw" + suffix.str() + ".mtx",
+                                 "strict 2D body-to-head Cartesian coupling", 0.0);
+            print_matrix_mm_file(wb, omega0_dump_directory + "wb" + suffix.str() + ".mtx",
+                                 "strict 2D head-to-body Cartesian coupling", 0.0);
+            print_matrix_mm_file(Lind,
+                                 omega0_dump_directory + "lind" + suffix.str() + ".mtx",
+                                 "strict 2D Schur tensor", 0.0);
+            std::ofstream metadata(omega0_dump_directory + "metadata" + suffix.str() + ".txt");
+            if (!metadata)
+                throw std::runtime_error("cannot open strict 2D Omega0 model metadata");
+            metadata << std::scientific << std::setprecision(17)
+                     << "ifreq=" << ifreq << '\n'
+                     << "frequency=" << omega.at(ifreq) << '\n'
+                     << "nbody=" << nbody << '\n'
+                     << "gamma_area=" << gamma_area << '\n'
+                     << "pw_to_auxiliary_scale=" << pw_to_auxiliary_scale << '\n'
+                     << "raw_head_coefficient="
+                     << TWO_PI * pw_to_auxiliary_scale * pw_to_auxiliary_scale << '\n';
+        }
+        mpi_comm_global_h.barrier();
+        if (ifreq == 0 && mpi_comm_global_h.is_root())
+            std::cout << "Writing strict 2D Omega0 model matrices to "
+                      << omega0_dump_directory << std::endl;
+    }
+
+    const auto omega0_override_directory = strict_2d_omega0_override_directories(
+        std::getenv("LIBRPA_STRICT2D_OMEGA0_WC_OVERRIDE_DIR"),
+        std::getenv("LIBRPA_STRICT2D_OMEGA0_AUX_WC_OVERRIDE_DIR"))
+                                               .coulomb_basis;
+    if (!omega0_override_directory.empty())
+    {
+        const int dimension = desc_nabf_nabf_opt.m();
+        if (desc_nabf_nabf_opt.n() != dimension)
+            throw std::logic_error("strict 2D Omega0 override requires a square matrix");
+        std::ostringstream filename;
+        filename << omega0_override_directory << "omega0_wc_ifreq_" << std::setw(3)
+                 << std::setfill('0') << ifreq << ".bin";
+        std::vector<std::complex<double>> full_matrix;
+        if (mpi_comm_global_h.is_root())
+            full_matrix = read_strict_2d_omega0_override_binary(filename.str(), dimension);
+        else
+            full_matrix.resize(static_cast<std::size_t>(dimension) * dimension);
+        mpi_comm_global_h.bcast(full_matrix.data(), static_cast<int>(full_matrix.size()), 0);
+#pragma omp parallel for schedule(static) collapse(2)
+        for (int i = 0; i != dimension; ++i)
+        {
+            for (int j = 0; j != dimension; ++j)
+            {
+                const int ilo = desc_nabf_nabf_opt.indx_g2l_r(i);
+                const int jlo = desc_nabf_nabf_opt.indx_g2l_c(j);
+                if (ilo >= 0 && jlo >= 0)
+                    chi0(ilo, jlo) = full_matrix[static_cast<std::size_t>(i) * dimension + j];
+            }
+        }
+        if (ifreq == 0 && mpi_comm_global_h.is_root())
+            std::cout << "Using externally averaged strict 2D complete Wc matrices from "
+                      << omega0_override_directory << std::endl;
+    }
+
     if (mpi_comm_global_h.is_root())
         std::cout << "* Success: calculate strict 2D complete Wc average no." << ifreq + 1 << "."
                   << std::endl;
@@ -3256,6 +3624,13 @@ Strict2dFiniteQReference diele_func::get_strict_2d_finite_q_reference(const int 
     const double scale = get_strict_2d_pw_to_auxiliary_scale();
     reference.wc_head_limit *= scale * scale;
     return reference;
+}
+
+std::complex<double> diele_func::get_strict_2d_pw_wc_head_average(const int ifreq) const
+{
+    if (ifreq < 0 || static_cast<std::size_t>(ifreq) >= strict_2d_pw_wc_head_average_.size())
+        throw std::logic_error("strict 2D PW Wc head average is unavailable");
+    return strict_2d_pw_wc_head_average_[static_cast<std::size_t>(ifreq)];
 }
 
 double diele_func::get_strict_2d_bare_coulomb_gamma_average() const
@@ -3561,6 +3936,117 @@ void diele_func::rewrite_strict_2d_wc(matrix_m<std::complex<double>> &chi0_block
     this->chi0.clear();
     this->Lind.clear();
     this->body_inv.clear();
+}
+
+void diele_func::rewrite_strict_2d_wc_at_q(
+    matrix_m<std::complex<double>> &wc_coulomb_basis, const int ifreq,
+    ArrayDesc &desc_nabf_nabf_opt, const double qhat_x, const double qhat_y,
+    const double q_physical) const
+{
+    if (ifreq < 0 || static_cast<std::size_t>(ifreq) >= strict_2d_lind_by_freq.size() ||
+        static_cast<std::size_t>(ifreq) >= strict_2d_body_inv_by_freq.size() ||
+        strict_2d_body_inv_by_freq[ifreq].size() == 0 ||
+        strict_2d_bw_by_freq[ifreq].size() == 0 || strict_2d_wb_by_freq[ifreq].size() == 0 ||
+        strict_2d_regular_coulomb_basis.size() == 0)
+        throw std::logic_error("strict 2D finite-q analytic Wc data are unavailable");
+    if (!(q_physical > 0.0) || !std::isfinite(q_physical) ||
+        std::abs(qhat_x * qhat_x + qhat_y * qhat_y - 1.0) > 1.0e-10)
+        throw std::logic_error("strict 2D finite-q analytic Wc received an invalid q vector");
+
+    const int nbody = as_int(n_nonsingular) - 1;
+    ArrayDesc desc_body(blacs_h);
+    desc_body.init_square_blk(nbody, nbody, 0, 0);
+    const auto &body_inverse = strict_2d_body_inv_by_freq[ifreq];
+    const auto &bw_cart = strict_2d_bw_by_freq[ifreq];
+    const auto &wb_cart = strict_2d_wb_by_freq[ifreq];
+    const auto a = strict_2d_schur_coefficient(
+        strict_2d_lind_by_freq[ifreq], qhat_x, qhat_y);
+    validate_strict_2d_screening_denominator(a, q_physical);
+    const auto denominator = 1.0 + a * q_physical;
+    const double pw_to_auxiliary_scale = get_strict_2d_pw_to_auxiliary_scale();
+
+    auto regular_body_sqrt = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    ScalapackConnector::pgemr2d_f(
+        nbody, nbody, strict_2d_regular_coulomb_basis.ptr(), 2, 2,
+        desc_nabf_nabf_opt.desc, regular_body_sqrt.ptr(), 1, 1, desc_body.desc,
+        blacs_h.ictxt);
+
+    auto body_response = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    for (int ilo = 0; ilo != desc_body.m_loc(); ++ilo)
+    {
+        const int i = desc_body.indx_l2g_r(ilo);
+        const auto bw_direction = bw_cart(i, 0) * qhat_x + bw_cart(i, 1) * qhat_y;
+        for (int jlo = 0; jlo != desc_body.n_loc(); ++jlo)
+        {
+            const int j = desc_body.indx_l2g_c(jlo);
+            const auto wb_direction = wb_cart(0, j) * qhat_x + wb_cart(1, j) * qhat_y;
+            body_response(ilo, jlo) =
+                body_inverse(ilo, jlo) - (i == j ? 1.0 : 0.0) +
+                q_physical * bw_direction * wb_direction / denominator;
+        }
+    }
+
+    auto body_tmp = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    auto wc_body = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    ScalapackConnector::pgemm_f(
+        'N', 'N', nbody, nbody, nbody, C_ONE, regular_body_sqrt.ptr(), 1, 1,
+        desc_body.desc, body_response.ptr(), 1, 1, desc_body.desc, C_ZERO,
+        body_tmp.ptr(), 1, 1, desc_body.desc);
+    ScalapackConnector::pgemm_f(
+        'N', 'N', nbody, nbody, nbody, C_ONE, body_tmp.ptr(), 1, 1,
+        desc_body.desc, regular_body_sqrt.ptr(), 1, 1, desc_body.desc, C_ZERO,
+        wc_body.ptr(), 1, 1, desc_body.desc);
+
+    wc_coulomb_basis.zero_out();
+    ScalapackConnector::pgemr2d_f(
+        nbody, nbody, wc_body.ptr(), 1, 1, desc_body.desc, wc_coulomb_basis.ptr(), 2, 2,
+        desc_nabf_nabf_opt.desc, blacs_h.ictxt);
+
+    ArrayDesc desc_body_head(blacs_h);
+    desc_body_head.init(nbody, 1, desc_body.mb(), 1, 0, 0);
+    ArrayDesc desc_head_body(blacs_h);
+    desc_head_body.init(1, nbody, 1, desc_body.nb(), 0, 0);
+    auto body_head = init_local_mat<complex<double>>(desc_body_head, MAJOR::COL);
+    auto head_body = init_local_mat<complex<double>>(desc_head_body, MAJOR::COL);
+    for (int i = 0; i != nbody; ++i)
+    {
+        const auto body_head_value = -std::sqrt(TWO_PI) *
+            (bw_cart(i, 0) * qhat_x + bw_cart(i, 1) * qhat_y) / denominator;
+        const auto head_body_value = -std::sqrt(TWO_PI) *
+            (wb_cart(0, i) * qhat_x + wb_cart(1, i) * qhat_y) / denominator;
+        const int ilo = desc_body_head.indx_g2l_r(i);
+        const int jlo = desc_body_head.indx_g2l_c(0);
+        if (ilo >= 0 && jlo >= 0) body_head(ilo, jlo) = body_head_value;
+        const int irow = desc_head_body.indx_g2l_r(0);
+        const int jcol = desc_head_body.indx_g2l_c(i);
+        if (irow >= 0 && jcol >= 0) head_body(irow, jcol) = head_body_value;
+    }
+    auto wc_body_head = init_local_mat<complex<double>>(desc_body_head, MAJOR::COL);
+    auto wc_head_body = init_local_mat<complex<double>>(desc_head_body, MAJOR::COL);
+    ScalapackConnector::pgemm_f(
+        'N', 'N', nbody, 1, nbody, C_ONE, regular_body_sqrt.ptr(), 1, 1,
+        desc_body.desc, body_head.ptr(), 1, 1, desc_body_head.desc, C_ZERO,
+        wc_body_head.ptr(), 1, 1, desc_body_head.desc);
+    ScalapackConnector::pgemm_f(
+        'N', 'N', 1, nbody, nbody, C_ONE, head_body.ptr(), 1, 1,
+        desc_head_body.desc, regular_body_sqrt.ptr(), 1, 1, desc_body.desc, C_ZERO,
+        wc_head_body.ptr(), 1, 1, desc_head_body.desc);
+    for (std::size_t i = 0; i != wc_body_head.size(); ++i)
+        wc_body_head.ptr()[i] *= pw_to_auxiliary_scale;
+    for (std::size_t i = 0; i != wc_head_body.size(); ++i)
+        wc_head_body.ptr()[i] *= pw_to_auxiliary_scale;
+    ScalapackConnector::pgemr2d_f(
+        nbody, 1, wc_body_head.ptr(), 1, 1, desc_body_head.desc,
+        wc_coulomb_basis.ptr(), 2, 1, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
+    ScalapackConnector::pgemr2d_f(
+        1, nbody, wc_head_body.ptr(), 1, 1, desc_head_body.desc,
+        wc_coulomb_basis.ptr(), 1, 2, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
+
+    const int ilo_head = desc_nabf_nabf_opt.indx_g2l_r(0);
+    const int jlo_head = desc_nabf_nabf_opt.indx_g2l_c(0);
+    if (ilo_head >= 0 && jlo_head >= 0)
+        wc_coulomb_basis(ilo_head, jlo_head) =
+            pw_to_auxiliary_scale * pw_to_auxiliary_scale * (-TWO_PI * a / denominator);
 }
 
 std::complex<double> diele_func::compute_rpa_trace_log_average(

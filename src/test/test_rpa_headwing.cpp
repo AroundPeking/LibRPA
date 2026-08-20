@@ -2,7 +2,9 @@
 #include <array>
 #include <cassert>
 #include <complex>
+#include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -11,6 +13,7 @@
 #include "../core/chi0.h"
 #include "../core/dielecmodel.h"
 #include "../core/epsilon.h"
+#include "../core/gw.h"
 #include "../core/qpoint_view.h"
 #include "../io/global_io.h"
 #include "../math/utils_matrix_m_mpi.h"
@@ -20,9 +23,12 @@
 #include "../utils/constants.h"
 
 using librpa_int::ArrayDesc;
+using librpa_int::atom_mapping;
+using librpa_int::atom_t;
 using librpa_int::AtomicBasis;
 using librpa_int::atpair_k_cplx_mat_t;
 using librpa_int::BlacsCtxtHandler;
+using librpa_int::build_symmetry_qpoint_view;
 using librpa_int::C_ONE;
 using librpa_int::ComplexMatrix;
 using librpa_int::diele_func;
@@ -31,8 +37,8 @@ using librpa_int::KPointBlacsParallelContext;
 using librpa_int::KPointBlacsProcessShape;
 using librpa_int::MAJOR;
 using librpa_int::Matrix3;
-using librpa_int::Matz;
 using librpa_int::matrix_m;
+using librpa_int::Matz;
 using librpa_int::MeanField;
 using librpa_int::PeriodicBoundaryData;
 using librpa_int::SpeciesBasisLayout;
@@ -43,12 +49,194 @@ using librpa_int::SymmetryOperation;
 using librpa_int::SymmetryQPointRestoreMode;
 using librpa_int::TFGrids;
 using librpa_int::Vector3_Order;
-using librpa_int::atom_mapping;
-using librpa_int::atom_t;
-using librpa_int::build_symmetry_qpoint_view;
 
 namespace
 {
+
+void test_complex_spacetime_diagnostic_requires_explicit_enable()
+{
+    assert(!librpa_int::force_complex_spacetime_diagnostic_requested(nullptr));
+    assert(!librpa_int::force_complex_spacetime_diagnostic_requested(""));
+    assert(librpa_int::force_complex_spacetime_diagnostic_requested("enabled"));
+
+    bool rejected_invalid_value = false;
+    try
+    {
+        librpa_int::force_complex_spacetime_diagnostic_requested("true");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected_invalid_value = true;
+    }
+    assert(rejected_invalid_value);
+}
+
+void test_complex_spacetime_storage_does_not_change_non_soc_spin_weight()
+{
+    if (std::abs(librpa_int::chi0_spacetime_spin_scale(1, 1) - 2.0) >= 1.0e-15 ||
+        std::abs(librpa_int::chi0_spacetime_spin_scale(2, 1) - 1.0) >= 1.0e-15 ||
+        std::abs(librpa_int::chi0_spacetime_spin_scale(1, 2) - 1.0) >= 1.0e-15)
+        throw std::runtime_error(
+            "complex chi0 storage must not change the physical non-SOC spin weight");
+}
+
+void test_direct_compressed_sigc_diagnostic_requires_explicit_shrink_path()
+{
+    assert(!librpa_int::direct_compressed_sigc_diagnostic_requested(nullptr));
+    assert(!librpa_int::direct_compressed_sigc_diagnostic_requested(""));
+    assert(librpa_int::direct_compressed_sigc_diagnostic_requested("enabled"));
+    assert(librpa_int::should_contract_sigc_in_compressed_abfs(true, "enabled"));
+    assert(!librpa_int::should_contract_sigc_in_compressed_abfs(true, nullptr));
+
+    bool rejected_without_shrink = false;
+    try
+    {
+        (void)librpa_int::should_contract_sigc_in_compressed_abfs(false, "enabled");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected_without_shrink = true;
+    }
+    assert(rejected_without_shrink);
+
+    bool rejected_invalid_value = false;
+    try
+    {
+        (void)librpa_int::direct_compressed_sigc_diagnostic_requested("true");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected_invalid_value = true;
+    }
+    assert(rejected_invalid_value);
+}
+
+void test_chi0_rspace_symmetry_diagnostic_requires_explicit_enable()
+{
+    assert(!librpa_int::disable_chi0_rspace_symmetry_diagnostic_requested(nullptr));
+    assert(!librpa_int::disable_chi0_rspace_symmetry_diagnostic_requested(""));
+    assert(librpa_int::disable_chi0_rspace_symmetry_diagnostic_requested("enabled"));
+
+    bool rejected_invalid_value = false;
+    try
+    {
+        librpa_int::disable_chi0_rspace_symmetry_diagnostic_requested("true");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected_invalid_value = true;
+    }
+    assert(rejected_invalid_value);
+}
+
+void test_gamma_shrink_transform_diagnostic_requires_explicit_enable()
+{
+    assert(!librpa_int::use_gamma_shrink_transform_diagnostic_requested(nullptr));
+    assert(!librpa_int::use_gamma_shrink_transform_diagnostic_requested(""));
+    assert(librpa_int::use_gamma_shrink_transform_diagnostic_requested("enabled"));
+
+    bool rejected_invalid_value = false;
+    try
+    {
+        librpa_int::use_gamma_shrink_transform_diagnostic_requested("true");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected_invalid_value = true;
+    }
+    assert(rejected_invalid_value);
+}
+
+void test_chi0_qspace_symmetry_diagnostic_requires_explicit_enable()
+{
+    assert(!librpa_int::disable_chi0_qspace_symmetry_diagnostic_requested(nullptr));
+    assert(!librpa_int::disable_chi0_qspace_symmetry_diagnostic_requested(""));
+    assert(librpa_int::disable_chi0_qspace_symmetry_diagnostic_requested("enabled"));
+
+    bool rejected_invalid_value = false;
+    try
+    {
+        librpa_int::disable_chi0_qspace_symmetry_diagnostic_requested("true");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected_invalid_value = true;
+    }
+    assert(rejected_invalid_value);
+}
+
+void test_sigc_rspace_symmetry_diagnostic_requires_explicit_enable()
+{
+    assert(!librpa_int::disable_sigc_rspace_symmetry_diagnostic_requested(nullptr));
+    assert(!librpa_int::disable_sigc_rspace_symmetry_diagnostic_requested(""));
+    assert(librpa_int::disable_sigc_rspace_symmetry_diagnostic_requested("enabled"));
+
+    bool rejected_invalid_value = false;
+    try
+    {
+        librpa_int::disable_sigc_rspace_symmetry_diagnostic_requested("true");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected_invalid_value = true;
+    }
+    assert(rejected_invalid_value);
+}
+
+void test_single_q_member_diagnostic_disables_sigc_rspace_symmetry_restore()
+{
+    if (!librpa_int::should_use_sigc_rspace_symmetry(true, true, nullptr, nullptr))
+        throw std::runtime_error("complete crystal q stars should keep Sigma_c symmetry restore");
+    if (librpa_int::should_use_sigc_rspace_symmetry(true, true, nullptr,
+                                                    "0,0.083333333333333333,0"))
+        throw std::runtime_error(
+            "a retained single q member breaks the crystal symmetry of Sigma_c");
+    if (librpa_int::should_use_sigc_rspace_symmetry(true, true, "enabled", nullptr))
+        throw std::runtime_error("the explicit Sigma_c symmetry diagnostic switch was ignored");
+}
+
+void test_strict_2d_qmember_diagnostic_selects_one_periodic_member()
+{
+    const auto require = [](const bool condition)
+    {
+        if (!condition) throw std::runtime_error("single q-member periodic selection regression");
+    };
+    const Vector3_Order<double> selected{0.0, 1.0 / 12.0, 0.0};
+    const std::vector<Vector3_Order<double>> first_star{
+        {0.0, 1.0 / 12.0, 0.0},  {0.0, -1.0 / 12.0, 0.0},        {1.0 / 12.0, 0.0, 0.0},
+        {-1.0 / 12.0, 0.0, 0.0}, {1.0 / 12.0, -1.0 / 12.0, 0.0}, {-1.0 / 12.0, 1.0 / 12.0, 0.0},
+    };
+
+    for (const auto &q : first_star)
+        require(librpa_int::strict_2d_qmember_diagnostic_keeps(q, selected, false));
+    require(librpa_int::strict_2d_qmember_diagnostic_keeps(first_star.front(), selected, true));
+    require(librpa_int::strict_2d_qmember_diagnostic_keeps(
+        Vector3_Order<double>{0.0, -11.0 / 12.0, 0.0}, selected, true));
+    for (std::size_t i = 1; i != first_star.size(); ++i)
+        require(!librpa_int::strict_2d_qmember_diagnostic_keeps(first_star[i], selected, true));
+}
+
+void test_strict_2d_qmember_diagnostic_accepts_one_distributed_owner()
+{
+    const auto require = [](const bool condition)
+    {
+        if (!condition) throw std::runtime_error("single q-member MPI ownership regression");
+    };
+    for (const std::size_t local_count : {1U, 0U, 0U, 0U})
+        require(librpa_int::strict_2d_qmember_diagnostic_selection_valid(local_count, 1, true));
+    require(!librpa_int::strict_2d_qmember_diagnostic_selection_valid(0, 0, true));
+    require(!librpa_int::strict_2d_qmember_diagnostic_selection_valid(2, 2, true));
+    require(librpa_int::strict_2d_qmember_diagnostic_selection_valid(7, 0, false));
+}
+
+void test_wc_rf_output_collective_includes_ranks_without_local_frequency_blocks()
+{
+    if (!librpa_int::should_enter_wc_rf_collective(true, true) ||
+        !librpa_int::should_enter_wc_rf_collective(true, false) ||
+        librpa_int::should_enter_wc_rf_collective(false, true) ||
+        librpa_int::should_enter_wc_rf_collective(false, false))
+        throw std::runtime_error("Wc(R) output must keep every MPI rank in collective transforms");
+}
 
 void test_rspace_symmetry_requires_complete_band_space()
 {
@@ -85,7 +273,7 @@ void require_double_close(const double actual, const double expected, const doub
 void test_kpoint_coordinate_mapping_selects_active_klist_from_full_source()
 {
     const std::vector<Vector3_Order<double>> pyatb_full_kpoints{
-        {0.0, 0.0, 0.0}, {0.125, 0.0, 0.0}, {0.25, 0.0, 0.0}, {0.375, 0.0, 0.0},
+        {0.0, 0.0, 0.0},   {0.125, 0.0, 0.0},   {0.25, 0.0, 0.0}, {0.375, 0.0, 0.0},
         {0.0, 0.125, 0.0}, {0.125, 0.125, 0.0}, {0.875, 0.0, 0.0}};
     const std::vector<Vector3_Order<double>> active_kpoints{
         {0.0, 0.0, 0.0}, {0.25, 0.0, 0.0}, {0.125, 0.125, 0.0}};
@@ -98,31 +286,6 @@ void test_kpoint_coordinate_mapping_selects_active_klist_from_full_source()
     const auto wrapped_mapping =
         librpa_int::map_kpoints_by_coordinates(wrapped_active_kpoints, pyatb_full_kpoints);
     assert((wrapped_mapping == std::vector<int>{6}));
-}
-
-void test_strict_2d_qmember_diagnostic_selects_one_periodic_member()
-{
-    const Vector3_Order<double> selected{0.0, 1.0 / 12.0, 0.0};
-    const std::vector<Vector3_Order<double>> first_star{
-        {0.0, 1.0 / 12.0, 0.0},
-        {0.0, -1.0 / 12.0, 0.0},
-        {1.0 / 12.0, 0.0, 0.0},
-        {-1.0 / 12.0, 0.0, 0.0},
-        {1.0 / 12.0, -1.0 / 12.0, 0.0},
-        {-1.0 / 12.0, 1.0 / 12.0, 0.0},
-    };
-
-    for (const auto& q : first_star)
-    {
-        assert(librpa_int::strict_2d_qmember_diagnostic_keeps(q, selected, false));
-    }
-    assert(librpa_int::strict_2d_qmember_diagnostic_keeps(first_star.front(), selected, true));
-    assert(librpa_int::strict_2d_qmember_diagnostic_keeps(
-        Vector3_Order<double>{0.0, -11.0 / 12.0, 0.0}, selected, true));
-    for (std::size_t i = 1; i != first_star.size(); ++i)
-    {
-        assert(!librpa_int::strict_2d_qmember_diagnostic_keeps(first_star[i], selected, true));
-    }
 }
 
 void test_kstar_velocity_mapping_preserves_member_order_and_periodic_gauge()
@@ -148,8 +311,8 @@ void test_kstar_velocity_mapping_preserves_member_order_and_periodic_gauge()
     const std::vector<Vector3_Order<double>> full_bz_kpoints{
         {0.5, 0.0, 0.0}, {0.75, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.25, 0.0, 0.0}};
 
-    const auto mapping = librpa_int::map_symmetry_kstar_members_to_source_kpoints(
-        ctx, ibz_kpoints, full_bz_kpoints);
+    const auto mapping =
+        librpa_int::map_symmetry_kstar_members_to_source_kpoints(ctx, ibz_kpoints, full_bz_kpoints);
 
     assert((mapping == std::vector<std::vector<int>>{{3, 1}, {2, 0}}));
 }
@@ -436,10 +599,10 @@ void test_rpa_headwing_gamma_cell_volume_uses_reciprocal_lattice()
     require_double_close(vol_2d, expected_2d, 1e-14);
 
     pbc.set_period(4, 4, 4);
-    require_double_close(librpa_int::rpa_headwing_gamma_cell_volume(pbc, false),
-                         vol_3d / 64.0, 1e-14);
-    require_double_close(librpa_int::rpa_headwing_gamma_cell_volume(pbc, true),
-                         vol_2d / 64.0, 1e-14);
+    require_double_close(librpa_int::rpa_headwing_gamma_cell_volume(pbc, false), vol_3d / 64.0,
+                         1e-14);
+    require_double_close(librpa_int::rpa_headwing_gamma_cell_volume(pbc, true), vol_2d / 64.0,
+                         1e-14);
 }
 
 void test_strict_2d_headwing_prefactors_use_inplane_area()
@@ -454,19 +617,15 @@ void test_strict_2d_headwing_prefactors_use_inplane_area()
 void test_strict_2d_auxiliary_normalization_is_computed_from_basis_metadata()
 {
     PeriodicBoundaryData pbc;
-    pbc.set_latvec({19.390653825130212, 0.0, 0.0,
-                    0.0, 1.0, 0.0,
-                    0.0, 0.0, 30.0});
+    pbc.set_latvec({19.390653825130212, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 30.0});
 
     constexpr double multipole_norm_squared = 2205.0673846924301;
-    const auto normalization = librpa_int::strict_2d_coulomb_head_normalization(
-        pbc, multipole_norm_squared);
+    const auto normalization =
+        librpa_int::strict_2d_coulomb_head_normalization(pbc, multipole_norm_squared);
 
     require_double_close(normalization.inplane_area_bohr2, 19.390653825130212, 1e-13);
-    require_double_close(normalization.auxiliary_head_coefficient,
-                         8978.8175111265446, 1e-10);
-    require_double_close(normalization.pw_to_auxiliary_scale,
-                         37.802423070695596, 1e-12);
+    require_double_close(normalization.auxiliary_head_coefficient, 8978.8175111265446, 1e-10);
+    require_double_close(normalization.pw_to_auxiliary_scale, 37.802423070695596, 1e-12);
 
     bool rejected = false;
     try
@@ -633,7 +792,8 @@ void test_strict_2d_gw_uses_full_coulomb_at_all_q()
 
 void test_strict_2d_gw_routes_gamma_through_complete_wc_average()
 {
-    const auto require_route = [](const bool condition, const char *message) {
+    const auto require_route = [](const bool condition, const char *message)
+    {
         if (!condition)
         {
             std::cerr << message << std::endl;
@@ -705,10 +865,55 @@ void test_strict_2d_diagnostic_schema_and_qpoint_order_are_stable()
 {
     const auto count_columns = [](const std::string &header)
     { return 1 + static_cast<int>(std::count(header.begin(), header.end(), ',')); };
-    if (count_columns(librpa_int::strict_2d_finite_q_diagnostics_header()) != 37 ||
-        count_columns(librpa_int::strict_2d_gamma_wc_diagnostics_header()) != 19)
+    const auto finite_q_header = librpa_int::strict_2d_finite_q_diagnostics_header();
+    const auto raw_gamma_chi0_header =
+        librpa_int::strict_2d_raw_gamma_chi0_diagnostics_header();
+    if (count_columns(finite_q_header) != 75 ||
+        count_columns(raw_gamma_chi0_header) != 9 ||
+        count_columns(librpa_int::strict_2d_gamma_wc_diagnostics_header()) != 19 ||
+        count_columns(librpa_int::strict_2d_gamma_wc_transform_diagnostics_header()) != 12 ||
+        finite_q_header.find(
+            "coulomb_head_eigenvalue,q_coulomb_head_eigenvalue,current_basis_head_column") ==
+            std::string::npos ||
+        finite_q_header.find("chi0_head_real,chi0_head_imag,chi0_head_over_q2_real") ==
+            std::string::npos ||
+        finite_q_header.find("current_basis_p_head_real,current_basis_p_head_imag") ==
+            std::string::npos ||
+        finite_q_header.find("current_basis_chi0_head_real,current_basis_chi0_head_imag") ==
+            std::string::npos ||
+        finite_q_header.find("current_basis_wc_head_real,current_basis_wc_head_imag") ==
+            std::string::npos ||
+        finite_q_header.find(
+            "analytic_finite_q_wc_head_real,analytic_finite_q_wc_head_imag,"
+            "analytic_finite_q_wc_head_body_fro,analytic_finite_q_wc_body_head_fro,"
+            "analytic_finite_q_wc_body_body_fro") == std::string::npos ||
+        raw_gamma_chi0_header !=
+            "ifreq,frequency,head_column,chi0_head_real,chi0_head_imag,"
+            "chi0_head_body_fro,chi0_body_head_fro,chi0_body_body_fro,n_auxiliary")
     {
         std::cerr << "strict 2D diagnostic CSV schema changed unexpectedly" << std::endl;
+        std::abort();
+    }
+
+    const std::array<double, 4> ascending{-2.0, 0.1, 3.0, 8.0};
+    const std::array<double, 4> descending{8.0, 3.0, 0.1, -2.0};
+    if (librpa_int::strict_2d_head_eigenvector_column(ascending.data(),
+                                                      static_cast<int>(ascending.size())) != 3 ||
+        librpa_int::strict_2d_head_eigenvector_column(descending.data(),
+                                                      static_cast<int>(descending.size())) != 0)
+    {
+        std::cerr << "strict 2D diagnostic did not select the largest Coulomb channel" << std::endl;
+        std::abort();
+    }
+
+    if (librpa_int::strict_2d_diagnostic_head_first_index(0, 3) != 1 ||
+        librpa_int::strict_2d_diagnostic_head_first_index(1, 3) != 2 ||
+        librpa_int::strict_2d_diagnostic_head_first_index(2, 3) != 3 ||
+        librpa_int::strict_2d_diagnostic_head_first_index(3, 3) != 0 ||
+        librpa_int::strict_2d_diagnostic_head_first_index(4, 3) != 4)
+    {
+        std::cerr << "strict 2D diagnostic did not remap an arbitrary head column first"
+                  << std::endl;
         std::abort();
     }
 
@@ -726,6 +931,240 @@ void test_strict_2d_diagnostic_schema_and_qpoint_order_are_stable()
         std::cerr << "strict 2D diagnostics did not place Gamma first" << std::endl;
         std::abort();
     }
+}
+
+void test_strict_2d_qshell_uses_minimum_image_q()
+{
+    PeriodicBoundaryData pbc;
+    pbc.set_latvec({1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0});
+
+    const Vector3_Order<double> wrapped_q{11.0 / 12.0, 1.0 / 12.0, 0.0};
+    const auto minimum_q = librpa_int::strict_2d_minimum_image_q(pbc, wrapped_q);
+    require_double_close(minimum_q.x, -1.0 / 12.0, 1.0e-14);
+    require_double_close(minimum_q.y, 1.0 / 12.0, 1.0e-14);
+    require_double_close(minimum_q.z, 0.0, 1.0e-14);
+
+    using librpa_int::classify_strict_2d_qshell;
+    using librpa_int::Strict2dQshellRegion;
+    const double first_q_norm = 1.0 / 12.0;
+    assert(classify_strict_2d_qshell(0.0, first_q_norm) == Strict2dQshellRegion::gamma);
+    assert(classify_strict_2d_qshell(first_q_norm, first_q_norm) == Strict2dQshellRegion::first);
+    assert(classify_strict_2d_qshell(2.0 * first_q_norm, first_q_norm) ==
+           Strict2dQshellRegion::rest);
+}
+
+void test_strict_2d_qradial_partitions_rest_exactly()
+{
+    using librpa_int::classify_strict_2d_qradial;
+    using librpa_int::Strict2dQradialRegion;
+
+    const double first_q_norm = 0.125;
+    assert(classify_strict_2d_qradial(0.0, first_q_norm) ==
+           Strict2dQradialRegion::gamma_or_first);
+    assert(classify_strict_2d_qradial(first_q_norm, first_q_norm) ==
+           Strict2dQradialRegion::gamma_or_first);
+    assert(classify_strict_2d_qradial(1.5 * first_q_norm, first_q_norm) ==
+           Strict2dQradialRegion::near);
+    assert(classify_strict_2d_qradial(2.5 * first_q_norm, first_q_norm) ==
+           Strict2dQradialRegion::near);
+    assert(classify_strict_2d_qradial(2.5 * first_q_norm + 1.0e-9, first_q_norm) ==
+           Strict2dQradialRegion::middle);
+    assert(classify_strict_2d_qradial(4.5 * first_q_norm, first_q_norm) ==
+           Strict2dQradialRegion::middle);
+    assert(classify_strict_2d_qradial(4.5 * first_q_norm + 1.0e-9, first_q_norm) ==
+           Strict2dQradialRegion::far);
+
+    // The two numerically distinct lengths below are the same first shell in
+    // the MoS2 N12 grid; the difference comes from rounded lattice data.
+    const double mos2_first_q_norm = 0.1004876;
+    const double mos2_equivalent_first_q_norm = 0.1004992;
+    assert(classify_strict_2d_qradial(mos2_equivalent_first_q_norm, mos2_first_q_norm) ==
+           Strict2dQradialRegion::gamma_or_first);
+
+    assert(!librpa_int::strict_2d_qradial_is_corner(6.5 * first_q_norm, first_q_norm));
+    assert(librpa_int::strict_2d_qradial_is_corner(
+        (6.5 + 1.0e-9) * first_q_norm, first_q_norm));
+
+    const double hbn_first_q_norm = 0.12777240809249668;
+    assert(!librpa_int::strict_2d_qradial_is_corner(
+        6.0 * hbn_first_q_norm, hbn_first_q_norm));
+    assert(librpa_int::strict_2d_qradial_is_corner(
+        6.928203230275509 * hbn_first_q_norm, hbn_first_q_norm));
+}
+
+void test_strict_2d_first_shell_wc_block_diagnostic_is_exactly_additive()
+{
+    using librpa_int::strict_2d_first_shell_wc_block_diagnostic;
+    using librpa_int::strict_2d_wc_block_keeps;
+    using librpa_int::Strict2dWcBlock;
+
+    assert(strict_2d_first_shell_wc_block_diagnostic(nullptr) == Strict2dWcBlock::full);
+    assert(strict_2d_first_shell_wc_block_diagnostic("") == Strict2dWcBlock::full);
+    assert(strict_2d_first_shell_wc_block_diagnostic("head") == Strict2dWcBlock::head);
+    assert(strict_2d_first_shell_wc_block_diagnostic("wing") == Strict2dWcBlock::wing);
+    assert(strict_2d_first_shell_wc_block_diagnostic("body") == Strict2dWcBlock::body);
+
+    constexpr int dimension = 4;
+    constexpr int head_index = 2;
+    for (int row = 0; row != dimension; ++row)
+    {
+        for (int column = 0; column != dimension; ++column)
+        {
+            const int kept_count =
+                static_cast<int>(strict_2d_wc_block_keeps(Strict2dWcBlock::head, row, column,
+                                                          head_index)) +
+                static_cast<int>(strict_2d_wc_block_keeps(Strict2dWcBlock::wing, row, column,
+                                                          head_index)) +
+                static_cast<int>(strict_2d_wc_block_keeps(Strict2dWcBlock::body, row, column,
+                                                          head_index));
+            assert(kept_count == 1);
+
+            const std::complex<double> value{1.0 + row, -2.0 - column};
+            std::complex<double> reconstructed{0.0, 0.0};
+            for (const auto block :
+                 {Strict2dWcBlock::head, Strict2dWcBlock::wing, Strict2dWcBlock::body})
+                if (strict_2d_wc_block_keeps(block, row, column, head_index))
+                    reconstructed += value;
+            assert_complex_close(reconstructed, value, 0.0);
+        }
+    }
+
+    for (const auto block :
+         {Strict2dWcBlock::head, Strict2dWcBlock::wing, Strict2dWcBlock::body})
+        for (int row = 0; row != dimension; ++row)
+            for (int column = 0; column != dimension; ++column)
+                assert(strict_2d_wc_block_keeps(block, row, column, head_index) ==
+                       strict_2d_wc_block_keeps(block, column, row, head_index));
+
+    bool rejected = false;
+    try
+    {
+        (void)strict_2d_first_shell_wc_block_diagnostic("head-body");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
+void test_strict_2d_alpha_wc_diagnostic_requires_explicit_reference()
+{
+    assert(!librpa_int::strict_2d_alpha_wc_diagnostic_requested(nullptr));
+    assert(!librpa_int::strict_2d_alpha_wc_diagnostic_requested(""));
+    assert(librpa_int::strict_2d_alpha_wc_diagnostic_requested("0.25"));
+
+    bool rejected_other_value = false;
+    try
+    {
+        librpa_int::strict_2d_alpha_wc_diagnostic_requested("0.5");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected_other_value = true;
+    }
+    assert(rejected_other_value);
+}
+
+void test_strict_2d_first_shell_analytic_wc_diagnostic_requires_explicit_enable()
+{
+    assert(!librpa_int::strict_2d_first_shell_analytic_wc_diagnostic_requested(nullptr));
+    assert(!librpa_int::strict_2d_first_shell_analytic_wc_diagnostic_requested(""));
+    assert(librpa_int::strict_2d_first_shell_analytic_wc_diagnostic_requested("enabled"));
+
+    bool rejected = false;
+    try
+    {
+        librpa_int::strict_2d_first_shell_analytic_wc_diagnostic_requested("true");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
+void test_strict_2d_finite_q_matrix_dump_selection_is_read_only_and_bounded()
+{
+    assert(!librpa_int::strict_2d_should_dump_finite_q_matrix(0, 0, true));
+    assert(librpa_int::strict_2d_should_dump_finite_q_matrix(1, 0, false));
+    assert(librpa_int::strict_2d_should_dump_finite_q_matrix(12, 0, false));
+    assert(!librpa_int::strict_2d_should_dump_finite_q_matrix(13, 0, false));
+    assert(!librpa_int::strict_2d_should_dump_finite_q_matrix(1, 1, false));
+
+    bool rejected = false;
+    try
+    {
+        (void)librpa_int::strict_2d_should_dump_finite_q_matrix(1, 0, false, 0);
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
+void test_strict_2d_omega0_diagnostic_directory_is_explicit_and_normalized()
+{
+    assert(librpa_int::strict_2d_omega0_diagnostic_directory(nullptr).empty());
+    assert(librpa_int::strict_2d_omega0_diagnostic_directory("").empty());
+    assert(librpa_int::strict_2d_omega0_diagnostic_directory("omega0") == "omega0/");
+    assert(librpa_int::strict_2d_omega0_diagnostic_directory("omega0/") == "omega0/");
+}
+
+void test_strict_2d_omega0_override_basis_modes_are_mutually_exclusive()
+{
+    const auto none = librpa_int::strict_2d_omega0_override_directories(nullptr, nullptr);
+    assert(none.coulomb_basis.empty());
+    assert(none.auxiliary_basis.empty());
+
+    const auto auxiliary = librpa_int::strict_2d_omega0_override_directories(nullptr, "omega0_aux");
+    assert(auxiliary.coulomb_basis.empty());
+    assert(auxiliary.auxiliary_basis == "omega0_aux/");
+
+    bool rejected = false;
+    try
+    {
+        (void)librpa_int::strict_2d_omega0_override_directories("omega0_coul", "omega0_aux");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
+void test_strict_2d_omega0_override_reader_validates_shape_and_payload()
+{
+    const std::string path = "strict2d_omega0_override_test.bin";
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        const char magic[8] = {'L', 'R', '2', 'D', 'W', 'C', '0', '1'};
+        const std::int32_t rows = 2, cols = 2;
+        const double values[8] = {1.0, 0.5, -2.0, 3.0, 4.0, -1.0, 0.25, 0.0};
+        output.write(magic, sizeof(magic));
+        output.write(reinterpret_cast<const char *>(&rows), sizeof(rows));
+        output.write(reinterpret_cast<const char *>(&cols), sizeof(cols));
+        output.write(reinterpret_cast<const char *>(values), sizeof(values));
+    }
+    const auto matrix = librpa_int::read_strict_2d_omega0_override_binary(path, 2);
+    assert(matrix.size() == 4);
+    assert_complex_close(matrix[0], {1.0, 0.5}, 1.0e-15);
+    assert_complex_close(matrix[1], {-2.0, 3.0}, 1.0e-15);
+    assert_complex_close(matrix[2], {4.0, -1.0}, 1.0e-15);
+    assert_complex_close(matrix[3], {0.25, 0.0}, 1.0e-15);
+
+    bool rejected_shape = false;
+    try
+    {
+        (void)librpa_int::read_strict_2d_omega0_override_binary(path, 3);
+    }
+    catch (const std::runtime_error &)
+    {
+        rejected_shape = true;
+    }
+    assert(rejected_shape);
+    std::remove(path.c_str());
 }
 
 void test_strict_2d_block_metrics_separate_head_wings_and_body()
@@ -787,8 +1226,7 @@ void test_strict_2d_pw_wc_transforms_to_auxiliary_coulomb_basis()
     {
         assert_complex_close(auxiliary_wc(0, i), scale * pw_wc(0, i), 1e-13);
         assert_complex_close(auxiliary_wc(i, 0), scale * pw_wc(i, 0), 1e-13);
-        for (int j = 1; j != 3; ++j)
-            assert_complex_close(auxiliary_wc(i, j), pw_wc(i, j), 1e-13);
+        for (int j = 1; j != 3; ++j) assert_complex_close(auxiliary_wc(i, j), pw_wc(i, j), 1e-13);
     }
 }
 
@@ -1408,8 +1846,8 @@ void test_accumulate_wing_mu_for_pair_matches_original_formula()
     }
 }
 
-SymmetryKStarMember make_headwing_wfc_atom_swap_member(
-    const std::complex<double> &rot_0, const std::complex<double> &rot_1)
+SymmetryKStarMember make_headwing_wfc_atom_swap_member(const std::complex<double> &rot_0,
+                                                       const std::complex<double> &rot_1)
 {
     SymmetryKStarMember member;
     member.spatial_isym = 0;
@@ -1452,8 +1890,7 @@ void test_headwing_wfc_restore_applies_atom_permutation()
     layout.set({0});
     const std::vector<SpeciesBasisLayout> layouts{layout};
     const std::map<librpa_int::atom_t, size_t> atom_nw{{0, 1}, {1, 1}};
-    const auto member = make_headwing_wfc_atom_swap_member(
-        {2.0, 0.5}, {3.0, -0.25});
+    const auto member = make_headwing_wfc_atom_swap_member({2.0, 0.5}, {3.0, -0.25});
 
     ComplexMatrix wfc_ibz(1, 2);
     wfc_ibz(0, 0) = {0.7, -0.2};
@@ -1462,10 +1899,8 @@ void test_headwing_wfc_restore_applies_atom_permutation()
     const auto wfc_bz = librpa_int::rotate_headwing_wfc_to_kstar_member(
         ctx, member, layouts, atom_nw, {0.0, 0.0, 0.0}, wfc_ibz, nullptr);
 
-    assert_complex_close(wfc_bz(0, 0), wfc_ibz(0, 1) * std::complex<double>{3.0, -0.25},
-                         1e-12);
-    assert_complex_close(wfc_bz(0, 1), wfc_ibz(0, 0) * std::complex<double>{2.0, 0.5},
-                         1e-12);
+    assert_complex_close(wfc_bz(0, 0), wfc_ibz(0, 1) * std::complex<double>{3.0, -0.25}, 1e-12);
+    assert_complex_close(wfc_bz(0, 1), wfc_ibz(0, 0) * std::complex<double>{2.0, 0.5}, 1e-12);
 }
 
 void test_headwing_wfc_restore_applies_time_reversal()
@@ -1514,9 +1949,7 @@ void test_headwing_velocity_restore_uses_inverse_spatial_route()
     SymmetryContext ctx;
     ctx.lattice_vectors.Identity();
     SymmetryOperation operation;
-    operation.rotation = Matrix3(0.0, -1.0, 0.0,
-                                 1.0,  0.0, 0.0,
-                                 0.0,  0.0, 1.0);
+    operation.rotation = Matrix3(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
     ctx.rspace_operations = {operation};
 
     SymmetryKStarMember member;
@@ -1527,15 +1960,15 @@ void test_headwing_velocity_restore_uses_inverse_spatial_route()
     velocity_ibz[1](0, 0) = {3.0, -1.0};
     velocity_ibz[2](0, 0) = {-0.5, 0.25};
 
-    const auto velocity_bz = librpa_int::rotate_headwing_velocity_to_kstar_member(
-        ctx, member, velocity_ibz, 1, false);
+    const auto velocity_bz =
+        librpa_int::rotate_headwing_velocity_to_kstar_member(ctx, member, velocity_ibz, 1, false);
     assert_complex_close(velocity_bz[0](0, 0), -velocity_ibz[1](0, 0), 1e-12);
     assert_complex_close(velocity_bz[1](0, 0), velocity_ibz[0](0, 0), 1e-12);
     assert_complex_close(velocity_bz[2](0, 0), velocity_ibz[2](0, 0), 1e-12);
 
     member.time_reversal = true;
-    const auto velocity_bz_tr = librpa_int::rotate_headwing_velocity_to_kstar_member(
-        ctx, member, velocity_ibz, 1, true);
+    const auto velocity_bz_tr =
+        librpa_int::rotate_headwing_velocity_to_kstar_member(ctx, member, velocity_ibz, 1, true);
     assert_complex_close(velocity_bz_tr[0](0, 0), std::conj(velocity_ibz[1](0, 0)), 1e-12);
     assert_complex_close(velocity_bz_tr[1](0, 0), -std::conj(velocity_ibz[0](0, 0)), 1e-12);
     assert_complex_close(velocity_bz_tr[2](0, 0), -std::conj(velocity_ibz[2](0, 0)), 1e-12);
@@ -1569,9 +2002,87 @@ void test_headwing_direct_full_bz_wfc_selects_same_kstar_member()
     wfc_k1(0, 0) = {0.0, 1.0};
 
     const std::vector<std::vector<int>> member_source_ik{{1}};
-    const auto &wfc = librpa_int::direct_full_bz_wfc_for_kstar_member(
-        wfc_full, member_source_ik, 0, 0, 0, 0);
+    const auto &wfc =
+        librpa_int::direct_full_bz_wfc_for_kstar_member(wfc_full, member_source_ik, 0, 0, 0, 0);
     assert_complex_close(wfc(0, 0), {0.0, 1.0}, 1e-12);
+}
+
+void test_weighted_wfc_gram_comparison_is_phase_invariant_and_detects_band_swap()
+{
+    ComplexMatrix direct(2, 2);
+    direct(0, 0) = {1.0, 0.0};
+    direct(0, 1) = {0.0, 0.0};
+    direct(1, 0) = {0.0, 0.0};
+    direct(1, 1) = {1.0, 0.0};
+
+    auto phased = direct;
+    phased(0, 0) = {0.0, 1.0};
+    phased(1, 1) = {-1.0, 0.0};
+    const auto phase_metrics =
+        librpa_int::compare_weighted_wfc_grams(direct, phased, {1.0, 2.0});
+    assert(phase_metrics.difference_frobenius < 1e-12);
+    assert(phase_metrics.relative_frobenius < 1e-12);
+    assert(phase_metrics.maximum_absolute_difference < 1e-12);
+
+    ComplexMatrix swapped(2, 2);
+    swapped(0, 1) = {1.0, 0.0};
+    swapped(1, 0) = {1.0, 0.0};
+    const auto swap_metrics =
+        librpa_int::compare_weighted_wfc_grams(direct, swapped, {1.0, 2.0});
+    assert(swap_metrics.difference_frobenius > 1.0);
+    assert(swap_metrics.relative_frobenius > 0.1);
+}
+
+void test_gw_gf_kstar_wfc_diagnostic_requires_explicit_enable()
+{
+    assert(!librpa_int::output_gw_gf_kstar_wfc_diagnostic_requested(nullptr));
+    assert(!librpa_int::output_gw_gf_kstar_wfc_diagnostic_requested(""));
+    assert(librpa_int::output_gw_gf_kstar_wfc_diagnostic_requested("enabled"));
+    bool rejected = false;
+    try
+    {
+        (void)librpa_int::output_gw_gf_kstar_wfc_diagnostic_requested("true");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+
+    assert(!librpa_int::stop_after_gw_gf_kstar_wfc_diagnostic_requested(nullptr));
+    assert(!librpa_int::stop_after_gw_gf_kstar_wfc_diagnostic_requested(""));
+    assert(librpa_int::stop_after_gw_gf_kstar_wfc_diagnostic_requested("enabled"));
+    rejected = false;
+    try
+    {
+        (void)librpa_int::stop_after_gw_gf_kstar_wfc_diagnostic_requested("yes");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
+void test_gw_gf_kstar_wfc_diagnostic_uses_meanfield_kpoint_count()
+{
+    assert(librpa_int::gw_gf_kstar_wfc_diagnostic_active_kpoints(19, 19, 19) == 19);
+    for (const auto counts : {std::array<int, 3>{0, 19, 19},
+                              std::array<int, 3>{19, 18, 19},
+                              std::array<int, 3>{19, 19, 18}})
+    {
+        bool rejected = false;
+        try
+        {
+            (void)librpa_int::gw_gf_kstar_wfc_diagnostic_active_kpoints(
+                counts[0], counts[1], counts[2]);
+        }
+        catch (const std::invalid_argument &)
+        {
+            rejected = true;
+        }
+        assert(rejected);
+    }
 }
 
 RI::Tensor<double> make_single_value_tensor(const double value)
@@ -1583,8 +2094,7 @@ RI::Tensor<double> make_single_value_tensor(const double value)
 
 void compare_local_blacs_matrices(
     const std::pair<ArrayDesc, matrix_m<std::complex<double>>> &actual,
-    const std::pair<ArrayDesc, matrix_m<std::complex<double>>> &expected,
-    const double tolerance)
+    const std::pair<ArrayDesc, matrix_m<std::complex<double>>> &expected, const double tolerance)
 {
     assert(actual.first.m() == expected.first.m());
     assert(actual.first.n() == expected.first.n());
@@ -1651,8 +2161,8 @@ void test_kblacs_transform_with_restored_wfc_matches_full_bz_atom_permutation(
     const std::vector<Vector3_Order<double>> kfrac_ibz{{0.0, 0.0, 0.0}};
     const std::vector<double> omega{0.5};
 
-    diele_func df_ibz(mf_ibz, velocity, kfrac_ibz, basis_wfc, basis_abf, omega, 2, 2, 1, 1,
-                      pbc, librpa_int::global::mpi_comm_global_h, blacs_h);
+    diele_func df_ibz(mf_ibz, velocity, kfrac_ibz, basis_wfc, basis_abf, omega, 2, 2, 1, 1, pbc,
+                      librpa_int::global::mpi_comm_global_h, blacs_h);
     diele_func df_full(mf_full, velocity, {member.k_bz}, basis_wfc, basis_abf, omega, 2, 2, 1, 1,
                        pbc, librpa_int::global::mpi_comm_global_h, blacs_h);
 
@@ -1663,10 +2173,9 @@ void test_kblacs_transform_with_restored_wfc_matches_full_bz_atom_permutation(
 
     std::vector<std::vector<const ComplexMatrix *>> restored_wfc_ptrs(
         1, std::vector<const ComplexMatrix *>(1, &wfc_bz));
-    const auto restored = df_ibz.transform_Cs2mnk_kblacs(
-        0, 0, Cs_IJ, blacs_h, member.k_bz, &restored_wfc_ptrs);
-    const auto full = df_full.transform_Cs2mnk_kblacs(
-        0, 0, Cs_IJ, blacs_h, member.k_bz);
+    const auto restored =
+        df_ibz.transform_Cs2mnk_kblacs(0, 0, Cs_IJ, blacs_h, member.k_bz, &restored_wfc_ptrs);
+    const auto full = df_full.transform_Cs2mnk_kblacs(0, 0, Cs_IJ, blacs_h, member.k_bz);
 
     compare_local_blacs_matrices(restored, full, 1e-12);
 }
@@ -1762,8 +2271,8 @@ void test_transform_Cs2mnk_can_keep_spin_channels_separate(const BlacsCtxtHandle
         {
             assert_complex_close(all_spin.second(i, j), spin_up.second(i, j) + spin_dn.second(i, j),
                                  1e-12);
-            spin_channels_differ =
-                spin_channels_differ || std::abs(spin_up.second(i, j) - spin_dn.second(i, j)) > 1e-12;
+            spin_channels_differ = spin_channels_differ ||
+                                   std::abs(spin_up.second(i, j) - spin_dn.second(i, j)) > 1e-12;
         }
     }
     assert(spin_channels_differ);
@@ -1841,11 +2350,8 @@ void test_strict_2d_gamma_quadrature_is_ready_after_wing_initialization(
 }
 
 void add_scalar_wq_block(
-    atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old
-        &wq,
-    const atom_t atom_i,
-    const atom_t atom_j,
-    const Vector3_Order<double> &q,
+    atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old &wq,
+    const atom_t atom_i, const atom_t atom_j, const Vector3_Order<double> &q,
     const std::complex<double> value)
 {
     auto &block = wq[atom_i][atom_j][q];
@@ -1869,10 +2375,8 @@ librpa_int::symmetry_atom_block_matrix_map_t scalar_wq_to_blocks(
 }
 
 void add_scalar_wq_blocks(
-    atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old
-        &wq,
-    const Vector3_Order<double> &q,
-    const librpa_int::symmetry_atom_block_matrix_map_t &blocks)
+    atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old &wq,
+    const Vector3_Order<double> &q, const librpa_int::symmetry_atom_block_matrix_map_t &blocks)
 {
     for (const auto &[atom_i, row] : blocks)
     {
@@ -1883,16 +2387,88 @@ void add_scalar_wq_blocks(
     }
 }
 
+void add_wq_blocks(
+    atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old &wq,
+    const Vector3_Order<double> &q, const librpa_int::symmetry_atom_block_matrix_map_t &blocks)
+{
+    for (const auto &[atom_i, row] : blocks)
+    {
+        for (const auto &[atom_j, source] : row)
+        {
+            auto &target = wq[atom_i][atom_j][q];
+            target = matrix_m<std::complex<double>>(source.nr, source.nc, MAJOR::ROW);
+            for (int i = 0; i != source.nr; ++i)
+                for (int j = 0; j != source.nc; ++j) target(i, j) = source(i, j);
+        }
+    }
+}
+
+librpa_int::symmetry_atom_block_matrix_map_t make_bn_hermitian_wq_blocks(
+    const std::vector<int> &n_by_atom, const double index)
+{
+    const int n = std::accumulate(n_by_atom.begin(), n_by_atom.end(), 0);
+    ComplexMatrix dense(n, n);
+    for (int i = 0; i != n; ++i)
+    {
+        dense(i, i) = {1.0 + 0.09 * index + 0.04 * (i + 1), 0.0};
+        for (int j = i + 1; j != n; ++j)
+        {
+            dense(i, j) = {0.023 * (i + 1) * (j + 2) + 0.011 * index,
+                           0.017 * (j - i) + 0.007 * index};
+            dense(j, i) = std::conj(dense(i, j));
+        }
+    }
+
+    librpa_int::symmetry_atom_block_matrix_map_t blocks;
+    std::vector<int> offsets{0};
+    for (const int n_atom : n_by_atom) offsets.push_back(offsets.back() + n_atom);
+    for (atom_t atom_i = 0; atom_i != 2; ++atom_i)
+    {
+        for (atom_t atom_j = 0; atom_j != 2; ++atom_j)
+        {
+            auto &block = blocks[atom_i][atom_j];
+            block.create(n_by_atom.at(atom_i), n_by_atom.at(atom_j));
+            for (int i = 0; i != n_by_atom.at(atom_i); ++i)
+                for (int j = 0; j != n_by_atom.at(atom_j); ++j)
+                    block(i, j) = dense(offsets.at(atom_i) + i, offsets.at(atom_j) + j);
+        }
+    }
+    return blocks;
+}
+
+std::vector<std::vector<int>> make_bn_test_shells(const int basis_case)
+{
+    if (basis_case == 0) return {{0}, {0}};
+    if (basis_case == 1) return {{0, 1}, {0, 1}};
+    if (basis_case == 2)
+        return {{0, 0, 0, 1, 1, 1, 2, 2}, {0, 0, 0, 1, 1, 1, 2, 2}};
+    if (basis_case == 3)
+        return {{0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2,
+                 3, 3, 3, 3, 3, 4, 4, 4},
+                {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3,
+                 4, 4, 4}};
+    throw std::runtime_error("unknown BN basis test case");
+}
+
+std::vector<int> basis_counts_from_shells(const std::vector<std::vector<int>> &shells)
+{
+    std::vector<int> counts;
+    for (const auto &atom_shells : shells)
+    {
+        int count = 0;
+        for (const int l : atom_shells) count += 2 * l + 1;
+        counts.push_back(count);
+    }
+    return counts;
+}
+
 PeriodicBoundaryData make_wq_full_pbc()
 {
     PeriodicBoundaryData pbc;
-    pbc.set_latvec({1.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0,
-                    0.0, 0.0, 1.0});
+    pbc.set_latvec({1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0});
     const std::vector<double> kvecs{
-        0.0, 0.0, 0.0,
-        librpa_int::TWO_PI / 3.0, 0.0, 0.0,
-        librpa_int::TWO_PI * 2.0 / 3.0, 0.0, 0.0};
+        0.0, 0.0, 0.0, librpa_int::TWO_PI / 3.0, 0.0, 0.0, librpa_int::TWO_PI * 2.0 / 3.0,
+        0.0, 0.0};
     pbc.set_kgrids_kvec(3, 1, 1, kvecs);
     return pbc;
 }
@@ -1900,51 +2476,188 @@ PeriodicBoundaryData make_wq_full_pbc()
 PeriodicBoundaryData make_wq_reduced_pbc()
 {
     PeriodicBoundaryData pbc;
-    pbc.set_latvec({1.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0,
-                    0.0, 0.0, 1.0});
-    const std::vector<double> kvecs_ibz{
-        0.0, 0.0, 0.0,
-        librpa_int::TWO_PI / 3.0, 0.0, 0.0};
+    pbc.set_latvec({1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0});
+    const std::vector<double> kvecs_ibz{0.0, 0.0, 0.0, librpa_int::TWO_PI / 3.0, 0.0, 0.0};
     const std::vector<std::vector<Vector3_Order<double>>> full_kstars{
-        {{0.0, 0.0, 0.0}},
-        {{1.0 / 3.0, 0.0, 0.0}, {-1.0 / 3.0, 0.0, 0.0}}};
+        {{0.0, 0.0, 0.0}}, {{1.0 / 3.0, 0.0, 0.0}, {-1.0 / 3.0, 0.0, 0.0}}};
     pbc.set_irreducible_kgrids_kvec(3, 1, 1, kvecs_ibz, full_kstars);
     return pbc;
+}
+
+void test_spacetime_fourier_phases_form_k_minus_q_convolution()
+{
+    constexpr int mesh = 3;
+    const std::array<std::complex<double>, mesh> wc_q{
+        std::complex<double>{1.2, -0.3},
+        std::complex<double>{-0.4, 0.7},
+        std::complex<double>{0.9, 0.2}};
+    // These values already contain the 1/Nk weight carried by MeanField's Green function.
+    const std::array<std::complex<double>, mesh> weighted_green_k{
+        std::complex<double>{0.13, 0.04},
+        std::complex<double>{-0.08, 0.02},
+        std::complex<double>{0.05, -0.06}};
+
+    std::array<std::complex<double>, mesh> wc_R{};
+    std::array<std::complex<double>, mesh> green_R{};
+    for (int iR = 0; iR != mesh; ++iR)
+    {
+        for (int iq = 0; iq != mesh; ++iq)
+        {
+            const double angle = -librpa_int::TWO_PI * static_cast<double>(iq * iR) / mesh;
+            const std::complex<double> phase{std::cos(angle), std::sin(angle)};
+            wc_R[iR] += wc_q[iq] * phase / static_cast<double>(mesh);
+            green_R[iR] += weighted_green_k[iq] * phase;
+        }
+    }
+
+    for (int ik = 0; ik != mesh; ++ik)
+    {
+        std::complex<double> spacetime_sigma_k{};
+        std::complex<double> direct_k_minus_q{};
+        std::complex<double> direct_k_plus_q{};
+        for (int iR = 0; iR != mesh; ++iR)
+        {
+            const double angle = librpa_int::TWO_PI * static_cast<double>(ik * iR) / mesh;
+            const std::complex<double> phase{std::cos(angle), std::sin(angle)};
+            spacetime_sigma_k += wc_R[iR] * green_R[iR] * phase;
+        }
+        for (int iq = 0; iq != mesh; ++iq)
+        {
+            direct_k_minus_q += wc_q[iq] * weighted_green_k[(ik - iq + mesh) % mesh];
+            direct_k_plus_q += wc_q[iq] * weighted_green_k[(ik + iq) % mesh];
+        }
+        assert_complex_close(spacetime_sigma_k, direct_k_minus_q, 1.0e-13);
+        if (std::abs(spacetime_sigma_k - direct_k_plus_q) < 1.0e-5)
+            throw std::runtime_error("synthetic data do not distinguish k-q from k+q");
+    }
 }
 
 SymmetryContext make_two_atom_inversion_context(const PeriodicBoundaryData &pbc)
 {
     SymmetryContext ctx;
-    const Matrix3 lattice(1.0, 0.0, 0.0,
-                          0.0, 1.0, 0.0,
-                          0.0, 0.0, 1.0);
-    ctx.set_crystal_structure(
-        lattice, lattice,
-        {{0, 0}, {1, 0}},
-        {{0, {0.25, 0.0, 0.0}}, {1, {0.75, 0.0, 0.0}}});
+    const Matrix3 lattice(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+    ctx.set_crystal_structure(lattice, lattice, {{0, 0}, {1, 0}},
+                              {{0, {0.25, 0.0, 0.0}}, {1, {0.75, 0.0, 0.0}}});
 
     SymmetryOperation identity;
     identity.rotation.Identity();
     identity.translation = {0.0, 0.0, 0.0};
 
     SymmetryOperation inversion;
-    inversion.rotation = Matrix3(-1.0, 0.0, 0.0,
-                                  0.0, 1.0, 0.0,
-                                  0.0, 0.0, 1.0);
+    inversion.rotation = Matrix3(-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
     inversion.translation = {0.0, 0.0, 0.0};
 
     ctx.set_rspace_operations({identity, inversion});
     ctx.set_available();
     ctx.build_periodic_mappings(pbc, pbc.Rlist);
-    ctx.build_rsh_rotations({-1,
-                             0,
-                             LIBRPA_ANGULAR_ORDER_NATURAL,
-                             LIBRPA_RSH_COEFF_1_M,
-                             LIBRPA_RSH_COEFF_1_M},
-                            0);
+    ctx.build_rsh_rotations(
+        {-1, 0, LIBRPA_ANGULAR_ORDER_NATURAL, LIBRPA_RSH_COEFF_1_M, LIBRPA_RSH_COEFF_1_M}, 0);
     ctx.build_kstar_member_rotations(0);
     return ctx;
+}
+
+std::vector<SymmetryOperation> make_bn_hexagonal_operations()
+{
+    const std::array<std::array<int, 9>, 12> rotations{{
+        {{1, 0, 0, 0, 1, 0, 0, 0, 1}},
+        {{0, 1, 0, -1, -1, 0, 0, 0, -1}},
+        {{-1, -1, 0, 1, 0, 0, 0, 0, 1}},
+        {{1, 0, 0, 0, 1, 0, 0, 0, -1}},
+        {{0, 1, 0, -1, -1, 0, 0, 0, 1}},
+        {{-1, -1, 0, 1, 0, 0, 0, 0, -1}},
+        {{-1, 0, 0, 1, 1, 0, 0, 0, 1}},
+        {{1, 1, 0, 0, -1, 0, 0, 0, -1}},
+        {{0, -1, 0, -1, 0, 0, 0, 0, 1}},
+        {{-1, 0, 0, 1, 1, 0, 0, 0, -1}},
+        {{1, 1, 0, 0, -1, 0, 0, 0, 1}},
+        {{0, -1, 0, -1, 0, 0, 0, 0, -1}},
+    }};
+    std::vector<SymmetryOperation> operations;
+    operations.reserve(rotations.size());
+    for (const auto &rotation : rotations)
+    {
+        SymmetryOperation operation;
+        operation.rotation =
+            Matrix3(rotation[0], rotation[1], rotation[2], rotation[3], rotation[4], rotation[5],
+                    rotation[6], rotation[7], rotation[8]);
+        operation.translation = {0.0, 0.0, 0.0};
+        operation.use_row_convention = true;
+        operations.push_back(operation);
+    }
+    return operations;
+}
+
+void set_bn_hexagonal_lattice(PeriodicBoundaryData &pbc)
+{
+    const double sqrt_three = std::sqrt(3.0);
+    pbc.set_latvec({0.5, -0.5 * sqrt_three, 0.0, 0.5, 0.5 * sqrt_three, 0.0, 0.0, 0.0, 8.0});
+}
+
+SymmetryContext make_bn_hexagonal_context(const PeriodicBoundaryData &pbc, const int max_l = 0)
+{
+    SymmetryContext ctx;
+    ctx.set_crystal_structure(pbc.latvec, pbc.G, {{0, 0}, {1, 1}},
+                              {{0, {1.0 / 3.0, 2.0 / 3.0, 0.5}}, {1, {2.0 / 3.0, 1.0 / 3.0, 0.5}}});
+    ctx.set_rspace_operations(make_bn_hexagonal_operations());
+    ctx.set_available();
+    ctx.build_periodic_mappings(pbc, pbc.Rlist);
+    ctx.build_rsh_rotations(
+        {-1, 0, LIBRPA_ANGULAR_ORDER_NATURAL, LIBRPA_RSH_COEFF_1_M, LIBRPA_RSH_COEFF_1_M},
+        max_l);
+    ctx.build_kstar_member_rotations(max_l);
+    return ctx;
+}
+
+PeriodicBoundaryData make_bn_hexagonal_full_pbc(const int mesh = 3)
+{
+    PeriodicBoundaryData pbc;
+    set_bn_hexagonal_lattice(pbc);
+    std::vector<double> kvecs;
+    for (const auto &kfrac : librpa_int::build_uniform_kmesh_frac({mesh, mesh, 1}))
+    {
+        const auto kvec = kfrac * pbc.G;
+        kvecs.push_back(librpa_int::TWO_PI * kvec.x);
+        kvecs.push_back(librpa_int::TWO_PI * kvec.y);
+        kvecs.push_back(librpa_int::TWO_PI * kvec.z);
+    }
+    pbc.set_kgrids_kvec(mesh, mesh, 1, kvecs);
+    return pbc;
+}
+
+PeriodicBoundaryData make_bn_hexagonal_reduced_pbc(const SymmetryContext &ctx, const int mesh = 3)
+{
+    PeriodicBoundaryData pbc;
+    set_bn_hexagonal_lattice(pbc);
+    std::vector<double> kvecs_ibz;
+    std::vector<std::vector<Vector3_Order<double>>> full_kstars;
+    for (const auto &star : ctx.kstars)
+    {
+        const auto kvec = librpa_int::restrict_fractional_coordinate(star.k_ibz) * pbc.G;
+        kvecs_ibz.push_back(librpa_int::TWO_PI * kvec.x);
+        kvecs_ibz.push_back(librpa_int::TWO_PI * kvec.y);
+        kvecs_ibz.push_back(librpa_int::TWO_PI * kvec.z);
+        full_kstars.emplace_back();
+        for (const auto &member : star.members)
+        {
+            full_kstars.back().push_back(librpa_int::restrict_fractional_coordinate(member.k_bz) *
+                                         pbc.G);
+        }
+    }
+    pbc.set_irreducible_kgrids_kvec(mesh, mesh, 1, kvecs_ibz, full_kstars);
+    return pbc;
+}
+
+std::size_t find_fractional_kpoint_index(const std::vector<Vector3_Order<double>> &kpoints,
+                                         const Vector3_Order<double> &target)
+{
+    for (std::size_t ik = 0; ik != kpoints.size(); ++ik)
+    {
+        if (librpa_int::same_fractional_kpoint(kpoints[ik], target, 1e-8))
+        {
+            return ik;
+        }
+    }
+    throw std::runtime_error("failed to find a full-grid fractional k-point in the test");
 }
 
 void assert_wq_rspace_maps_close(
@@ -1963,12 +2676,22 @@ void assert_wq_rspace_maps_close(
             {
                 assert(actual.at(atom_i).at(atom_j).count(R) != 0);
                 const auto &actual_block = actual.at(atom_i).at(atom_j).at(R);
-                if (std::abs(actual_block(0, 0) - expected_block(0, 0)) >= 1e-12)
+                if (actual_block.nr() != expected_block.nr() ||
+                    actual_block.nc() != expected_block.nc())
+                    throw std::runtime_error("Wc(R) atom block dimensions differ");
+                for (int i = 0; i != expected_block.nr(); ++i)
                 {
-                    std::cerr << "atom_pair=(" << atom_i << "," << atom_j << ") R=("
-                              << R.x << "," << R.y << "," << R.z << ")" << std::endl;
+                    for (int j = 0; j != expected_block.nc(); ++j)
+                    {
+                        if (std::abs(actual_block(i, j) - expected_block(i, j)) >= 1e-12)
+                        {
+                            std::cerr << "atom_pair=(" << atom_i << "," << atom_j << ") R=("
+                                      << R.x << "," << R.y << "," << R.z << ") block=(" << i
+                                      << "," << j << ")" << std::endl;
+                        }
+                        assert_complex_close(actual_block(i, j), expected_block(i, j), 1e-12);
+                    }
                 }
-                assert_complex_close(actual_block(0, 0), expected_block(0, 0), 1e-12);
             }
         }
     }
@@ -1989,12 +2712,10 @@ void test_wq_to_wr_symmetry_reduced_q_matches_full_bz()
         wq_sym;
     const auto q_gamma_sym = pbc_sym.klist.at(0);
     const auto q_rep_sym = pbc_sym.klist.at(1);
-    const auto gamma_blocks = scalar_wq_to_blocks({
-        {0, {{0, {1.5, 0.0}}, {1, {0.4, 0.0}}}},
-        {1, {{0, {0.4, 0.0}}, {1, {1.5, 0.0}}}}});
-    const auto rep_blocks = scalar_wq_to_blocks({
-        {0, {{0, {2.1, 0.0}}, {1, {-0.7, 0.5}}}},
-        {1, {{0, {-0.7, -0.5}}, {1, {1.4, 0.0}}}}});
+    const auto gamma_blocks = scalar_wq_to_blocks(
+        {{0, {{0, {1.5, 0.0}}, {1, {0.4, 0.0}}}}, {1, {{0, {0.4, 0.0}}, {1, {1.5, 0.0}}}}});
+    const auto rep_blocks = scalar_wq_to_blocks(
+        {{0, {{0, {2.1, 0.0}}, {1, {-0.7, 0.5}}}}, {1, {{0, {-0.7, -0.5}}, {1, {1.4, 0.0}}}}});
     add_scalar_wq_blocks(wq_sym, q_gamma_sym, gamma_blocks);
     add_scalar_wq_blocks(wq_sym, q_rep_sym, rep_blocks);
     const double symmetry_collective_scale =
@@ -2014,19 +2735,18 @@ void test_wq_to_wr_symmetry_reduced_q_matches_full_bz()
         wq_full;
     add_scalar_wq_blocks(wq_full, pbc_full.klist.at(0), gamma_blocks);
     add_scalar_wq_blocks(wq_full, pbc_full.klist.at(1), rep_blocks);
-    const auto inversion_minus_blocks = scalar_wq_to_blocks({
-        {0, {{0, {1.4, 0.0}}, {1, {-0.7, -0.5}}}},
-        {1, {{0, {-0.7, 0.5}}, {1, {2.1, 0.0}}}}});
+    const auto inversion_minus_blocks = scalar_wq_to_blocks(
+        {{0, {{0, {1.4, 0.0}}, {1, {-0.7, -0.5}}}}, {1, {{0, {-0.7, 0.5}}, {1, {2.1, 0.0}}}}});
     add_scalar_wq_blocks(wq_full, pbc_full.klist.at(2), inversion_minus_blocks);
 
     const TFGrids dummy_tfg;
     SymmetryContext no_symmetry;
-    const auto expected = librpa_int::FT_Wc_q2R(
-        librpa_int::global::mpi_comm_global_h, basis_abf, no_symmetry, wq_full,
-        dummy_tfg, pbc_full, pbc_full.Rlist, false, "", false);
-    const auto actual = librpa_int::FT_Wc_q2R(
-        librpa_int::global::mpi_comm_global_h, basis_abf, ctx, wq_sym,
-        dummy_tfg, pbc_sym, pbc_sym.Rlist, false, "", true);
+    const auto expected =
+        librpa_int::FT_Wc_q2R(librpa_int::global::mpi_comm_global_h, basis_abf, no_symmetry,
+                              wq_full, dummy_tfg, pbc_full, pbc_full.Rlist, false, "", false);
+    const auto actual =
+        librpa_int::FT_Wc_q2R(librpa_int::global::mpi_comm_global_h, basis_abf, ctx, wq_sym,
+                              dummy_tfg, pbc_sym, pbc_sym.Rlist, false, "", true);
 
     assert_wq_rspace_maps_close(actual, expected);
 }
@@ -2039,40 +2759,34 @@ void test_wq_to_wr_qmember_diagnostic_keeps_original_full_bz_weight()
     AtomicBasis basis_abf(std::vector<std::size_t>{1, 1});
     basis_abf.set_l_shells({{0}, {0}});
 
-    const auto gamma_blocks = scalar_wq_to_blocks({
-        {0, {{0, {1.5, 0.0}}, {1, {0.4, 0.0}}}},
-        {1, {{0, {0.4, 0.0}}, {1, {1.5, 0.0}}}}});
-    const auto rep_blocks = scalar_wq_to_blocks({
-        {0, {{0, {2.1, 0.0}}, {1, {-0.7, 0.5}}}},
-        {1, {{0, {-0.7, -0.5}}, {1, {1.4, 0.0}}}}});
+    const auto gamma_blocks = scalar_wq_to_blocks(
+        {{0, {{0, {1.5, 0.0}}, {1, {0.4, 0.0}}}}, {1, {{0, {0.4, 0.0}}, {1, {1.5, 0.0}}}}});
+    const auto rep_blocks = scalar_wq_to_blocks(
+        {{0, {{0, {2.1, 0.0}}, {1, {-0.7, 0.5}}}}, {1, {{0, {-0.7, -0.5}}, {1, {1.4, 0.0}}}}});
 
     atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old
         wq_sym;
     add_scalar_wq_blocks(wq_sym, pbc_sym.klist.at(0), gamma_blocks);
     add_scalar_wq_blocks(wq_sym, pbc_sym.klist.at(1), rep_blocks);
-    const double symmetry_collective_scale =
+    const double collective_scale =
         1.0 / static_cast<double>(librpa_int::global::mpi_comm_global_h.nprocs);
     for (auto &[atom_i, row] : wq_sym)
-    {
         for (auto &[atom_j, q_blocks] : row)
-        {
-            for (auto &[q, block] : q_blocks) block *= symmetry_collective_scale;
-        }
-    }
+            for (auto &[q, block] : q_blocks) block *= collective_scale;
 
     atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old
         wq_selected_full;
     add_scalar_wq_blocks(wq_selected_full, pbc_full.klist.at(1), rep_blocks);
     const TFGrids dummy_tfg;
     SymmetryContext no_symmetry;
-    const auto expected = librpa_int::FT_Wc_q2R(
-        librpa_int::global::mpi_comm_global_h, basis_abf, no_symmetry, wq_selected_full,
-        dummy_tfg, pbc_full, pbc_full.Rlist, false, "", false);
+    const auto expected = librpa_int::FT_Wc_q2R(librpa_int::global::mpi_comm_global_h, basis_abf,
+                                                no_symmetry, wq_selected_full, dummy_tfg, pbc_full,
+                                                pbc_full.Rlist, false, "", false);
 
     setenv("LIBRPA_STRICT2D_QMEMBER_DIAG", "0.3333333333333333,0,0", 1);
-    const auto actual = librpa_int::FT_Wc_q2R(
-        librpa_int::global::mpi_comm_global_h, basis_abf, ctx, wq_sym,
-        dummy_tfg, pbc_sym, pbc_sym.Rlist, false, "", true);
+    const auto actual =
+        librpa_int::FT_Wc_q2R(librpa_int::global::mpi_comm_global_h, basis_abf, ctx, wq_sym,
+                              dummy_tfg, pbc_sym, pbc_sym.Rlist, false, "", true);
     unsetenv("LIBRPA_STRICT2D_QMEMBER_DIAG");
     assert_wq_rspace_maps_close(actual, expected);
 }
@@ -2092,15 +2806,12 @@ void test_wq_to_wr_symmetry_collective_handles_empty_local_rank()
         wq_full;
     if (librpa_int::global::mpi_comm_global_h.is_root())
     {
-        const auto gamma_blocks = scalar_wq_to_blocks({
-            {0, {{0, {1.5, 0.0}}, {1, {0.4, 0.0}}}},
-            {1, {{0, {0.4, 0.0}}, {1, {1.5, 0.0}}}}});
-        const auto rep_blocks = scalar_wq_to_blocks({
-            {0, {{0, {2.1, 0.0}}, {1, {-0.7, 0.5}}}},
-            {1, {{0, {-0.7, -0.5}}, {1, {1.4, 0.0}}}}});
-        const auto inversion_minus_blocks = scalar_wq_to_blocks({
-            {0, {{0, {1.4, 0.0}}, {1, {-0.7, -0.5}}}},
-            {1, {{0, {-0.7, 0.5}}, {1, {2.1, 0.0}}}}});
+        const auto gamma_blocks = scalar_wq_to_blocks(
+            {{0, {{0, {1.5, 0.0}}, {1, {0.4, 0.0}}}}, {1, {{0, {0.4, 0.0}}, {1, {1.5, 0.0}}}}});
+        const auto rep_blocks = scalar_wq_to_blocks(
+            {{0, {{0, {2.1, 0.0}}, {1, {-0.7, 0.5}}}}, {1, {{0, {-0.7, -0.5}}, {1, {1.4, 0.0}}}}});
+        const auto inversion_minus_blocks = scalar_wq_to_blocks(
+            {{0, {{0, {1.4, 0.0}}, {1, {-0.7, -0.5}}}}, {1, {{0, {-0.7, 0.5}}, {1, {2.1, 0.0}}}}});
 
         add_scalar_wq_blocks(wq_sym, pbc_sym.klist.at(0), gamma_blocks);
         add_scalar_wq_blocks(wq_sym, pbc_sym.klist.at(1), rep_blocks);
@@ -2111,18 +2822,224 @@ void test_wq_to_wr_symmetry_collective_handles_empty_local_rank()
 
     const TFGrids dummy_tfg;
     SymmetryContext no_symmetry;
-    const auto expected = librpa_int::FT_Wc_q2R(
-        librpa_int::global::mpi_comm_global_h, basis_abf, no_symmetry, wq_full,
-        dummy_tfg, pbc_full, pbc_full.Rlist, false, "", false);
-    const auto actual = librpa_int::FT_Wc_q2R(
-        librpa_int::global::mpi_comm_global_h, basis_abf, ctx, wq_sym,
-        dummy_tfg, pbc_sym, pbc_sym.Rlist, false, "", true);
+    const auto expected =
+        librpa_int::FT_Wc_q2R(librpa_int::global::mpi_comm_global_h, basis_abf, no_symmetry,
+                              wq_full, dummy_tfg, pbc_full, pbc_full.Rlist, false, "", false);
+    const auto actual =
+        librpa_int::FT_Wc_q2R(librpa_int::global::mpi_comm_global_h, basis_abf, ctx, wq_sym,
+                              dummy_tfg, pbc_sym, pbc_sym.Rlist, false, "", true);
 
     assert_wq_rspace_maps_close(actual, expected);
     if (!librpa_int::global::mpi_comm_global_h.is_root())
     {
         assert(expected.empty());
         assert(actual.empty());
+    }
+}
+
+void test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(const int mesh,
+                                                               const int basis_case)
+{
+    const auto pbc_full = make_bn_hexagonal_full_pbc(mesh);
+    const auto ctx_full = make_bn_hexagonal_context(pbc_full);
+    const auto pbc_sym = make_bn_hexagonal_reduced_pbc(ctx_full, mesh);
+    const auto shells = make_bn_test_shells(basis_case);
+    const auto counts = basis_counts_from_shells(shells);
+    const int max_l = *std::max_element(shells.front().begin(), shells.front().end());
+    auto ctx = make_bn_hexagonal_context(pbc_sym, max_l);
+
+    assert(ctx.count_kstar_members() == static_cast<std::size_t>(mesh * mesh));
+
+    AtomicBasis basis_abf(
+        std::vector<std::size_t>{static_cast<std::size_t>(counts.at(0)),
+                                 static_cast<std::size_t>(counts.at(1))});
+    basis_abf.set_l_shells(shells);
+    const auto layouts = basis_abf.build_species_basis_layouts(ctx.atom_to_type);
+    const std::map<atom_t, size_t> atom_nabf{
+        {0, static_cast<std::size_t>(counts.at(0))},
+        {1, static_cast<std::size_t>(counts.at(1))}};
+    const std::set<std::pair<atom_t, atom_t>> target_pairs{{0, 0}, {0, 1}, {1, 0}, {1, 1}};
+
+    atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old
+        wq_sym;
+    atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old
+        wq_full;
+    const auto full_targets =
+        librpa_int::build_symmetry_full_grid_kstar_member_kfrac_targets(ctx, pbc_sym.kfrac_list);
+    const bool use_full_targets = full_targets.size() == ctx.kstars.size();
+
+    for (std::size_t istar = 0; istar != ctx.kstars.size(); ++istar)
+    {
+        const auto &star = ctx.kstars[istar];
+        const auto mapping_iter =
+            std::find_if(ctx.kstar_grid_mapping.begin(), ctx.kstar_grid_mapping.end(),
+                         [istar](const librpa_int::SymmetryKStarGridMappingEntry &entry)
+                         { return entry.star_list_index == static_cast<int>(istar); });
+        assert(mapping_iter != ctx.kstar_grid_mapping.end());
+        const double index = static_cast<double>(istar + 1);
+        const auto blocks_ibz = make_bn_hermitian_wq_blocks(counts, index);
+        add_wq_blocks(wq_sym, pbc_sym.klist.at(istar), blocks_ibz);
+
+        const auto closure = librpa_int::build_symmetry_upper_atom_pair_closure(star, target_pairs);
+        const auto symmetrized = librpa_int::symmetrize_symmetry_ibz_kspace_operator_blocks(
+            ctx, layouts, star.k_ibz, blocks_ibz, atom_nabf, &closure);
+        for (std::size_t imember = 0; imember != star.members.size(); ++imember)
+        {
+            const auto target = librpa_int::restrict_fractional_coordinate(
+                use_full_targets
+                    ? full_targets.at(istar).at(imember)
+                    : Vector3_Order<double>{pbc_sym.latvec *
+                                            mapping_iter->member_q_bz_keys.at(imember)});
+            const auto rotated = librpa_int::rotate_symmetry_kspace_operator_blocks(
+                ctx, layouts, star.members[imember], symmetrized, atom_nabf, star.k_ibz,
+                star.members[imember].time_reversal, &target_pairs, &target);
+            const auto ifull = find_fractional_kpoint_index(pbc_full.kfrac_list, target);
+            add_wq_blocks(wq_full, pbc_full.klist.at(ifull), rotated);
+        }
+    }
+
+    const double collective_scale =
+        1.0 / static_cast<double>(librpa_int::global::mpi_comm_global_h.nprocs);
+    for (auto &[atom_i, row] : wq_sym)
+        for (auto &[atom_j, q_blocks] : row)
+            for (auto &[q, block] : q_blocks) block *= collective_scale;
+
+    const TFGrids dummy_tfg;
+    SymmetryContext no_symmetry;
+    const auto expected =
+        librpa_int::FT_Wc_q2R(librpa_int::global::mpi_comm_global_h, basis_abf, no_symmetry,
+                              wq_full, dummy_tfg, pbc_full, pbc_full.Rlist, false, "", false);
+    const auto actual =
+        librpa_int::FT_Wc_q2R(librpa_int::global::mpi_comm_global_h, basis_abf, ctx, wq_sym,
+                              dummy_tfg, pbc_sym, pbc_sym.Rlist, false, "", true);
+    assert_wq_rspace_maps_close(actual, expected);
+}
+
+void test_bn_qstar_wq_to_wr_matches_explicit_full_bz_on_odd_and_even_meshes()
+{
+    for (const int basis_case : {0, 1, 3})
+    {
+        test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(3, basis_case);
+        test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(4, basis_case);
+    }
+}
+
+ComplexMatrix restore_bn_test_wfc_to_member(const SymmetryContext &ctx,
+                                            const std::vector<SpeciesBasisLayout> &layouts,
+                                            const std::map<atom_t, size_t> &atom_nw,
+                                            const librpa_int::SymmetryKStar &star,
+                                            const SymmetryKStarMember &member,
+                                            const ComplexMatrix &wfc_ibz)
+{
+    const auto rotation = librpa_int::build_symmetry_kspace_rotation_matrix(
+        ctx, layouts, member, atom_nw, star.k_ibz, member.time_reversal, &member.k_bz);
+    return member.time_reversal ? librpa_int::conj(wfc_ibz) * librpa_int::conj(rotation)
+                                : wfc_ibz * rotation;
+}
+
+void test_bn_kstar_green_function_matches_explicit_full_bz_for_mesh(const int mesh,
+                                                                     const int basis_case)
+{
+    const auto pbc_full = make_bn_hexagonal_full_pbc(mesh);
+    const auto ctx_full = make_bn_hexagonal_context(pbc_full);
+    const auto pbc_sym = make_bn_hexagonal_reduced_pbc(ctx_full, mesh);
+    const auto shells = make_bn_test_shells(basis_case);
+    const auto counts = basis_counts_from_shells(shells);
+    const int max_l = *std::max_element(shells.front().begin(), shells.front().end());
+    auto ctx = make_bn_hexagonal_context(pbc_sym, max_l);
+
+    const int n_aos = std::accumulate(counts.begin(), counts.end(), 0);
+    AtomicBasis basis_wfc(
+        std::vector<std::size_t>{static_cast<std::size_t>(counts.at(0)),
+                                 static_cast<std::size_t>(counts.at(1))});
+    basis_wfc.set_l_shells(shells);
+    const auto layouts = basis_wfc.build_species_basis_layouts(ctx.atom_to_type);
+    const std::map<atom_t, size_t> atom_nw{
+        {0, static_cast<std::size_t>(counts.at(0))},
+        {1, static_cast<std::size_t>(counts.at(1))}};
+    const int n_full_kpoints = mesh * mesh;
+
+    MeanField mf_ibz(1, static_cast<int>(ctx.kstars.size()), n_aos, n_aos);
+    MeanField mf_full(1, n_full_kpoints, n_aos, n_aos);
+    mf_ibz.get_efermi() = 0.0;
+    mf_full.get_efermi() = 0.0;
+    std::vector<int> full_owner(static_cast<std::size_t>(n_full_kpoints), -1);
+
+    for (std::size_t istar = 0; istar != ctx.kstars.size(); ++istar)
+    {
+        const auto &star = ctx.kstars[istar];
+        const double star_weight =
+            static_cast<double>(star.members.size()) / static_cast<double>(n_full_kpoints);
+        for (int iband = 0; iband != n_aos; ++iband)
+        {
+            const bool occupied = iband < n_aos / 2;
+            mf_ibz.get_eigenvals()[0](static_cast<int>(istar), iband) =
+                (occupied ? -0.8 - 0.13 * iband : 0.6 + 0.17 * (iband - n_aos / 2)) +
+                0.03 * static_cast<double>(istar);
+            mf_ibz.get_weight()[0](static_cast<int>(istar), iband) =
+                occupied ? 2.0 * star_weight : 0.0;
+        }
+        auto &wfc_ibz = mf_ibz.get_eigenvectors()[0][0][istar];
+        wfc_ibz.create(n_aos, n_aos);
+        for (int iband = 0; iband != n_aos; ++iband)
+            for (int iao = 0; iao != n_aos; ++iao)
+                wfc_ibz(iband, iao) =
+                    std::complex<double>{
+                        0.11 * (iband + 1) + 0.07 * (iao + 1),
+                        0.013 * static_cast<double>((iband + 1) * (iao + 2)) +
+                            0.009 * static_cast<double>(istar + 1)} /
+                    static_cast<double>(n_aos);
+
+        for (const auto &member : star.members)
+        {
+            const auto ifull = find_fractional_kpoint_index(
+                pbc_full.kfrac_list, librpa_int::restrict_fractional_coordinate(member.k_bz));
+            assert(full_owner[ifull] < 0);
+            full_owner[ifull] = static_cast<int>(istar);
+            for (int iband = 0; iband != n_aos; ++iband)
+            {
+                mf_full.get_eigenvals()[0](static_cast<int>(ifull), iband) =
+                    mf_ibz.get_eigenvals()[0](static_cast<int>(istar), iband);
+                mf_full.get_weight()[0](static_cast<int>(ifull), iband) =
+                    iband < n_aos / 2 ? 2.0 / static_cast<double>(n_full_kpoints) : 0.0;
+            }
+            mf_full.get_eigenvectors()[0][0][ifull] =
+                restore_bn_test_wfc_to_member(ctx, layouts, atom_nw, star, member, wfc_ibz);
+        }
+    }
+    assert(std::find(full_owner.begin(), full_owner.end(), -1) == full_owner.end());
+
+    const std::vector<double> taus{-0.35, 0.27};
+    const auto &Rs = pbc_full.Rlist;
+    const auto expected = mf_full.get_gf_cplx_imagtimes_Rs(0, 0, 0, pbc_full.kfrac_list, taus, Rs);
+    const auto actual = librpa_int::get_symmetry_restored_gf_cplx_imagtimes_Rs(
+        ctx, layouts, mf_ibz, 0, 0, 0, pbc_sym.kfrac_list, taus, Rs, atom_nw);
+
+    for (const auto tau : taus)
+    {
+        for (const auto &R : Rs)
+        {
+            const auto diff = actual.at(tau).at(R) - expected.at(tau).at(R);
+            double max_abs = 0.0;
+            for (int i = 0; i != diff.nr; ++i)
+                for (int j = 0; j != diff.nc; ++j)
+                    max_abs = std::max(max_abs, std::abs(diff(i, j)));
+            if (max_abs >= 1e-12)
+            {
+                std::cerr << "BN k-star GF mismatch: mesh=" << mesh << " tau=" << tau << " R=" << R
+                          << " basis_case=" << basis_case << " max_abs=" << max_abs << std::endl;
+                throw std::runtime_error("BN k-star Green function differs from explicit full BZ");
+            }
+        }
+    }
+}
+
+void test_bn_kstar_green_function_matches_explicit_full_bz_on_odd_and_even_meshes()
+{
+    for (const int basis_case : {0, 1, 2})
+    {
+        test_bn_kstar_green_function_matches_explicit_full_bz_for_mesh(3, basis_case);
+        test_bn_kstar_green_function_matches_explicit_full_bz_for_mesh(4, basis_case);
     }
 }
 
@@ -2136,8 +3053,8 @@ Matz dense_wq_from_scalar_blocks(const librpa_int::symmetry_atom_block_matrix_ma
         for (int j_local = 0; j_local < desc.n_loc(); ++j_local)
         {
             const int atom_j = desc.indx_l2g_c(j_local);
-            mat(i_local, j_local) = blocks.at(static_cast<atom_t>(atom_i))
-                                        .at(static_cast<atom_t>(atom_j))(0, 0);
+            mat(i_local, j_local) =
+                blocks.at(static_cast<atom_t>(atom_i)).at(static_cast<atom_t>(atom_j))(0, 0);
         }
     }
     return mat;
@@ -2170,9 +3087,10 @@ void assert_dense_wq_rspace_maps_close(
                 {
                     for (int j = 0; j < diff.nc(); ++j)
                     {
-                        std::cerr << "  (" << i << "," << j << ") actual="
-                                  << actual.at(freq).at(R)(i, j) << " expected="
-                                  << expected_mat(i, j) << " diff=" << diff(i, j) << std::endl;
+                        std::cerr << "  (" << i << "," << j
+                                  << ") actual=" << actual.at(freq).at(R)(i, j)
+                                  << " expected=" << expected_mat(i, j) << " diff=" << diff(i, j)
+                                  << std::endl;
                     }
                 }
             }
@@ -2196,12 +3114,10 @@ void test_dense_wq_to_wr_symmetry_reduced_q_matches_full_bz(const BlacsCtxtHandl
     ArrayDesc ad_Wc(blacs_h);
     ad_Wc.init(2, 2, 2, 2, 0, 0);
 
-    const auto gamma_blocks = scalar_wq_to_blocks({
-        {0, {{0, {1.5, 0.0}}, {1, {0.4, 0.0}}}},
-        {1, {{0, {0.4, 0.0}}, {1, {1.5, 0.0}}}}});
-    const auto rep_blocks = scalar_wq_to_blocks({
-        {0, {{0, {2.1, 0.0}}, {1, {-0.7, 0.5}}}},
-        {1, {{0, {-0.7, -0.5}}, {1, {1.4, 0.0}}}}});
+    const auto gamma_blocks = scalar_wq_to_blocks(
+        {{0, {{0, {1.5, 0.0}}, {1, {0.4, 0.0}}}}, {1, {{0, {0.4, 0.0}}, {1, {1.5, 0.0}}}}});
+    const auto rep_blocks = scalar_wq_to_blocks(
+        {{0, {{0, {2.1, 0.0}}, {1, {-0.7, 0.5}}}}, {1, {{0, {-0.7, -0.5}}, {1, {1.4, 0.0}}}}});
 
     constexpr double freq = 0.25;
     std::map<double, std::map<Vector3_Order<double>, Matz>> wq_sym;
@@ -2211,17 +3127,16 @@ void test_dense_wq_to_wr_symmetry_reduced_q_matches_full_bz(const BlacsCtxtHandl
     std::map<double, std::map<Vector3_Order<double>, Matz>> wq_full;
     wq_full[freq][pbc_full.klist.at(0)] = dense_wq_from_scalar_blocks(gamma_blocks, ad_Wc);
     wq_full[freq][pbc_full.klist.at(1)] = dense_wq_from_scalar_blocks(rep_blocks, ad_Wc);
-    const auto inversion_minus_blocks = scalar_wq_to_blocks({
-        {0, {{0, {1.4, 0.0}}, {1, {-0.7, -0.5}}}},
-        {1, {{0, {-0.7, 0.5}}, {1, {2.1, 0.0}}}}});
+    const auto inversion_minus_blocks = scalar_wq_to_blocks(
+        {{0, {{0, {1.4, 0.0}}, {1, {-0.7, -0.5}}}}, {1, {{0, {-0.7, 0.5}}, {1, {2.1, 0.0}}}}});
     wq_full[freq][pbc_full.klist.at(2)] =
         dense_wq_from_scalar_blocks(inversion_minus_blocks, ad_Wc);
 
-    const auto expected = librpa_int::FT_Wc_freq_q(
-        librpa_int::global::mpi_comm_global_h, wq_full, pbc_full, false);
-    const auto actual = librpa_int::FT_Wc_freq_q(
-        librpa_int::global::mpi_comm_global_h, wq_sym, pbc_sym, false,
-        &qpoint_view, &ctx, &basis_abf, &ad_Wc);
+    const auto expected =
+        librpa_int::FT_Wc_freq_q(librpa_int::global::mpi_comm_global_h, wq_full, pbc_full, false);
+    const auto actual =
+        librpa_int::FT_Wc_freq_q(librpa_int::global::mpi_comm_global_h, wq_sym, pbc_sym, false,
+                                 &qpoint_view, &ctx, &basis_abf, &ad_Wc);
 
     assert_dense_wq_rspace_maps_close(actual, expected);
 }
@@ -2287,9 +3202,19 @@ int main(int argc, char *argv[])
         blacs_h.set_square_grid();
 
         test_replace_rpa_response_headwing_replaces_only_singular_channels(blacs_h);
+        test_complex_spacetime_diagnostic_requires_explicit_enable();
+        test_complex_spacetime_storage_does_not_change_non_soc_spin_weight();
+        test_direct_compressed_sigc_diagnostic_requires_explicit_shrink_path();
+        test_chi0_rspace_symmetry_diagnostic_requires_explicit_enable();
+        test_gamma_shrink_transform_diagnostic_requires_explicit_enable();
+        test_chi0_qspace_symmetry_diagnostic_requires_explicit_enable();
+        test_sigc_rspace_symmetry_diagnostic_requires_explicit_enable();
+        test_single_q_member_diagnostic_disables_sigc_rspace_symmetry_restore();
+        test_strict_2d_qmember_diagnostic_selects_one_periodic_member();
+        test_strict_2d_qmember_diagnostic_accepts_one_distributed_owner();
+        test_wc_rf_output_collective_includes_ranks_without_local_frequency_blocks();
         test_rspace_symmetry_requires_complete_band_space();
         test_kpoint_coordinate_mapping_selects_active_klist_from_full_source();
-        test_strict_2d_qmember_diagnostic_selects_one_periodic_member();
         test_kstar_velocity_mapping_preserves_member_order_and_periodic_gauge();
         test_replace_rpa_response_head_only_keeps_numeric_wings(blacs_h);
         test_head_only_trace_logdet_can_use_reduced_response(blacs_h);
@@ -2309,6 +3234,15 @@ int main(int argc, char *argv[])
         test_strict_2d_gw_routes_gamma_through_complete_wc_average();
         test_strict_2d_gw_fails_closed_for_incomplete_runtime_configuration();
         test_strict_2d_diagnostic_schema_and_qpoint_order_are_stable();
+        test_strict_2d_qshell_uses_minimum_image_q();
+        test_strict_2d_qradial_partitions_rest_exactly();
+        test_strict_2d_first_shell_wc_block_diagnostic_is_exactly_additive();
+        test_strict_2d_alpha_wc_diagnostic_requires_explicit_reference();
+        test_strict_2d_first_shell_analytic_wc_diagnostic_requires_explicit_enable();
+        test_strict_2d_finite_q_matrix_dump_selection_is_read_only_and_bounded();
+        test_strict_2d_omega0_diagnostic_directory_is_explicit_and_normalized();
+        test_strict_2d_omega0_override_basis_modes_are_mutually_exclusive();
+        test_strict_2d_omega0_override_reader_validates_shape_and_payload();
         test_strict_2d_block_metrics_separate_head_wings_and_body();
         test_strict_2d_alpha_reference_averages_bare_coulomb();
         test_strict_2d_pw_wc_transforms_to_auxiliary_coulomb_basis();
@@ -2330,6 +3264,9 @@ int main(int argc, char *argv[])
         test_headwing_velocity_restore_uses_inverse_spatial_route();
         test_headwing_direct_full_bz_velocity_selects_kstar_member();
         test_headwing_direct_full_bz_wfc_selects_same_kstar_member();
+        test_weighted_wfc_gram_comparison_is_phase_invariant_and_detects_band_swap();
+        test_gw_gf_kstar_wfc_diagnostic_requires_explicit_enable();
+        test_gw_gf_kstar_wfc_diagnostic_uses_meanfield_kpoint_count();
         test_kblacs_transform_with_restored_wfc_matches_full_bz_atom_permutation(blacs_h);
         test_kblacs_transform_matches_original_transform(blacs_h);
         test_transform_Cs2mnk_can_keep_spin_channels_separate(blacs_h);
@@ -2338,6 +3275,9 @@ int main(int argc, char *argv[])
         test_wq_to_wr_symmetry_reduced_q_matches_full_bz();
         test_wq_to_wr_qmember_diagnostic_keeps_original_full_bz_weight();
         test_wq_to_wr_symmetry_collective_handles_empty_local_rank();
+        test_spacetime_fourier_phases_form_k_minus_q_convolution();
+        test_bn_qstar_wq_to_wr_matches_explicit_full_bz_on_odd_and_even_meshes();
+        test_bn_kstar_green_function_matches_explicit_full_bz_on_odd_and_even_meshes();
         test_dense_wq_to_wr_symmetry_reduced_q_matches_full_bz(blacs_h);
         test_gamma_only_dense_wq_fourier_weight_scales_as_inverse_bvk_cells();
     }

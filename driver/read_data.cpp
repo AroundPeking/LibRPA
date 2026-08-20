@@ -1304,6 +1304,14 @@ void read_headwing_input(const string &dir_path, bool need_wing)
                 for (const int ik_target : pds->scfk_blacs_ctxt.kpoints_local())
                     iks_headwing_eigvec_this.emplace_back(target_to_source_ik.at(ik_target));
             }
+            if (output_gw_gf_kstar_wfc_diagnostic_requested(
+                    std::getenv("LIBRPA_OUTPUT_GW_GF_KSTAR_WFC_DIAG")) &&
+                mpi_comm_global_h.is_root())
+            {
+                iks_headwing_eigvec_this.clear();
+                for (const int ik_source : target_to_source_ik)
+                    iks_headwing_eigvec_this.emplace_back(ik_source);
+            }
         }
         const std::vector<int> *source_iks_headwing_eigvec_selected =
             pds->scfk_blacs_ctxt.is_initialized() ? &iks_headwing_eigvec_this : nullptr;
@@ -1437,6 +1445,27 @@ void read_headwing_input(const string &dir_path, bool need_wing)
             std::move(direct_full_bz_velocity),
             std::move(direct_full_bz_wfc),
             std::move(direct_full_bz_velocity_member_source_ik));
+    }
+    if (restore_mf.active &&
+        output_gw_gf_kstar_wfc_diagnostic_requested(
+            std::getenv("LIBRPA_OUTPUT_GW_GF_KSTAR_WFC_DIAG")) &&
+        mpi_comm_global_h.is_root())
+    {
+        MeanField gw_meanfield_reference = restore_mf.original;
+        gw_meanfield_reference.get_eigenvectors().clear();
+        const int ret_gw_wfc = read_eigenvector(
+            path_as_directory(dir_path), gw_meanfield_reference, use_spinor_wfc, nullptr);
+        if (ret_gw_wfc != 0)
+            throw std::runtime_error(
+                "Failed to reread complete production IBZ eigenvectors for GW diagnostic");
+        pds->p_headwing->set_gw_meanfield_reference(std::move(gw_meanfield_reference));
+    }
+    pds->p_headwing->output_gw_gf_kstar_wfc_comparison();
+    if (stop_after_gw_gf_kstar_wfc_diagnostic_requested(
+            std::getenv("LIBRPA_STOP_AFTER_GW_GF_KSTAR_WFC_DIAG")))
+    {
+        mpi_comm_global_h.barrier();
+        throw std::runtime_error("GW G k-star WFC diagnostic completed; intentional stop");
     }
     if (restore_mf.active)
     {

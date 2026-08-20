@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cstddef>
 #include <complex>
 #include <functional>
 #include <map>
@@ -32,6 +33,16 @@ struct DoubleHavriliakNegami
 std::vector<double> interpolate_dielec_func(int option, const std::vector<double> &frequencies_in,
                                             const std::vector<double> &df_in,
                                             const std::vector<double> &frequencies_target);
+std::string strict_2d_omega0_diagnostic_directory(const char *value);
+struct Strict2dOmega0OverrideDirectories
+{
+    std::string coulomb_basis;
+    std::string auxiliary_basis;
+};
+Strict2dOmega0OverrideDirectories strict_2d_omega0_override_directories(
+    const char *coulomb_basis, const char *auxiliary_basis);
+std::vector<std::complex<double>> read_strict_2d_omega0_override_binary(
+    const std::string &path, int expected_dimension);
 
 struct RpaHeadwingSettings
 {
@@ -97,6 +108,25 @@ const ComplexMatrix &direct_full_bz_wfc_for_kstar_member(
     int ik_ibz,
     std::size_t imember);
 
+struct WeightedWfcGramComparison
+{
+    double direct_frobenius = 0.0;
+    double restored_frobenius = 0.0;
+    double difference_frobenius = 0.0;
+    double relative_frobenius = 0.0;
+    double maximum_absolute_difference = 0.0;
+};
+
+WeightedWfcGramComparison compare_weighted_wfc_grams(
+    const ComplexMatrix &direct_wfc,
+    const ComplexMatrix &restored_wfc,
+    const std::vector<double> &band_scales);
+bool output_gw_gf_kstar_wfc_diagnostic_requested(const char *value);
+bool stop_after_gw_gf_kstar_wfc_diagnostic_requested(const char *value);
+int gw_gf_kstar_wfc_diagnostic_active_kpoints(int meanfield_kpoints,
+                                               int production_kpoints,
+                                               int coordinate_kpoints);
+
 // All calculation in unit: Bohr and Ha.
 struct Strict2dFiniteQReference;
 class diele_func
@@ -115,6 +145,10 @@ private:
     // ( i:3, j:3 )
     matrix_m<std::complex<double>> Lind;
     std::vector<matrix_m<std::complex<double>>> strict_2d_lind_by_freq;
+    std::vector<matrix_m<std::complex<double>>> strict_2d_body_inv_by_freq;
+    std::vector<matrix_m<std::complex<double>>> strict_2d_bw_by_freq;
+    std::vector<matrix_m<std::complex<double>>> strict_2d_wb_by_freq;
+    matrix_m<std::complex<double>> strict_2d_regular_coulomb_basis;
     // ( i:n_lambda, j:3 )
     matrix_m<std::complex<double>> bw;
     // ( i:3, j:n_lambda )
@@ -146,6 +180,7 @@ private:
     const velocity_matrix_t &velocity_;
     velocity_matrix_t direct_full_bz_velocity_;
     MeanField direct_full_bz_wfc_;
+    MeanField gw_meanfield_reference_;
     std::vector<std::vector<int>> direct_full_bz_velocity_member_source_ik_;
     const MpiCommHandler &comm_h;
     const BlacsCtxtHandler &blacs_h;
@@ -159,6 +194,7 @@ private:
     std::vector<double> q_gamma;
     double vol_gamma = 0.0;
     double strict_2d_pw_to_auxiliary_scale_ = 0.0;
+    std::vector<std::complex<double>> strict_2d_pw_wc_head_average_;
 
 public:
     bool use_2d_dielectric = false;
@@ -186,10 +222,15 @@ public:
         direct_full_bz_wfc_ = std::move(wfc_full);
         direct_full_bz_velocity_member_source_ik_ = std::move(member_source_ik);
     }
+    void set_gw_meanfield_reference(MeanField meanfield)
+    {
+        gw_meanfield_reference_ = std::move(meanfield);
+    }
     bool has_direct_full_bz_headwing_inputs() const
     {
         return !direct_full_bz_velocity_.empty() && direct_full_bz_wfc_.initialized();
     }
+    void output_gw_gf_kstar_wfc_comparison() const;
 
     // Public access to the head/wing mean-field copy for driver-side validation
     // of producer eigenvector coverage. The driver must not expand or broadcast
@@ -338,8 +379,12 @@ public:
     void rewrite_strict_2d_wc(matrix_m<std::complex<double>> &chi0_block, const int ifreq,
                               ArrayDesc &desc_nabf_nabf_opt,
                               const matrix_m<std::complex<double>> &regular_coulomb_basis);
+    void rewrite_strict_2d_wc_at_q(
+        matrix_m<std::complex<double>> &wc_coulomb_basis, int ifreq,
+        ArrayDesc &desc_nabf_nabf_opt, double qhat_x, double qhat_y, double q_physical) const;
     Strict2dFiniteQReference get_strict_2d_finite_q_reference(int ifreq, double qx,
                                                               double qy) const;
+    std::complex<double> get_strict_2d_pw_wc_head_average(int ifreq) const;
     double get_strict_2d_bare_coulomb_gamma_average() const;
     std::complex<double> compute_rpa_trace_log_average(
         matrix_m<std::complex<double>> &response_block, const int ifreq, ArrayDesc &desc_response,

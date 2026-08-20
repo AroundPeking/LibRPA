@@ -21,6 +21,8 @@
 
 namespace librpa_int {
 
+bool force_complex_spacetime_diagnostic_requested(const char *value);
+
 // extern int n_irk_points;
 // extern int natom;
 // extern int ncell;

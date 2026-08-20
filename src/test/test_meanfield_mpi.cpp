@@ -559,9 +559,9 @@ static ComplexMatrix restore_test_wfc_to_member(
         ctx, wfc_layouts, member, atom_nw, k_ibz, member.time_reversal, &member.k_bz);
     if (member.time_reversal)
     {
-        return conj(wfc_ibz) * rotation;
+        return conj(wfc_ibz) * conj(rotation);
     }
-    return wfc_ibz * conj(rotation);
+    return wfc_ibz * rotation;
 }
 
 static void set_two_atom_reduced_kstar_meanfield(MeanField &mf)
@@ -678,6 +678,151 @@ static void test_dmat_gf_kblacs_reduced_kstar_matches_full_bz_fourier()
                     const int iglob = desc_dm.indx_l2g_r(iloc);
                     assert(fequal(rmat(iloc, jloc), expected_gf.at(tau).at(R)(iglob, jglob),
                                   cplxdb{1e-12, 0.0}));
+                }
+            }
+        }
+    }
+}
+
+static SymmetryContext build_one_atom_p_time_reversal_kstar_context()
+{
+    SymmetryContext ctx;
+    ctx.set_available();
+    ctx.atom_to_type = {{0, 0}};
+    ctx.input_coord_frac = {{0, {0.0, 0.0, 0.0}}};
+
+    SymmetryOperation identity_operation;
+    identity_operation.rotation.Identity();
+    identity_operation.translation = {0.0, 0.0, 0.0};
+    ctx.rspace_operations.push_back(identity_operation);
+
+    SymmetryKStar star;
+    star.star_index = 0;
+    star.k_ibz = {0.25, 0.0, 0.0};
+    for (int imember = 0; imember != 2; ++imember)
+    {
+        SymmetryKStarMember member;
+        member.spatial_isym = 0;
+        member.k_bz = imember == 0 ? Vector3_Order<double>{0.25, 0.0, 0.0}
+                                   : Vector3_Order<double>{0.75, 0.0, 0.0};
+        member.time_reversal = imember == 1;
+        SymmetryKAtomRotation atom;
+        atom.atom_from = 0;
+        atom.atom_to = 0;
+        atom.atom_type = 0;
+        atom.lmax = 1;
+        atom.bloch_rsh_rotations[0] = ComplexMatrix(1, 1);
+        atom.bloch_rsh_rotations[0](0, 0) = {1.0, 0.0};
+        atom.bloch_rsh_rotations[1] = ComplexMatrix(3, 3);
+        if (imember == 0)
+        {
+            atom.bloch_rsh_rotations[1].set_as_identity_matrix();
+        }
+        else
+        {
+            const cplxdb phase{0.6, 0.8};
+            atom.bloch_rsh_rotations[1](0, 1) = phase;
+            atom.bloch_rsh_rotations[1](1, 2) = phase;
+            atom.bloch_rsh_rotations[1](2, 0) = phase;
+        }
+        member.atom_rotations.push_back(std::move(atom));
+        star.members.push_back(std::move(member));
+    }
+    ctx.kstars.push_back(std::move(star));
+    return ctx;
+}
+
+static void set_one_atom_p_reduced_kstar_meanfield(MeanField &mf)
+{
+    mf.get_efermi() = 0.0;
+    for (int ib = 0; ib != 3; ++ib)
+    {
+        mf.get_eigenvals()[0](0, ib) = ib == 0 ? -0.7 : 0.4 + 0.2 * ib;
+        mf.get_weight()[0](0, ib) = ib == 0 ? 2.0 : 0.0;
+    }
+    auto &wfc = mf.get_eigenvectors()[0][0][0];
+    wfc.create(3, 3);
+    wfc(0, 0) = {0.7, 0.2};
+    wfc(0, 1) = {-0.1, 0.4};
+    wfc(0, 2) = {0.3, -0.5};
+    wfc(1, 0) = {-0.2, 0.1};
+    wfc(1, 1) = {0.6, -0.3};
+    wfc(1, 2) = {0.4, 0.2};
+    wfc(2, 0) = {0.5, -0.4};
+    wfc(2, 1) = {0.2, 0.3};
+    wfc(2, 2) = {-0.6, 0.1};
+}
+
+static void test_gf_kblacs_p_time_reversal_kstar_matches_explicit_full_bz()
+{
+    if (size_global < 2) return;
+
+    const auto ctx = build_one_atom_p_time_reversal_kstar_context();
+    AtomicBasis basis_wfc(std::vector<size_t>{3});
+    basis_wfc.set_l_shells({{1}});
+    const auto layouts = basis_wfc.build_species_basis_layouts(ctx.atom_to_type);
+    const std::map<atom_t, size_t> atom_nw{{0, 3}};
+    const std::vector<Vector3_Order<double>> kfrac_ibz{{0.25, 0.0, 0.0}};
+    const std::vector<Vector3_Order<double>> kfrac_full{{0.25, 0.0, 0.0},
+                                                        {0.75, 0.0, 0.0}};
+    const std::vector<Vector3_Order<int>> Rs{{0, 0, 0}, {1, 0, 0}};
+    const std::vector<double> taus{-0.31, 0.23};
+
+    MeanField mf_ibz_ref(1, 1, 3, 3);
+    set_one_atom_p_reduced_kstar_meanfield(mf_ibz_ref);
+    MeanField mf_full(1, 2, 3, 3);
+    mf_full.get_efermi() = 0.0;
+    const auto &star = ctx.kstars.front();
+    for (int ik = 0; ik != 2; ++ik)
+    {
+        for (int ib = 0; ib != 3; ++ib)
+        {
+            mf_full.get_eigenvals()[0](ik, ib) = mf_ibz_ref.get_eigenvals()[0](0, ib);
+            mf_full.get_weight()[0](ik, ib) = ib == 0 ? 1.0 : 0.0;
+        }
+        mf_full.get_eigenvectors()[0][0][ik] = restore_test_wfc_to_member(
+            ctx, star.members[static_cast<std::size_t>(ik)], layouts, atom_nw,
+            star.k_ibz, mf_ibz_ref.get_eigenvectors()[0][0][0]);
+    }
+    const auto expected =
+        mf_full.get_gf_cplx_imagtimes_Rs(0, 0, 0, kfrac_full, taus, Rs);
+
+    KPointBlacsProcessShape shape(1, size_global, false);
+    KPointBlacsParallelContext context(shape, mpi_comm_global_h.comm, 1);
+    const auto desc_wfc = context.create_array_desc(3, 3, 3, 3);
+    const auto desc_gf = context.create_array_desc(3, 3);
+    MeanField mf_ibz(1, 1, 3, 3);
+    mf_ibz.get_efermi() = 0.0;
+    for (int ib = 0; ib != 3; ++ib)
+    {
+        mf_ibz.get_eigenvals()[0](0, ib) = mf_ibz_ref.get_eigenvals()[0](0, ib);
+        mf_ibz.get_weight()[0](0, ib) = mf_ibz_ref.get_weight()[0](0, ib);
+    }
+    if (context.kpoint_blacs_root_global_rank(0) == myid_global)
+        set_one_atom_p_reduced_kstar_meanfield(mf_ibz);
+
+    PeriodicBoundaryData pbc;
+    const auto actual = get_symmetry_restored_gf_cplx_imagtimes_Rs_kblacs_para(
+        0, 0, 0, mf_ibz, kfrac_ibz, taus, Rs, context, desc_wfc, desc_gf, ctx, pbc,
+        basis_wfc);
+    for (const auto tau : taus)
+    {
+        for (const auto &R : Rs)
+        {
+            const auto &actual_mat = actual.at(tau).at(R);
+            for (int jloc = 0; jloc != desc_gf.n_loc(); ++jloc)
+            {
+                const int jglob = desc_gf.indx_l2g_c(jloc);
+                for (int iloc = 0; iloc != desc_gf.m_loc(); ++iloc)
+                {
+                    const int iglob = desc_gf.indx_l2g_r(iloc);
+                    if (!fequal(actual_mat(iloc, jloc), expected.at(tau).at(R)(iglob, jglob),
+                                cplxdb{1e-12, 0.0}))
+                    {
+                        throw std::runtime_error(
+                            "kBLACS p-orbital time-reversal Green function differs from explicit "
+                            "full BZ");
+                    }
                 }
             }
         }
@@ -832,6 +977,7 @@ int main (int argc, char *argv[])
     test_dm_gf_kblacs_para_redistributed_full_wfc();
     test_dmat_kblacs_reduced_kstar_matches_symmetry_restore();
     test_dmat_gf_kblacs_reduced_kstar_matches_full_bz_fourier();
+    test_gf_kblacs_p_time_reversal_kstar_matches_explicit_full_bz();
 
     finalize_global_io();
     finalize_global_mpi();
