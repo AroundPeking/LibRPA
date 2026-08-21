@@ -231,7 +231,7 @@ std::vector<double> sternheimer_frequency_grid_from_metadata(
     std::vector<double> frequencies(static_cast<std::size_t>(expected_nfreq), 0.0);
     std::vector<bool> present(static_cast<std::size_t>(expected_nfreq), false);
     const auto close = [](const double lhs, const double rhs) {
-        return std::abs(lhs - rhs) <= 1e-12 * std::max({1.0, std::abs(lhs), std::abs(rhs)});
+        return std::abs(lhs - rhs) <= 1e-10 * std::max({1.0, std::abs(lhs), std::abs(rhs)});
     };
     for (const auto &[ifreq, omega] : metadata)
     {
