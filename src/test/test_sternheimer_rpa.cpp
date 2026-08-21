@@ -95,6 +95,15 @@ void test_sternheimer_headwing_uses_response_frequency_grid()
     }
 }
 
+void test_sternheimer_headwing_accepts_recomputed_frequency_roundoff()
+{
+    const std::vector<std::pair<int, double>> metadata{
+        {1, 0.6787171755480910}, {2, 77.73973043128609},
+        {1, 0.6787171755493192}, {2, 77.73973043142676}};
+    const auto frequencies = librpa_int::sternheimer_frequency_grid_from_metadata(metadata, 2);
+    assert(frequencies.size() == 2);
+}
+
 void test_sternheimer_head_only_replaces_gamma_head()
 {
     librpa_int::ComplexMatrix coulomb(2, 2);
@@ -250,6 +259,7 @@ int main()
     test_sternheimer_pi_and_trace_log_match_diagonal_reference();
     test_sternheimer_headwing_frequency_uses_one_based_response_labels();
     test_sternheimer_headwing_uses_response_frequency_grid();
+    test_sternheimer_headwing_accepts_recomputed_frequency_roundoff();
     test_sternheimer_head_only_replaces_gamma_head();
     test_sternheimer_headwing_dense_projection_matches_direct_reference();
     test_sternheimer_qavg_uses_analytic_head_and_wing();
