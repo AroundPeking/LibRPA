@@ -60,6 +60,9 @@ foreach(target
     test_rsh
     test_rpa_headwing
     test_strict_2d_coulomb_head_metadata
+    test_sternheimer_rpa
+    test_sternheimer_symmetry
+    test_sternheimer_qsum
     test_symmetry
     test_timefreq
     test_vector3
@@ -71,6 +74,10 @@ endforeach()
 target_sources(test_task_helper PRIVATE ../../driver/tasks/task_helper.cpp)
 target_sources(test_strict_2d_coulomb_head_metadata
   PRIVATE ../../driver/reader_2d_coulomb_head.cpp)
+# These suites use standard assert() and must remain active in Release builds.
+target_compile_options(test_sternheimer_rpa PRIVATE -UNDEBUG)
+target_compile_options(test_sternheimer_symmetry PRIVATE -UNDEBUG)
+target_compile_options(test_symmetry_context PRIVATE -UNDEBUG)
 
 # add 4-process tests
 foreach(target
@@ -85,5 +92,9 @@ foreach(target
   )
   config_test(${target} 4)
 endforeach()
+
+if(LIBRPA_USE_LIBRI AND _LIBRPA_USE_BUNDLED_LIBCOMM)
+  config_test(test_libcomm_bounded_exchange 4)
+endif()
 
 # TODO(minye): make use of GTest

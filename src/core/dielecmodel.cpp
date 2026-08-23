@@ -155,8 +155,7 @@ std::array<std::array<std::complex<double>, 3>, 3> compute_wing_cartesian_gram(
         {
             for (int beta = 0; beta != 3; ++beta)
             {
-                gram.at(alpha).at(beta) +=
-                    std::conj(wing(lambda, alpha)) * wing(lambda, beta);
+                gram.at(alpha).at(beta) += std::conj(wing(lambda, alpha)) * wing(lambda, beta);
             }
         }
     }
@@ -220,9 +219,8 @@ static void print_wing_mu_k_contribution_gram(
     const auto gram = compute_wing_cartesian_gram(wing_mu_k);
     if (member == nullptr)
     {
-        global::lib_printf(
-            "Wing_mu k Gram (iomega=0): route=%s ik=%d k=(% .12f,% .12f,% .12f)\n",
-            route, ik, kfrac.x, kfrac.y, kfrac.z);
+        global::lib_printf("Wing_mu k Gram (iomega=0): route=%s ik=%d k=(% .12f,% .12f,% .12f)\n",
+                           route, ik, kfrac.x, kfrac.y, kfrac.z);
     }
     else
     {
@@ -245,17 +243,15 @@ static void print_head_k_contribution(const char *route, const int ik,
                                       const Vector3_Order<double> &kfrac,
                                       const std::array<std::complex<double>, 9> &head_k)
 {
-    global::lib_printf("Head k matrix (iomega=0): route=%s ik=%d k=(% .12f,% .12f,% .12f)\n",
-                       route, ik, kfrac.x, kfrac.y, kfrac.z);
+    global::lib_printf("Head k matrix (iomega=0): route=%s ik=%d k=(% .12f,% .12f,% .12f)\n", route,
+                       ik, kfrac.x, kfrac.y, kfrac.z);
     for (int alpha = 0; alpha != 3; ++alpha)
     {
-        global::lib_printf("(%15.8e,%15.8e) (%15.8e,%15.8e) (%15.8e,%15.8e)\n",
-                           head_k.at(as_size(alpha * 3)).real(),
-                           head_k.at(as_size(alpha * 3)).imag(),
-                           head_k.at(as_size(alpha * 3 + 1)).real(),
-                           head_k.at(as_size(alpha * 3 + 1)).imag(),
-                           head_k.at(as_size(alpha * 3 + 2)).real(),
-                           head_k.at(as_size(alpha * 3 + 2)).imag());
+        global::lib_printf(
+            "(%15.8e,%15.8e) (%15.8e,%15.8e) (%15.8e,%15.8e)\n",
+            head_k.at(as_size(alpha * 3)).real(), head_k.at(as_size(alpha * 3)).imag(),
+            head_k.at(as_size(alpha * 3 + 1)).real(), head_k.at(as_size(alpha * 3 + 1)).imag(),
+            head_k.at(as_size(alpha * 3 + 2)).real(), head_k.at(as_size(alpha * 3 + 2)).imag());
     }
 }
 
@@ -267,15 +263,14 @@ static bool is_wing_wfc_probe_kpoint(const Vector3_Order<double> &kfrac)
 
 static void print_wing_wfc_probe(const int ik_ibz, const Vector3_Order<double> &k_ibz,
                                  const SymmetryKStarMember &member,
-                                 const Vector3_Order<double> &k_bz,
-                                 const ComplexMatrix &wfc_bz)
+                                 const Vector3_Order<double> &k_bz, const ComplexMatrix &wfc_bz)
 {
     global::lib_printf(
         "Wing WFC probe: ik_ibz=%d k_ibz=(% .12f,% .12f,% .12f) "
         "member_k=(% .12f,% .12f,% .12f) k_bz=(% .12f,% .12f,% .12f) "
         "spatial_isym=%d time_reversal=%d rows=band columns=AO\n",
-        ik_ibz, k_ibz.x, k_ibz.y, k_ibz.z, member.k_bz.x, member.k_bz.y, member.k_bz.z,
-        k_bz.x, k_bz.y, k_bz.z, member.spatial_isym, member.time_reversal ? 1 : 0);
+        ik_ibz, k_ibz.x, k_ibz.y, k_ibz.z, member.k_bz.x, member.k_bz.y, member.k_bz.z, k_bz.x,
+        k_bz.y, k_bz.z, member.spatial_isym, member.time_reversal ? 1 : 0);
     for (int iband = 0; iband != wfc_bz.nr; ++iband)
     {
         global::lib_printf("band=%d", iband);
@@ -293,8 +288,8 @@ static void print_wing_cmnk_probe(const char *route, const int mu,
 {
     if (mu != 0 || !is_wing_wfc_probe_kpoint(kfrac) || !desc_nband_nband.is_src()) return;
     global::lib_printf(
-        "Wing C_mnk probe: route=%s mu=%d k=(% .12f,% .12f,% .12f) rows=m columns=n\n",
-        route, mu, kfrac.x, kfrac.y, kfrac.z);
+        "Wing C_mnk probe: route=%s mu=%d k=(% .12f,% .12f,% .12f) rows=m columns=n\n", route, mu,
+        kfrac.x, kfrac.y, kfrac.z);
     for (int m = 0; m != C_mnk.nr(); ++m)
     {
         global::lib_printf("m=%d", m);
@@ -305,14 +300,13 @@ static void print_wing_cmnk_probe(const char *route, const int mu,
 }
 
 static void print_wing_cnao_probe(const char *route, const int mu,
-                                  const Vector3_Order<double> &kfrac,
-                                  const ArrayDesc &desc_nao_nao,
+                                  const Vector3_Order<double> &kfrac, const ArrayDesc &desc_nao_nao,
                                   const matrix_m<std::complex<double>> &C_nao_nao)
 {
     if (mu != 0 || !is_wing_wfc_probe_kpoint(kfrac) || !desc_nao_nao.is_src()) return;
     global::lib_printf(
-        "Wing C_nao probe: route=%s mu=%d k=(% .12f,% .12f,% .12f) rows=AO columns=AO\n",
-        route, mu, kfrac.x, kfrac.y, kfrac.z);
+        "Wing C_nao probe: route=%s mu=%d k=(% .12f,% .12f,% .12f) rows=AO columns=AO\n", route, mu,
+        kfrac.x, kfrac.y, kfrac.z);
     for (int row = 0; row != C_nao_nao.nr(); ++row)
     {
         global::lib_printf("ao=%d", row);
@@ -359,12 +353,9 @@ static bool use_matching_kpoint_blacs(const int n_kpoints,
 }
 
 ComplexMatrix rotate_headwing_wfc_to_kstar_member(
-    const SymmetryContext &ctx,
-    const SymmetryKStarMember &member,
-    const std::vector<SpeciesBasisLayout> &wfc_layouts,
-    const std::map<atom_t, size_t> &atom_nw,
-    const Vector3_Order<double> &k_ibz,
-    const ComplexMatrix &wfc_ibz,
+    const SymmetryContext &ctx, const SymmetryKStarMember &member,
+    const std::vector<SpeciesBasisLayout> &wfc_layouts, const std::map<atom_t, size_t> &atom_nw,
+    const Vector3_Order<double> &k_ibz, const ComplexMatrix &wfc_ibz,
     const Vector3_Order<double> *k_bz_target)
 {
     const auto rotation = build_symmetry_kspace_rotation_matrix(
@@ -411,8 +402,7 @@ static void allreduce_head_check(
 
 std::array<ComplexMatrix, 3> rotate_headwing_velocity_to_kstar_member(
     const SymmetryContext &ctx, const SymmetryKStarMember &member,
-    const std::array<ComplexMatrix, 3> &v_band_ibz, const int n_bands,
-    const bool use_time_reversal)
+    const std::array<ComplexMatrix, 3> &v_band_ibz, const int n_bands, const bool use_time_reversal)
 {
     for (int alpha = 0; alpha < 3; ++alpha)
     {
@@ -495,8 +485,7 @@ const ComplexMatrix &direct_full_bz_wfc_for_kstar_member(
     }
     const int ik_source = member_source_ik[ik_ibz][imember];
     const auto *wfc = wfc_full.find_wfc(ispin, ispinor, ik_source);
-    if (wfc == nullptr || wfc->nr != wfc_full.get_n_states() ||
-        wfc->nc != wfc_full.get_n_aos())
+    if (wfc == nullptr || wfc->nr != wfc_full.get_n_states() || wfc->nc != wfc_full.get_n_aos())
     {
         throw std::runtime_error("direct_full_bz_wfc: invalid PyATB full-BZ eigenvector entry");
     }
@@ -746,7 +735,8 @@ std::vector<int> map_kpoints_by_coordinates(
     const std::vector<Vector3_Order<double>> &target_kpoints,
     const std::vector<Vector3_Order<double>> &source_kpoints, const double tolerance)
 {
-    const auto periodic_abs_delta = [](const double lhs, const double rhs) {
+    const auto periodic_abs_delta = [](const double lhs, const double rhs)
+    {
         const double diff = lhs - rhs;
         return std::abs(diff - std::round(diff));
     };
@@ -774,8 +764,7 @@ std::vector<int> map_kpoints_by_coordinates(
         if (matched_source < 0)
         {
             std::ostringstream oss;
-            oss << "Failed to map target k-point " << itarget + 1
-                << " to the source k-point list";
+            oss << "Failed to map target k-point " << itarget + 1 << " to the source k-point list";
             throw std::runtime_error(oss.str());
         }
         used[matched_source] = 1;
@@ -1285,8 +1274,8 @@ void diele_func::init(double coulomb_eigen_threshold, const librpa_int::atpair_k
         }
         for (int ik_ibz = 0; ik_ibz != nk; ++ik_ibz)
         {
-            const auto &star = librpa_int::find_symmetry_kstar_for_ibz_kpoint(
-                *symmetry_context_, kfrac_band[ik_ibz]);
+            const auto &star = librpa_int::find_symmetry_kstar_for_ibz_kpoint(*symmetry_context_,
+                                                                              kfrac_band[ik_ibz]);
             if (direct_full_bz_velocity_member_source_ik_[ik_ibz].size() != star.members.size())
             {
                 throw LIBRPA_RUNTIME_ERROR(
@@ -1390,9 +1379,8 @@ void diele_func::cal_head()
         can_try_sym ? atomic_basis_wfc_.build_species_basis_layouts(symmetry_context_->atom_to_type)
                     : std::vector<SpeciesBasisLayout>{};
     const bool can_sym =
-        can_try_sym &&
-        librpa_int::can_restore_symmetry_kstar_meanfield(
-            *symmetry_context_, wfc_layouts, meanfield_df, kfrac_band, atom_nw);
+        can_try_sym && librpa_int::can_restore_symmetry_kstar_meanfield(
+                           *symmetry_context_, wfc_layouts, meanfield_df, kfrac_band, atom_nw);
 
     if (debug && use_symmetry && comm_h.is_root())
     {
@@ -1416,8 +1404,7 @@ void diele_func::cal_head()
         else
             reason = "all symmetry restore checks passed";
         std::cout << "Head symmetry restore for analytic head: "
-                  << (can_sym ? "active" : "fallback") << " (" << reason << ")."
-                  << std::endl;
+                  << (can_sym ? "active" : "fallback") << " (" << reason << ")." << std::endl;
     }
 
     if (can_sym)
@@ -1492,8 +1479,8 @@ void diele_func::cal_head_full_bz()
                                               (egap * egap + omega_ev * omega_ev) / egap;
                                         this->head.at(iomega)(alpha, beta) -= tmp;
                                         if (iomega == 0)
-                                            head_k_iomega0.at(as_size(ik)).at(
-                                                as_size(alpha * 3 + beta)) -= tmp;
+                                            head_k_iomega0.at(as_size(ik))
+                                                .at(as_size(alpha * 3 + beta)) -= tmp;
                                     }
                                 }
                             }
@@ -1521,13 +1508,12 @@ void diele_func::cal_head_symmetric()
     // is reused directly.
     if (symmetry_context_ == nullptr)
         throw std::runtime_error("cal_head_symmetric: symmetry context is not set");
-    const auto& ctx = *symmetry_context_;
+    const auto &ctx = *symmetry_context_;
 
     // Build the per-member BZ k-point targets so the rotated quantities land on
     // the same grid keys that the rest of the code expects (mirrors the
     // get_symmetry_restored_gf_cplx_imagtimes_Rs convention).
-    const auto member_targets =
-        librpa_int::build_symmetry_kstar_member_kfrac_targets(ctx, pbc_);
+    const auto member_targets = librpa_int::build_symmetry_kstar_member_kfrac_targets(ctx, pbc_);
 
     // PyATB velocity inputs on an IBZ grid use the active-grid occupation normalization.
     // Expanding each representative to the full BZ therefore scales every member uniformly.
@@ -1550,10 +1536,9 @@ void diele_func::cal_head_symmetric()
 
         for (int ik_ibz = 0; ik_ibz != nk; ik_ibz++)
         {
-            const auto& k_ibz = kfrac_band[ik_ibz];
-            const auto& star = librpa_int::find_symmetry_kstar_for_ibz_kpoint(ctx, k_ibz);
-            if (star.members.empty())
-                throw std::runtime_error("cal_head_symmetric: empty k-star");
+            const auto &k_ibz = kfrac_band[ik_ibz];
+            const auto &star = librpa_int::find_symmetry_kstar_for_ibz_kpoint(ctx, k_ibz);
+            if (star.members.empty()) throw std::runtime_error("cal_head_symmetric: empty k-star");
 
             const int ispinor_bra = 0;
             const ComplexMatrix *C_ibz_ptr = meanfield_df.find_wfc(ispin, ispinor_bra, ik_ibz);
@@ -1582,16 +1567,15 @@ void diele_func::cal_head_symmetric()
                 std::array<std::complex<double>, 9> head_k_iomega0{};
 
                 (void)k_bz;
-                const auto v_band_bz = has_direct_full_bz_headwing_inputs()
-                                          ? direct_full_bz_velocity_for_kstar_member(
-                                                direct_full_bz_velocity_,
-                                                direct_full_bz_velocity_member_source_ik_, ispin,
-                                                ik_ibz, imember)
-                                          : rotate_headwing_velocity_to_kstar_member(
-                                                ctx, member,
-                                                {velocity[ik_ibz][0], velocity[ik_ibz][1],
-                                                 velocity[ik_ibz][2]},
-                                                n_states, member.time_reversal);
+                const auto v_band_bz =
+                    has_direct_full_bz_headwing_inputs()
+                        ? direct_full_bz_velocity_for_kstar_member(
+                              direct_full_bz_velocity_, direct_full_bz_velocity_member_source_ik_,
+                              ispin, ik_ibz, imember)
+                        : rotate_headwing_velocity_to_kstar_member(
+                              ctx, member,
+                              {velocity[ik_ibz][0], velocity[ik_ibz][1], velocity[ik_ibz][2]},
+                              n_states, member.time_reversal);
 
                 // Sum over band pairs. Eigenvalues are symmetry-invariant, so the
                 // IBZ gap Delta_cv applies to every star member unchanged.
@@ -1743,6 +1727,66 @@ matrix_m<std::complex<double>> diele_func::get_rpa_chi0v_wing(const int ifreq) c
     return chi0v_wing;
 }
 
+SternheimerRpaHeadwingInput diele_func::get_sternheimer_rpa_headwing_input(
+    const int ifreq, const RpaHeadwingSettings &settings) const
+{
+    if (settings.rpa_headwing_mode != "qavg" && settings.rpa_headwing_mode != "head_only")
+    {
+        throw std::logic_error("ST-RPA head/wing mode must be qavg or head_only");
+    }
+
+    const auto chi0v_head = get_rpa_chi0v_head(ifreq);
+    SternheimerRpaHeadwingInput result;
+    result.mode = settings.rpa_headwing_mode;
+    result.body_start = rpa_headwing_regular_body_start_channel(settings);
+    result.head = ComplexMatrix(3, 3);
+    for (int alpha = 0; alpha != 3; ++alpha)
+    {
+        for (int beta = 0; beta != 3; ++beta)
+        {
+            result.head(alpha, beta) = chi0v_head(alpha, beta);
+        }
+    }
+
+    if (result.mode == "head_only")
+    {
+        return result;
+    }
+    if (ifreq < 0 || static_cast<std::size_t>(ifreq) >= wing_mu.size())
+    {
+        throw std::runtime_error("ST-RPA qavg requested before analytic wing is available");
+    }
+    if (qx_leb.size() != qy_leb.size() || qx_leb.size() != qz_leb.size() ||
+        qx_leb.size() != qw_leb.size() || qx_leb.size() != q_gamma.size())
+    {
+        throw std::logic_error("ST-RPA head/wing angular quadrature data are inconsistent");
+    }
+
+    // cal_wing stores the dielectric-function convention. Negating here gives
+    // the chi0*v convention returned by get_rpa_chi0v_wing after the usual
+    // sqrt(V) auxiliary-to-Coulomb transformation.
+    result.wing_mu = ComplexMatrix(n_abf, 3);
+    for (int mu = 0; mu != n_abf; ++mu)
+    {
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            result.wing_mu(mu, alpha) = -wing_mu.at(ifreq)(mu, alpha);
+        }
+    }
+
+    const double volume = rpa_headwing_gamma_cell_volume(pbc_, settings.use_2d_dielectric);
+    result.directions.reserve(qw_leb.size());
+    for (std::size_t ileb = 0; ileb != qw_leb.size(); ++ileb)
+    {
+        const double radial_weight = settings.use_2d_dielectric
+                                         ? std::pow(q_gamma[ileb], 2) / (2.0 * volume)
+                                         : std::pow(q_gamma[ileb], 3) / (3.0 * volume);
+        result.directions.push_back(
+            {{{qx_leb[ileb], qy_leb[ileb], qz_leb[ileb]}}, qw_leb[ileb] * radial_weight});
+    }
+    return result;
+}
+
 void diele_func::cal_wing(const Cs_LRI &Cs_data, double coulomb_eigen_threshold,
                           const atpair_k_cplx_mat_t &Vq)
 {
@@ -1752,9 +1796,8 @@ void diele_func::cal_wing(const Cs_LRI &Cs_data, double coulomb_eigen_threshold,
         can_try_sym ? atomic_basis_wfc_.build_species_basis_layouts(symmetry_context_->atom_to_type)
                     : std::vector<SpeciesBasisLayout>{};
     const bool can_sym =
-        can_try_sym &&
-        librpa_int::can_restore_symmetry_kstar_meanfield(
-            *symmetry_context_, wfc_layouts, meanfield_df, kfrac_band, atom_nw);
+        can_try_sym && librpa_int::can_restore_symmetry_kstar_meanfield(
+                           *symmetry_context_, wfc_layouts, meanfield_df, kfrac_band, atom_nw);
 
     if (debug && use_symmetry && comm_h.is_root())
     {
@@ -1778,8 +1821,7 @@ void diele_func::cal_wing(const Cs_LRI &Cs_data, double coulomb_eigen_threshold,
         else
             reason = "all symmetry restore checks passed";
         std::cout << "Wing symmetry restore for analytic wing: "
-                  << (can_sym ? "active" : "fallback") << " (" << reason << ")."
-                  << std::endl;
+                  << (can_sym ? "active" : "fallback") << " (" << reason << ")." << std::endl;
     }
 
     if (can_sym)
@@ -1798,8 +1840,8 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
     int n_lambda = this->n_nonsingular - 1;
     std::vector<std::complex<double>> local_wing_mu;
     local_wing_mu.resize(this->omega.size() * 3 * n_abf, 0.0);
-    std::vector<std::complex<double>> local_wing_mu_k_iomega0(
-        as_size(nk) * as_size(n_abf) * 3, 0.0);
+    std::vector<std::complex<double>> local_wing_mu_k_iomega0(as_size(nk) * as_size(n_abf) * 3,
+                                                              0.0);
     const bool use_kblacs = use_matching_kpoint_blacs(nk, kblacs_ctxt_);
     const BlacsCtxtHandler &wing_blacs_h = use_kblacs ? kblacs_ctxt_->blacs_h : blacs_h;
     const auto kpoints_local = headwing_local_kpoints(nk, use_kblacs ? kblacs_ctxt_ : nullptr);
@@ -1820,11 +1862,9 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
         {
             for (int isp = 0; isp != n_spin; isp++)
             {
-                auto desc_C_mnk =
-                    use_kblacs
-                        ? transform_Cs2mnk_kblacs(ik, mu, Cs_IJ, wing_blacs_h, kfrac_band[ik],
-                                                  nullptr, isp)
-                        : transform_Cs2mnk(ik, mu, Cs_IJ, isp);
+                auto desc_C_mnk = use_kblacs ? transform_Cs2mnk_kblacs(ik, mu, Cs_IJ, wing_blacs_h,
+                                                                       kfrac_band[ik], nullptr, isp)
+                                             : transform_Cs2mnk(ik, mu, Cs_IJ, isp);
                 auto &desc_nband_nband = desc_C_mnk.first;
                 auto &C_mnk = desc_C_mnk.second;
                 print_wing_cmnk_probe("full_bz", mu, kfrac_band[ik], desc_nband_nband, C_mnk);
@@ -1883,8 +1923,7 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
         {
             const auto begin = local_wing_mu_k_iomega0.begin() + as_size(ik * n_abf) * 3;
             const auto end = begin + as_size(n_abf) * 3;
-            print_wing_mu_k_contribution_gram("full_bz", ik, kfrac_band[ik],
-                                              {begin, end}, n_abf);
+            print_wing_mu_k_contribution_gram("full_bz", ik, kfrac_band[ik], {begin, end}, n_abf);
         }
     }
     profiler.start("Comm_wing");
@@ -1940,8 +1979,7 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
     if (symmetry_context_ == nullptr)
         throw std::runtime_error("cal_wing_symmetric: symmetry context is not set");
     const auto &ctx = *symmetry_context_;
-            const auto member_targets =
-                librpa_int::build_symmetry_kstar_member_kfrac_targets(ctx, pbc_);
+    const auto member_targets = librpa_int::build_symmetry_kstar_member_kfrac_targets(ctx, pbc_);
 
     const int n_kpoints_ibz = nk;
     const int n_spinor = meanfield_df.get_n_spinor();
@@ -1988,14 +2026,13 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
                     for (int ispinor = 0; ispinor != n_spinor; ++ispinor)
                     {
                         wfc_bz_ptrs[ispin][ispinor] = &direct_full_bz_wfc_for_kstar_member(
-                            direct_full_bz_wfc_, direct_full_bz_velocity_member_source_ik_,
-                            ispin, ispinor, ik_ibz, imember);
+                            direct_full_bz_wfc_, direct_full_bz_velocity_member_source_ik_, ispin,
+                            ispinor, ik_ibz, imember);
                     }
                 }
                 if (is_wing_wfc_probe_kpoint(k_bz) && !wfc_bz_ptrs.empty() &&
                     !wfc_bz_ptrs.front().empty())
-                    print_wing_wfc_probe(ik_ibz, k_ibz, member, k_bz,
-                                         *wfc_bz_ptrs.front().front());
+                    print_wing_wfc_probe(ik_ibz, k_ibz, member, k_bz, *wfc_bz_ptrs.front().front());
             }
 
             for (int mu = 0; mu != n_abf; ++mu)
@@ -2006,8 +2043,8 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
 
                 for (int isp = 0; isp != n_spin; ++isp)
                 {
-                    auto desc_C_mnk = transform_Cs2mnk_kblacs(ik_ibz, mu, Cs_IJ, wing_blacs_h,
-                                                              k_bz, &wfc_bz_ptrs, isp);
+                    auto desc_C_mnk = transform_Cs2mnk_kblacs(ik_ibz, mu, Cs_IJ, wing_blacs_h, k_bz,
+                                                              &wfc_bz_ptrs, isp);
                     auto &desc_nband_nband = desc_C_mnk.first;
                     auto &C_mnk = desc_C_mnk.second;
                     print_wing_cmnk_probe("sym_restored", mu, k_bz, desc_nband_nband, C_mnk);
@@ -2501,13 +2538,11 @@ void diele_func::wing_mu_to_lambda(matrix_m<std::complex<double>> &sqrtveig_blac
             global::lib_printf("Wing_lambda Gram (iomega=0, rows alpha, columns beta):\n");
             for (int alpha = 0; alpha != 3; ++alpha)
             {
-                global::lib_printf("(%15.8e,%15.8e) (%15.8e,%15.8e) (%15.8e,%15.8e)\n",
-                                   wing0_gram.at(alpha).at(0).real(),
-                                   wing0_gram.at(alpha).at(0).imag(),
-                                   wing0_gram.at(alpha).at(1).real(),
-                                   wing0_gram.at(alpha).at(1).imag(),
-                                   wing0_gram.at(alpha).at(2).real(),
-                                   wing0_gram.at(alpha).at(2).imag());
+                global::lib_printf(
+                    "(%15.8e,%15.8e) (%15.8e,%15.8e) (%15.8e,%15.8e)\n",
+                    wing0_gram.at(alpha).at(0).real(), wing0_gram.at(alpha).at(0).imag(),
+                    wing0_gram.at(alpha).at(1).real(), wing0_gram.at(alpha).at(1).imag(),
+                    wing0_gram.at(alpha).at(2).real(), wing0_gram.at(alpha).at(2).imag());
             }
         }
         if (debug)
@@ -2527,17 +2562,15 @@ void diele_func::wing_mu_to_lambda(matrix_m<std::complex<double>> &sqrtveig_blac
                     const int loc_lambda = desc_wing_opt.indx_g2l_r(ilambda);
                     const int loc_alpha = desc_wing_opt.indx_g2l_c(alpha);
                     std::complex<double> value = 0.0;
-                    if (loc_lambda >= 0 && loc_alpha >= 0)
-                        value = wing0(loc_lambda, loc_alpha);
+                    if (loc_lambda >= 0 && loc_alpha >= 0) value = wing0(loc_lambda, loc_alpha);
                     MPI_Allreduce(&value, &row[alpha], 1, MPI_CXX_DOUBLE_COMPLEX, MPI_SUM,
                                   comm_h.comm);
                 }
                 if (comm_h.is_root())
                 {
-                    global::lib_printf(
-                        "%4d %15.8e %15.8e %15.8e %15.8e %15.8e %15.8e\n",
-                        ilambda, row[0].real(), row[0].imag(), row[1].real(), row[1].imag(),
-                        row[2].real(), row[2].imag());
+                    global::lib_printf("%4d %15.8e %15.8e %15.8e %15.8e %15.8e %15.8e\n", ilambda,
+                                       row[0].real(), row[0].imag(), row[1].real(), row[1].imag(),
+                                       row[2].real(), row[2].imag());
                 }
             }
         }
@@ -2699,8 +2732,8 @@ void diele_func::get_Xv_cpl(double coulomb_eigen_threshold,
     }
     const auto IJq_coul = RI::Communicate_Tensors_Map_Judge::comm_map2_first(
         comm_h.comm, couleps_libri, s0_s1.first, s0_s1.second);
-    collect_block_from_ALL_IJ_Tensor(coulwc_block, desc_nabf_nabf, atomic_basis_abf_, qa,
-                                     true, CONE, IJq_coul, MAJOR::ROW);
+    collect_block_from_ALL_IJ_Tensor(coulwc_block, desc_nabf_nabf, atomic_basis_abf_, qa, true,
+                                     CONE, IJq_coul, MAJOR::ROW);
     // Gamma Coulomb is real; keep this on the same eigensolver path used by epsilon.
     power_hemat_blacs_real(coulwc_block, desc_nabf_nabf, coul_eigen_block, desc_nabf_nabf,
                            n_singular, eigenvalues.c, 0.5, coulomb_eigen_threshold);
@@ -2795,7 +2828,8 @@ void diele_func::test_head()
                 const auto value = this->head.at(0)(alpha, beta);
                 max_abs_imag = std::max(max_abs_imag, std::abs(value.imag()));
                 if (alpha == beta)
-                    max_abs_diag_delta = std::max(max_abs_diag_delta, std::abs(value - trace_over_3));
+                    max_abs_diag_delta =
+                        std::max(max_abs_diag_delta, std::abs(value - trace_over_3));
                 else
                     max_abs_offdiag = std::max(max_abs_offdiag, std::abs(value));
             }
@@ -2816,7 +2850,8 @@ void diele_func::test_wing()
     {
         if (this->wing_mu.empty())
         {
-            if (debug) std::cout << "Wing_mu diagnostics unavailable: wing_mu is empty." << std::endl;
+            if (debug)
+                std::cout << "Wing_mu diagnostics unavailable: wing_mu is empty." << std::endl;
             return;
         }
         double max_abs_real = 0.0;
@@ -2846,12 +2881,9 @@ void diele_func::test_wing()
         for (int alpha = 0; alpha != 3; ++alpha)
         {
             lib_printf("(%15.8e,%15.8e) (%15.8e,%15.8e) (%15.8e,%15.8e)\n",
-                       wing_mu0_gram.at(alpha).at(0).real(),
-                       wing_mu0_gram.at(alpha).at(0).imag(),
-                       wing_mu0_gram.at(alpha).at(1).real(),
-                       wing_mu0_gram.at(alpha).at(1).imag(),
-                       wing_mu0_gram.at(alpha).at(2).real(),
-                       wing_mu0_gram.at(alpha).at(2).imag());
+                       wing_mu0_gram.at(alpha).at(0).real(), wing_mu0_gram.at(alpha).at(0).imag(),
+                       wing_mu0_gram.at(alpha).at(1).real(), wing_mu0_gram.at(alpha).at(1).imag(),
+                       wing_mu0_gram.at(alpha).at(2).real(), wing_mu0_gram.at(alpha).at(2).imag());
         }
         if (debug)
         {
@@ -3747,12 +3779,11 @@ double rpa_headwing_reciprocal_cell_volume(const PeriodicBoundaryData &pbc,
     return std::abs(pbc.G.Det());
 }
 
-double rpa_headwing_gamma_cell_volume(const PeriodicBoundaryData &pbc,
-                                      const bool use_2d_dielectric)
+double rpa_headwing_gamma_cell_volume(const PeriodicBoundaryData &pbc, const bool use_2d_dielectric)
 {
     const int n_full_bz = std::max(1, pbc.get_n_cells_bvk());
-    return rpa_headwing_reciprocal_cell_volume(pbc, use_2d_dielectric)
-           / static_cast<double>(n_full_bz);
+    return rpa_headwing_reciprocal_cell_volume(pbc, use_2d_dielectric) /
+           static_cast<double>(n_full_bz);
 }
 
 ArrayDesc make_rpa_chi0v_wing_desc(const ArrayDesc &desc_body, const int wing_row_offset,

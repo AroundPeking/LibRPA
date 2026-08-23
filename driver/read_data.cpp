@@ -1208,7 +1208,8 @@ static std::vector<Vector3_Order<double>> read_headwing_k_path_info(const string
     return kfrac_list;
 }
 
-void read_headwing_input(const string &dir_path, bool need_wing)
+void read_headwing_input(const string &dir_path, bool need_wing,
+                         const std::vector<double> *frequencies_override)
 {
     using namespace librpa_int;
     using namespace librpa_int::global;
@@ -1261,7 +1262,20 @@ void read_headwing_input(const string &dir_path, bool need_wing)
 
     std::vector<double> freq_weights;
     driver::h.get_imaginary_frequency_grids(driver::opts, pds->omegas_imagfreq, freq_weights);
-    const auto &freqs = pds->tfg.get_freq_nodes();
+    const auto &default_freqs = pds->tfg.get_freq_nodes();
+    const std::vector<double> freqs =
+        frequencies_override != nullptr ? *frequencies_override : default_freqs;
+    if (freqs.empty())
+    {
+        throw std::runtime_error("Head/wing frequency grid is empty");
+    }
+    if (frequencies_override != nullptr)
+    {
+        librpa_int::global::lib_printf_root(
+            "Head/wing uses the external Sternheimer response frequency grid: "
+            "nfreq=%zu first=%.12e last=%.12e Ha\n",
+            freqs.size(), freqs.front(), freqs.back());
+    }
 
     if (path_exists(pyatb_velocity.c_str()))
     {
@@ -1674,16 +1688,40 @@ void read_bz_sampling(const std::string &file_path)
             "BZ sampling SCF k-point weights do not sum to 1: "
             + std::to_string(weight_sum));
     }
-    if (ibz_representatives.size() != static_cast<std::size_t>(nk_ibz))
+    const bool partial_sternheimer_input =
+        !driver::driver_params.fn_sternheimer_partial_manifest.empty();
+    if (!partial_sternheimer_input)
     {
-        throw LIBRPA_RUNTIME_ERROR(
-            "BZ sampling representative count does not match Coulomb IBZ count");
+        if (ibz_representatives.size() != static_cast<std::size_t>(nk_ibz))
+        {
+            throw LIBRPA_RUNTIME_ERROR(
+                "BZ sampling representative count does not match Coulomb IBZ count");
+        }
+        if (std::find(ibz_label_to_rep.cbegin(), ibz_label_to_rep.cend(), -1)
+            != ibz_label_to_rep.cend())
+        {
+            throw LIBRPA_RUNTIME_ERROR(
+                "BZ sampling does not contain every irreducible Coulomb k-point label");
+        }
     }
-    if (std::find(ibz_label_to_rep.cbegin(), ibz_label_to_rep.cend(), -1)
-        != ibz_label_to_rep.cend())
+    else if (ibz_representatives.size() != static_cast<std::size_t>(nk_ibz)
+             || std::find(ibz_label_to_rep.cbegin(), ibz_label_to_rep.cend(), -1)
+                    != ibz_label_to_rep.cend())
     {
-        throw LIBRPA_RUNTIME_ERROR(
-            "BZ sampling does not contain every irreducible Coulomb k-point label");
+        global::lib_printf_root(
+            "Sternheimer partial-response input accepts incomplete generic Coulomb-IBZ labels; "
+            "the explicit q-point manifest selects the Coulomb matrices.\n");
+    }
+
+    if (partial_sternheimer_input)
+    {
+        // The partial-ST manifest supplies the q/Coulomb correspondence explicitly.
+        // Keep every listed SCF IBZ point as a symmetry representative; generic
+        // Coulomb-IBZ labels can otherwise collapse distinct k-stars.
+        std::iota(map_q_ks.begin(), map_q_ks.end(), 0);
+        global::lib_printf_root(
+            "Sternheimer partial-response input uses all listed SCF k-points as "
+            "symmetry-context representatives.\n");
     }
 
     driver::h.set_kgrids_kvec(nk[0], nk[1], nk[2], kvecs, kweights);

@@ -65,7 +65,7 @@ endif()
 set(_BUNDLED_GREENX_COMMIT_HASH  "c90d131")
 set(_BUNDLED_LIBRI_COMMIT_HASH   "e978e96")
 set(_BUNDLED_LIBRI_GPU_COMMIT_HASH "2f5e23e")
-set(_BUNDLED_LIBCOMM_COMMIT_HASH "12457e7")
+set(_BUNDLED_LIBCOMM_COMMIT_HASH "12457e7+bounded-exchange")
 
 # Add cmake load files
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -193,7 +193,11 @@ set(_librpa_filesystem_check_source [=[
 
 int main()
 {
-  return std::filesystem::exists(std::filesystem::path(".")) ? 0 : 1;
+  std::filesystem::path path(".");
+  std::filesystem::directory_iterator iter(path);
+  std::filesystem::create_directories(path / "librpa_filesystem_probe_dir");
+  std::filesystem::remove(path / "librpa_filesystem_probe_dir");
+  return std::filesystem::exists(path) && iter != std::filesystem::directory_iterator{} ? 0 : 1;
 }
 ]=])
 check_cxx_source_compiles(

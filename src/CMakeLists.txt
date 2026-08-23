@@ -95,6 +95,8 @@ list(APPEND lib_sources
         core/qpoint_view.cpp
         core/qpe_solver.cpp
         core/ri.cpp
+  core/sternheimer_rpa.cpp
+  core/sternheimer_symmetry.cpp
         core/timefreq.cpp
         core/utils_atomic_basis_blacs.cpp
         core/utils_complexmatrix.cpp
