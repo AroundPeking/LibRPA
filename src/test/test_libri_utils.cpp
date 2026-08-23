@@ -119,7 +119,9 @@ void test_libri_gw_scalar_complex_contraction()
     gw.cal_Sigmas();
 
     const auto &sigma = gw.Sigmas.at(0).at({0, origin});
-    assert(sigma.shape == std::vector<std::size_t>({1, 1}));
+    assert(sigma.shape.size() == 2);
+    assert(sigma.shape[0] == 1);
+    assert(sigma.shape[1] == 1);
     const complex_t expected = 4.0 * c * c * w * g;
     assert(std::abs(sigma(0, 0) - expected) < 1e-12);
 }
@@ -375,11 +377,26 @@ void test_libri_gw_two_atom_cell_gauge_covariance()
         }
         return output;
     };
+    auto normalize_cell_labels = [&](const tensor_map_t &input) {
+        tensor_map_t output;
+        for (const auto &[atom_i, blocks] : input)
+        {
+            for (const auto &[jr, tensor] : blocks)
+            {
+                auto normalized_r = jr.second;
+                normalized_r[0] %= period_x;
+                if (normalized_r[0] < 0) normalized_r[0] += period_x;
+                output[atom_i][{jr.first, normalized_r}] = tensor;
+            }
+        }
+        return output;
+    };
 
     const auto sigma = contract(cs, ws, gs);
-    const auto shifted_sigma =
-        contract(gauge_transform(cs), gauge_transform(ws), gauge_transform(gs));
-    const auto expected_shifted_sigma = gauge_transform(sigma);
+    const auto shifted_sigma = normalize_cell_labels(
+        contract(gauge_transform(cs), gauge_transform(ws), gauge_transform(gs)));
+    const auto expected_shifted_sigma =
+        normalize_cell_labels(gauge_transform(sigma));
 
     assert(shifted_sigma.size() == expected_shifted_sigma.size());
     for (const auto &[atom_i, expected_blocks] : expected_shifted_sigma)
@@ -391,7 +408,9 @@ void test_libri_gw_two_atom_cell_gauge_covariance()
         {
             const auto actual = actual_i->second.find(jr);
             assert(actual != actual_i->second.end());
-            assert(actual->second.shape == expected.shape);
+            assert(actual->second.shape.size() == expected.shape.size());
+            for (std::size_t idim = 0; idim < expected.shape.size(); ++idim)
+                assert(actual->second.shape[idim] == expected.shape[idim]);
             assert(std::abs(actual->second(0, 0) - expected(0, 0)) < 1e-12);
         }
     }
