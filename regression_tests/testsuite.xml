@@ -74,6 +74,18 @@
                 comparison="cmp_float.abs_diff(1e-4)"
       />
     </testcase>
+
+    <testcase name="BN compact Delta-ST reader v1 with analytic headwing" directory="rpa_abacus_BN_sternheimer_headwing_v1">
+      <run ntasks_disable="none"
+           nthreads_disable="none"
+           ntasks_enable="none"
+           nthreads_enable="none"
+      />
+      <validate name="Delta-ST correlation energy"
+                regex="Total Sternheimer EcRPA: \s+([-+]?\d*\.\d+)"
+                comparison="cmp_float.abs_diff(1e-10)"
+      />
+    </testcase>
   </group>
 
   <group name="Exact-exchange (EXX) potentials" prefix="EXX">

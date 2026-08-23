@@ -3,7 +3,9 @@
 #include <cassert>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <limits>
@@ -997,6 +999,240 @@ void test_strict_2d_diagnostic_schema_and_qpoint_order_are_stable()
         std::cerr << "strict 2D diagnostics did not place Gamma first" << std::endl;
         std::abort();
     }
+}
+
+void test_strict_2d_qshell_uses_minimum_image_q()
+{
+    PeriodicBoundaryData pbc;
+    pbc.set_latvec({1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0});
+
+    const Vector3_Order<double> wrapped_q{11.0 / 12.0, 1.0 / 12.0, 0.0};
+    const auto minimum_q = librpa_int::strict_2d_minimum_image_q(pbc, wrapped_q);
+    require_double_close(minimum_q.x, -1.0 / 12.0, 1.0e-14);
+    require_double_close(minimum_q.y, 1.0 / 12.0, 1.0e-14);
+    require_double_close(minimum_q.z, 0.0, 1.0e-14);
+
+    using librpa_int::classify_strict_2d_qshell;
+    using librpa_int::Strict2dQshellRegion;
+    const double first_q_norm = 1.0 / 12.0;
+    assert(classify_strict_2d_qshell(0.0, first_q_norm) == Strict2dQshellRegion::gamma);
+    assert(classify_strict_2d_qshell(first_q_norm, first_q_norm) == Strict2dQshellRegion::first);
+    assert(classify_strict_2d_qshell(2.0 * first_q_norm, first_q_norm) ==
+           Strict2dQshellRegion::rest);
+}
+
+void test_strict_2d_qradial_partitions_rest_exactly()
+{
+    using librpa_int::classify_strict_2d_qradial;
+    using librpa_int::Strict2dQradialRegion;
+
+    const double first_q_norm = 0.125;
+    assert(classify_strict_2d_qradial(0.0, first_q_norm) ==
+           Strict2dQradialRegion::gamma_or_first);
+    assert(classify_strict_2d_qradial(first_q_norm, first_q_norm) ==
+           Strict2dQradialRegion::gamma_or_first);
+    assert(classify_strict_2d_qradial(1.5 * first_q_norm, first_q_norm) ==
+           Strict2dQradialRegion::near);
+    assert(classify_strict_2d_qradial(2.5 * first_q_norm, first_q_norm) ==
+           Strict2dQradialRegion::near);
+    assert(classify_strict_2d_qradial(2.5 * first_q_norm + 1.0e-9, first_q_norm) ==
+           Strict2dQradialRegion::middle);
+    assert(classify_strict_2d_qradial(4.5 * first_q_norm, first_q_norm) ==
+           Strict2dQradialRegion::middle);
+    assert(classify_strict_2d_qradial(4.5 * first_q_norm + 1.0e-9, first_q_norm) ==
+           Strict2dQradialRegion::far);
+
+    // The two numerically distinct lengths below are the same first shell in
+    // the MoS2 N12 grid; the difference comes from rounded lattice data.
+    const double mos2_first_q_norm = 0.1004876;
+    const double mos2_equivalent_first_q_norm = 0.1004992;
+    assert(classify_strict_2d_qradial(mos2_equivalent_first_q_norm, mos2_first_q_norm) ==
+           Strict2dQradialRegion::gamma_or_first);
+
+    assert(!librpa_int::strict_2d_qradial_is_corner(6.5 * first_q_norm, first_q_norm));
+    assert(librpa_int::strict_2d_qradial_is_corner(
+        (6.5 + 1.0e-9) * first_q_norm, first_q_norm));
+
+    const double hbn_first_q_norm = 0.12777240809249668;
+    assert(!librpa_int::strict_2d_qradial_is_corner(
+        6.0 * hbn_first_q_norm, hbn_first_q_norm));
+    assert(librpa_int::strict_2d_qradial_is_corner(
+        6.928203230275509 * hbn_first_q_norm, hbn_first_q_norm));
+}
+
+void test_strict_2d_first_shell_wc_block_diagnostic_is_exactly_additive()
+{
+    using librpa_int::strict_2d_first_shell_wc_block_diagnostic;
+    using librpa_int::strict_2d_wc_block_keeps;
+    using librpa_int::Strict2dWcBlock;
+
+    assert(strict_2d_first_shell_wc_block_diagnostic(nullptr) == Strict2dWcBlock::full);
+    assert(strict_2d_first_shell_wc_block_diagnostic("") == Strict2dWcBlock::full);
+    assert(strict_2d_first_shell_wc_block_diagnostic("head") == Strict2dWcBlock::head);
+    assert(strict_2d_first_shell_wc_block_diagnostic("wing") == Strict2dWcBlock::wing);
+    assert(strict_2d_first_shell_wc_block_diagnostic("body") == Strict2dWcBlock::body);
+
+    constexpr int dimension = 4;
+    constexpr int head_index = 2;
+    for (int row = 0; row != dimension; ++row)
+    {
+        for (int column = 0; column != dimension; ++column)
+        {
+            const int kept_count =
+                static_cast<int>(strict_2d_wc_block_keeps(Strict2dWcBlock::head, row, column,
+                                                          head_index)) +
+                static_cast<int>(strict_2d_wc_block_keeps(Strict2dWcBlock::wing, row, column,
+                                                          head_index)) +
+                static_cast<int>(strict_2d_wc_block_keeps(Strict2dWcBlock::body, row, column,
+                                                          head_index));
+            assert(kept_count == 1);
+
+            const std::complex<double> value{1.0 + row, -2.0 - column};
+            std::complex<double> reconstructed{0.0, 0.0};
+            for (const auto block :
+                 {Strict2dWcBlock::head, Strict2dWcBlock::wing, Strict2dWcBlock::body})
+                if (strict_2d_wc_block_keeps(block, row, column, head_index))
+                    reconstructed += value;
+            if (reconstructed != value) std::abort();
+        }
+    }
+
+    for (const auto block :
+         {Strict2dWcBlock::head, Strict2dWcBlock::wing, Strict2dWcBlock::body})
+        for (int row = 0; row != dimension; ++row)
+            for (int column = 0; column != dimension; ++column)
+                assert(strict_2d_wc_block_keeps(block, row, column, head_index) ==
+                       strict_2d_wc_block_keeps(block, column, row, head_index));
+
+    bool rejected = false;
+    try
+    {
+        (void)strict_2d_first_shell_wc_block_diagnostic("head-body");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
+void test_strict_2d_alpha_wc_diagnostic_requires_explicit_reference()
+{
+    assert(!librpa_int::strict_2d_alpha_wc_diagnostic_requested(nullptr));
+    assert(!librpa_int::strict_2d_alpha_wc_diagnostic_requested(""));
+    assert(librpa_int::strict_2d_alpha_wc_diagnostic_requested("0.25"));
+
+    bool rejected_other_value = false;
+    try
+    {
+        librpa_int::strict_2d_alpha_wc_diagnostic_requested("0.5");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected_other_value = true;
+    }
+    assert(rejected_other_value);
+}
+
+void test_strict_2d_first_shell_analytic_wc_diagnostic_requires_explicit_enable()
+{
+    assert(!librpa_int::strict_2d_first_shell_analytic_wc_diagnostic_requested(nullptr));
+    assert(!librpa_int::strict_2d_first_shell_analytic_wc_diagnostic_requested(""));
+    assert(librpa_int::strict_2d_first_shell_analytic_wc_diagnostic_requested("enabled"));
+
+    bool rejected = false;
+    try
+    {
+        librpa_int::strict_2d_first_shell_analytic_wc_diagnostic_requested("true");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
+void test_strict_2d_finite_q_matrix_dump_selection_is_read_only_and_bounded()
+{
+    assert(!librpa_int::strict_2d_should_dump_finite_q_matrix(0, 0, true));
+    assert(librpa_int::strict_2d_should_dump_finite_q_matrix(1, 0, false));
+    assert(librpa_int::strict_2d_should_dump_finite_q_matrix(12, 0, false));
+    assert(!librpa_int::strict_2d_should_dump_finite_q_matrix(13, 0, false));
+    assert(!librpa_int::strict_2d_should_dump_finite_q_matrix(1, 1, false));
+
+    bool rejected = false;
+    try
+    {
+        (void)librpa_int::strict_2d_should_dump_finite_q_matrix(1, 0, false, 0);
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
+void test_strict_2d_omega0_diagnostic_directory_is_explicit_and_normalized()
+{
+    assert(librpa_int::strict_2d_omega0_diagnostic_directory(nullptr).empty());
+    assert(librpa_int::strict_2d_omega0_diagnostic_directory("").empty());
+    assert(librpa_int::strict_2d_omega0_diagnostic_directory("omega0") == "omega0/");
+    assert(librpa_int::strict_2d_omega0_diagnostic_directory("omega0/") == "omega0/");
+}
+
+void test_strict_2d_omega0_override_basis_modes_are_mutually_exclusive()
+{
+    const auto none = librpa_int::strict_2d_omega0_override_directories(nullptr, nullptr);
+    assert(none.coulomb_basis.empty());
+    assert(none.auxiliary_basis.empty());
+
+    const auto auxiliary = librpa_int::strict_2d_omega0_override_directories(nullptr, "omega0_aux");
+    assert(auxiliary.coulomb_basis.empty());
+    assert(auxiliary.auxiliary_basis == "omega0_aux/");
+
+    bool rejected = false;
+    try
+    {
+        (void)librpa_int::strict_2d_omega0_override_directories("omega0_coul", "omega0_aux");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
+void test_strict_2d_omega0_override_reader_validates_shape_and_payload()
+{
+    const std::string path = "strict2d_omega0_override_test.bin";
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        const char magic[8] = {'L', 'R', '2', 'D', 'W', 'C', '0', '1'};
+        const std::int32_t rows = 2, cols = 2;
+        const double values[8] = {1.0, 0.5, -2.0, 3.0, 4.0, -1.0, 0.25, 0.0};
+        output.write(magic, sizeof(magic));
+        output.write(reinterpret_cast<const char *>(&rows), sizeof(rows));
+        output.write(reinterpret_cast<const char *>(&cols), sizeof(cols));
+        output.write(reinterpret_cast<const char *>(values), sizeof(values));
+    }
+    const auto matrix = librpa_int::read_strict_2d_omega0_override_binary(path, 2);
+    assert(matrix.size() == 4);
+    assert_complex_close(matrix[0], {1.0, 0.5}, 1.0e-15);
+    assert_complex_close(matrix[1], {-2.0, 3.0}, 1.0e-15);
+    assert_complex_close(matrix[2], {4.0, -1.0}, 1.0e-15);
+    assert_complex_close(matrix[3], {0.25, 0.0}, 1.0e-15);
+
+    bool rejected_shape = false;
+    try
+    {
+        (void)librpa_int::read_strict_2d_omega0_override_binary(path, 3);
+    }
+    catch (const std::runtime_error &)
+    {
+        rejected_shape = true;
+    }
+    assert(rejected_shape);
+    std::remove(path.c_str());
 }
 
 void test_strict_2d_block_metrics_separate_head_wings_and_body()
@@ -3297,6 +3533,15 @@ int main(int argc, char *argv[])
         test_strict_2d_gw_routes_gamma_through_complete_wc_average();
         test_strict_2d_gw_fails_closed_for_incomplete_runtime_configuration();
         test_strict_2d_diagnostic_schema_and_qpoint_order_are_stable();
+        test_strict_2d_qshell_uses_minimum_image_q();
+        test_strict_2d_qradial_partitions_rest_exactly();
+        test_strict_2d_first_shell_wc_block_diagnostic_is_exactly_additive();
+        test_strict_2d_alpha_wc_diagnostic_requires_explicit_reference();
+        test_strict_2d_first_shell_analytic_wc_diagnostic_requires_explicit_enable();
+        test_strict_2d_finite_q_matrix_dump_selection_is_read_only_and_bounded();
+        test_strict_2d_omega0_diagnostic_directory_is_explicit_and_normalized();
+        test_strict_2d_omega0_override_basis_modes_are_mutually_exclusive();
+        test_strict_2d_omega0_override_reader_validates_shape_and_payload();
         test_strict_2d_block_metrics_separate_head_wings_and_body();
         test_strict_2d_alpha_reference_averages_bare_coulomb();
         test_strict_2d_pw_wc_transforms_to_auxiliary_coulomb_basis();
