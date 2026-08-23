@@ -46,44 +46,6 @@ static std::vector<int> build_atom_offsets(const std::map<atom_t, size_t>& atom_
     return offsets;
 }
 
-static ComplexMatrix extract_atom_block(const ComplexMatrix& matrix,
-                                        const atom_t atom_i,
-                                        const atom_t atom_j,
-                                        const std::map<atom_t, size_t>& atom_nw,
-                                        const std::vector<int>& offsets)
-{
-    const int ni = static_cast<int>(atom_nw.at(atom_i));
-    const int nj = static_cast<int>(atom_nw.at(atom_j));
-    ComplexMatrix block(ni, nj);
-    const int row0 = offsets[atom_i];
-    const int col0 = offsets[atom_j];
-    for (int i = 0; i < ni; ++i)
-    {
-        for (int j = 0; j < nj; ++j)
-        {
-            block(i, j) = matrix(row0 + i, col0 + j);
-        }
-    }
-    return block;
-}
-
-static void set_atom_block(ComplexMatrix& matrix,
-                           const atom_t atom_i,
-                           const atom_t atom_j,
-                           const ComplexMatrix& block,
-                           const std::vector<int>& offsets)
-{
-    const int row0 = offsets[atom_i];
-    const int col0 = offsets[atom_j];
-    for (int i = 0; i < block.nr; ++i)
-    {
-        for (int j = 0; j < block.nc; ++j)
-        {
-            matrix(row0 + i, col0 + j) = block(i, j);
-        }
-    }
-}
-
 static std::vector<int> build_rspace_inverse_map(const SymmetryContext& ctx)
 {
     std::vector<int> inverse_map(ctx.rspace_operations.size(), -1);
@@ -1392,7 +1354,7 @@ static std::pair<atom_t, atom_t> canonicalize_symmetry_upper_atom_pair(
                               : std::make_pair(atom_j, atom_i);
 }
 
-static std::vector<const SymmetryKAtomRotation*> build_symmetry_rotations_by_from(
+static std::vector<const SymmetryKAtomRotation*> build_symmetry_rotations_by_to(
     const SymmetryKStarMember& member)
 {
     int max_atom_index = -1;
@@ -1401,13 +1363,13 @@ static std::vector<const SymmetryKAtomRotation*> build_symmetry_rotations_by_fro
         max_atom_index = std::max(max_atom_index, atom_rotation.atom_from);
         max_atom_index = std::max(max_atom_index, atom_rotation.atom_to);
     }
-    std::vector<const SymmetryKAtomRotation*> rotations_by_from(
+    std::vector<const SymmetryKAtomRotation*> rotations_by_to(
         static_cast<std::size_t>(max_atom_index + 1), nullptr);
     for (const auto& atom_rotation : member.atom_rotations)
     {
-        rotations_by_from.at(static_cast<std::size_t>(atom_rotation.atom_from)) = &atom_rotation;
+        rotations_by_to.at(static_cast<std::size_t>(atom_rotation.atom_to)) = &atom_rotation;
     }
-    return rotations_by_from;
+    return rotations_by_to;
 }
 
 std::set<std::pair<atom_t, atom_t>> build_symmetry_upper_atom_pair_closure(
@@ -1428,25 +1390,24 @@ std::set<std::pair<atom_t, atom_t>> build_symmetry_upper_atom_pair_closure(
         const auto snapshot_pairs = closure_pairs;
         for (const auto& member : star.members)
         {
-            const auto rotations_by_from = build_symmetry_rotations_by_from(member);
+            const auto rotations_by_to = build_symmetry_rotations_by_to(member);
             for (const auto& atom_pair : snapshot_pairs)
             {
-                if (static_cast<std::size_t>(atom_pair.first) >= rotations_by_from.size()
-                    || static_cast<std::size_t>(atom_pair.second) >= rotations_by_from.size())
+                if (static_cast<std::size_t>(atom_pair.first) >= rotations_by_to.size() ||
+                    static_cast<std::size_t>(atom_pair.second) >= rotations_by_to.size())
                 {
                     throw LIBRPA_RUNTIME_ERROR(
                         "Atom-pair closure requested an atom outside the loaded star");
                 }
-                const auto* rot_i = rotations_by_from[static_cast<std::size_t>(atom_pair.first)];
-                const auto* rot_j = rotations_by_from[static_cast<std::size_t>(atom_pair.second)];
+                const auto* rot_i = rotations_by_to[static_cast<std::size_t>(atom_pair.first)];
+                const auto* rot_j = rotations_by_to[static_cast<std::size_t>(atom_pair.second)];
                 if (rot_i == nullptr || rot_j == nullptr)
                 {
                     throw LIBRPA_RUNTIME_ERROR(
                         "Atom-pair closure found an incomplete atom permutation");
                 }
                 const auto source_pair = canonicalize_symmetry_upper_atom_pair(
-                    static_cast<atom_t>(rot_i->atom_to),
-                    static_cast<atom_t>(rot_j->atom_to));
+                    static_cast<atom_t>(rot_i->atom_from), static_cast<atom_t>(rot_j->atom_from));
                 if (closure_pairs.insert(source_pair).second)
                 {
                     changed = true;
@@ -1492,6 +1453,7 @@ struct KSpaceRotationPlan
     bool apply_time_reversal = false;
     bool apply_target_gauge = false;
     std::vector<const SymmetryKAtomRotation*> rotations_by_from;
+    std::vector<const SymmetryKAtomRotation*> rotations_by_to;
     std::vector<ComplexMatrix> atom_M_blocks;
     std::vector<std::complex<double>> atom_target_phases;
 };
@@ -1507,8 +1469,7 @@ static KSpaceRotationPlan build_kspace_rotation_plan_skeleton(
     KSpaceRotationPlan plan;
     plan.apply_time_reversal = use_time_reversal || member.time_reversal;
     plan.rotations_by_from.assign(atom_counts.size(), nullptr);
-
-    std::vector<bool> visited_to(atom_counts.size(), false);
+    plan.rotations_by_to.assign(atom_counts.size(), nullptr);
     for (const auto& atom_rotation : member.atom_rotations)
     {
         if (atom_rotation.atom_from < 0
@@ -1520,7 +1481,7 @@ static KSpaceRotationPlan build_kspace_rotation_plan_skeleton(
         }
         plan.rotations_by_from[static_cast<std::size_t>(atom_rotation.atom_from)] =
             &atom_rotation;
-        visited_to[static_cast<std::size_t>(atom_rotation.atom_to)] = true;
+        plan.rotations_by_to[static_cast<std::size_t>(atom_rotation.atom_to)] = &atom_rotation;
     }
 
     for (std::size_t atom = 0; atom < atom_counts.size(); ++atom)
@@ -1530,7 +1491,7 @@ static KSpaceRotationPlan build_kspace_rotation_plan_skeleton(
             throw LIBRPA_RUNTIME_ERROR(std::string(label)
                                       + " atom rotations do not cover every atom");
         }
-        if (!visited_to[atom])
+        if (plan.rotations_by_to[atom] == nullptr)
         {
             throw LIBRPA_RUNTIME_ERROR(std::string(label)
                                       + " atom mapping is not a full permutation");
@@ -1655,24 +1616,22 @@ static symmetry_atom_block_matrix_map_t rotate_symmetry_kspace_operator_blocks_i
                                                                 "K-space rotation");
 
     symmetry_atom_block_matrix_map_t rotated_blocks;
-    for (std::size_t atom_i = 0; atom_i < atom_nbasis.size(); ++atom_i)
+    for (std::size_t target_i = 0; target_i < atom_nbasis.size(); ++target_i)
     {
-        const auto* rot_i = plan.rotations_by_from[atom_i];
-        const auto& M_i = plan.atom_M_blocks[atom_i];
-        for (std::size_t atom_j = 0; atom_j < atom_nbasis.size(); ++atom_j)
+        const auto* rot_i = plan.rotations_by_to[target_i];
+        const auto source_i = static_cast<atom_t>(rot_i->atom_from);
+        const auto& M_i = plan.atom_M_blocks[static_cast<std::size_t>(source_i)];
+        for (std::size_t target_j = 0; target_j < atom_nbasis.size(); ++target_j)
         {
-            if (target_atom_pairs != nullptr
-                && target_atom_pairs->count({static_cast<atom_t>(atom_i),
-                                             static_cast<atom_t>(atom_j)}) == 0)
+            if (target_atom_pairs != nullptr &&
+                target_atom_pairs->count(
+                    {static_cast<atom_t>(target_i), static_cast<atom_t>(target_j)}) == 0)
             {
                 continue;
             }
-            const auto* rot_j = plan.rotations_by_from[atom_j];
-            const auto& M_j = plan.atom_M_blocks[atom_j];
-            const auto target_i = static_cast<atom_t>(atom_i);
-            const auto target_j = static_cast<atom_t>(atom_j);
-            const auto source_i = static_cast<atom_t>(rot_i->atom_to);
-            const auto source_j = static_cast<atom_t>(rot_j->atom_to);
+            const auto* rot_j = plan.rotations_by_to[target_j];
+            const auto source_j = static_cast<atom_t>(rot_j->atom_from);
+            const auto& M_j = plan.atom_M_blocks[static_cast<std::size_t>(source_j)];
             ComplexMatrix block_ibz;
             try
             {
@@ -1711,11 +1670,12 @@ static symmetry_atom_block_matrix_map_t rotate_symmetry_kspace_operator_blocks_i
             }
             if (plan.apply_target_gauge)
             {
-                const auto left_phase = plan.atom_target_phases[atom_i];
-                const auto right_phase = plan.atom_target_phases[atom_j];
+                const auto left_phase = plan.atom_target_phases[static_cast<std::size_t>(source_i)];
+                const auto right_phase =
+                    plan.atom_target_phases[static_cast<std::size_t>(source_j)];
                 block_rotated *= left_phase * std::conj(right_phase);
             }
-            rotated_blocks[static_cast<atom_t>(atom_i)][static_cast<atom_t>(atom_j)] =
+            rotated_blocks[static_cast<atom_t>(target_i)][static_cast<atom_t>(target_j)] =
                 std::move(block_rotated);
         }
     }
@@ -2023,52 +1983,9 @@ ComplexMatrix build_symmetry_kspace_operator_transform_matrix(
     const bool use_time_reversal,
     const Vector3_Order<double>* k_bz_target)
 {
-    const auto offsets = build_atom_offsets(atom_nbasis);
-    const int nbasis_total = offsets.back();
-    const auto plan = build_operator_block_kspace_rotation_plan(
-        ctx, layouts, member, atom_nbasis, k_ibz, use_time_reversal, k_bz_target,
-        "K-space operator transform matrix");
-
-    // A has target-atom rows and source-atom columns. Its blocks are M_I^T, so
-    // non-TR operators transform as O_bz = A O_ibz A^dagger even when symmetry
-    // permutes atoms. For TR members, O_bz = A* O_ibz* A^T.
-    ComplexMatrix transform(nbasis_total, nbasis_total);
-    for (std::size_t atom = 0; atom != atom_nbasis.size(); ++atom)
-    {
-        const auto* atom_rotation = plan.rotations_by_from.at(atom);
-        if (atom_rotation == nullptr)
-        {
-            throw LIBRPA_RUNTIME_ERROR(
-                "K-space operator transform found an incomplete atom map");
-        }
-        ComplexMatrix block = transpose(plan.atom_M_blocks.at(atom), false);
-        if (plan.apply_target_gauge)
-        {
-            const auto phase = plan.apply_time_reversal
-                                   ? std::conj(plan.atom_target_phases.at(atom))
-                                   : plan.atom_target_phases.at(atom);
-            block *= phase;
-        }
-
-        const int row_offset = offsets.at(atom);
-        const int col_offset = offsets.at(static_cast<std::size_t>(atom_rotation->atom_to));
-        const int nrows = offsets.at(atom + 1) - row_offset;
-        const int ncols = offsets.at(static_cast<std::size_t>(atom_rotation->atom_to) + 1)
-                          - col_offset;
-        if (block.nr != nrows || block.nc != ncols)
-        {
-            throw LIBRPA_RUNTIME_ERROR(
-                "K-space operator transform block dimension mismatch");
-        }
-        for (int row = 0; row != nrows; ++row)
-        {
-            for (int col = 0; col != ncols; ++col)
-            {
-                transform(row_offset + row, col_offset + col) = block(row, col);
-            }
-        }
-    }
-    return transform;
+    const auto wavefunction_rotation = build_symmetry_kspace_rotation_matrix(
+        ctx, layouts, member, atom_nbasis, k_ibz, use_time_reversal, k_bz_target);
+    return transpose(wavefunction_rotation, false);
 }
 
 ComplexMatrix rotate_symmetry_kspace_matrix(const SymmetryContext& ctx,
@@ -2104,71 +2021,13 @@ ComplexMatrix rotate_symmetry_kspace_matrix(const SymmetryContext& ctx,
         throw LIBRPA_RUNTIME_ERROR("The input matrix dimension is incompatible with the AO basis layout");
     }
 
-    const auto plan = build_operator_block_kspace_rotation_plan(ctx,
-                                                                layouts,
-                                                                member,
-                                                                atom_nw,
-                                                                k_ibz,
-                                                                use_time_reversal,
-                                                                k_bz_target,
-                                                                "AO k-space rotation");
-
-    ComplexMatrix rotated_matrix(nao_total, nao_total);
-
-    // Apply the block-level rotation formula.
-    //
-    // ABACUS col-major formula:  D^T(k_bz) = M† · D^T(k_ibz) · M
-    // Row-major equivalent:      D(k_bz)   = M^T · D(k_ibz) · M*
-    //
-    // M[S(I), I] is the internal ABACUS Bloch rotation block reconstructed from
-    // the generated shell rotation times the return-lattice phase correction.
-    //
-    // Block formulas (M_I denotes M[S(I), I]):
-    //   non-TRS:  D_bz[I, J] = M_I^T  · D_ibz[S(I), S(J)]  · conj(M_J)
-    //   TRS:      D_bz[I, J] = M_I†   · D_ibz[S(I), S(J)]* · M_J
-    //
-    // Source indices: S(I) = atom_to,  destination indices: I = atom_from.
-    for (std::size_t atom_i = 0; atom_i < atom_nw.size(); ++atom_i)
+    const auto transform = build_symmetry_kspace_operator_transform_matrix(
+        ctx, layouts, member, atom_nw, k_ibz, use_time_reversal, k_bz_target);
+    if (use_time_reversal || member.time_reversal)
     {
-        const auto* rot_i = plan.rotations_by_from[atom_i];
-        const auto& M_i = plan.atom_M_blocks[atom_i];
-        for (std::size_t atom_j = 0; atom_j < atom_nw.size(); ++atom_j)
-        {
-            const auto* rot_j = plan.rotations_by_from[atom_j];
-            const auto& M_j = plan.atom_M_blocks[atom_j];
-            // Read from D_ibz at the MAPPED atom positions S(I), S(J)
-            const ComplexMatrix block_ibz =
-                extract_atom_block(matrix_ibz,
-                                   static_cast<atom_t>(rot_i->atom_to),
-                                   static_cast<atom_t>(rot_j->atom_to),
-                                   atom_nw, offsets);
-            ComplexMatrix block_rotated;
-            if (plan.apply_time_reversal)
-            {
-                // TRS: D_bz[I,J] = M_I† · conj(D_ibz[S(I),S(J)]) · M_J
-                block_rotated = transpose(M_i, true) * conj(block_ibz) * M_j;
-            }
-            else
-            {
-                // Space group: D_bz[I,J] = M_I^T · D_ibz[S(I),S(J)] · conj(M_J)
-                block_rotated = transpose(M_i, false) * block_ibz * conj(M_j);
-            }
-            if (plan.apply_target_gauge)
-            {
-                const auto left_phase = plan.atom_target_phases[atom_i];
-                const auto right_phase = plan.atom_target_phases[atom_j];
-                block_rotated *= left_phase * std::conj(right_phase);
-            }
-            // Write to D_bz at the ORIGINAL atom positions I, J
-            set_atom_block(rotated_matrix,
-                           static_cast<atom_t>(atom_i),
-                           static_cast<atom_t>(atom_j),
-                           block_rotated,
-                           offsets);
-        }
+        return conj(transform) * conj(matrix_ibz) * transpose(transform, false);
     }
-
-    return rotated_matrix;
+    return transform * matrix_ibz * transpose(transform, true);
 }
 
 symmetry_irreducible_sector_t build_symmetry_rspace_irreducible_sector(

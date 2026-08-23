@@ -1025,7 +1025,7 @@ void test_strict_2d_first_shell_wc_block_diagnostic_is_exactly_additive()
                  {Strict2dWcBlock::head, Strict2dWcBlock::wing, Strict2dWcBlock::body})
                 if (strict_2d_wc_block_keeps(block, row, column, head_index))
                     reconstructed += value;
-            assert_complex_close(reconstructed, value, 0.0);
+            if (reconstructed != value) std::abort();
         }
     }
 

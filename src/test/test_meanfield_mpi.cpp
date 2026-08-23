@@ -660,8 +660,18 @@ static void test_dmat_gf_kblacs_reduced_kstar_matches_full_bz_fourier()
             for (int iloc = 0; iloc != desc_dm.m_loc(); ++iloc)
             {
                 const int iglob = desc_dm.indx_l2g_r(iloc);
-                assert(fequal(rmat(iloc, jloc), expected_dmat.at(R)(iglob, jglob),
-                              cplxdb{1e-12, 0.0}));
+                if (!fequal(rmat(iloc, jloc), expected_dmat.at(R)(iglob, jglob),
+                            cplxdb{1e-12, 0.0}))
+                {
+                    std::cerr << "rank=" << myid_global << " R=" << R << " local=(" << iloc << ","
+                              << jloc << ")"
+                              << " global=(" << iglob << "," << jglob << ")"
+                              << " actual=" << rmat(iloc, jloc)
+                              << " expected=" << expected_dmat.at(R)(iglob, jglob) << " diff="
+                              << std::abs(rmat(iloc, jloc) - expected_dmat.at(R)(iglob, jglob))
+                              << std::endl;
+                    std::abort();
+                }
             }
         }
     }
@@ -676,8 +686,20 @@ static void test_dmat_gf_kblacs_reduced_kstar_matches_full_bz_fourier()
                 for (int iloc = 0; iloc != desc_dm.m_loc(); ++iloc)
                 {
                     const int iglob = desc_dm.indx_l2g_r(iloc);
-                    assert(fequal(rmat(iloc, jloc), expected_gf.at(tau).at(R)(iglob, jglob),
-                                  cplxdb{1e-12, 0.0}));
+                    if (!fequal(rmat(iloc, jloc), expected_gf.at(tau).at(R)(iglob, jglob),
+                                cplxdb{1e-12, 0.0}))
+                    {
+                        std::cerr << "rank=" << myid_global << " tau=" << tau << " R=" << R
+                                  << " local=(" << iloc << "," << jloc << ")"
+                                  << " global=(" << iglob << "," << jglob << ")"
+                                  << " actual=" << rmat(iloc, jloc)
+                                  << " expected=" << expected_gf.at(tau).at(R)(iglob, jglob)
+                                  << " diff="
+                                  << std::abs(rmat(iloc, jloc) -
+                                              expected_gf.at(tau).at(R)(iglob, jglob))
+                                  << std::endl;
+                        std::abort();
+                    }
                 }
             }
         }

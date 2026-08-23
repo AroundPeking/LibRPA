@@ -74,17 +74,17 @@ static void check_same_imagtimes(const std::vector<double> &imagtimes,
     }
 }
 
-static std::vector<const SymmetryKAtomRotation*> build_rotations_by_from(
+static std::vector<const SymmetryKAtomRotation *> build_rotations_by_to(
     const SymmetryKStarMember &member, const std::size_t n_atoms)
 {
     std::vector<const SymmetryKAtomRotation*> rotations(n_atoms, nullptr);
     for (const auto &rotation : member.atom_rotations)
     {
-        if (rotation.atom_from < 0 || rotation.atom_from >= static_cast<int>(n_atoms))
+        if (rotation.atom_to < 0 || rotation.atom_to >= static_cast<int>(n_atoms))
         {
-            throw LIBRPA_RUNTIME_ERROR("k-star atom rotation source is out of range");
+            throw LIBRPA_RUNTIME_ERROR("k-star atom rotation target is out of range");
         }
-        rotations[static_cast<std::size_t>(rotation.atom_from)] = &rotation;
+        rotations[static_cast<std::size_t>(rotation.atom_to)] = &rotation;
     }
     for (const auto *rotation : rotations)
     {
@@ -101,7 +101,7 @@ static std::unordered_map<int, std::vector<atpair_t>> build_source_pair_requests
     const SymmetryKStarMember &member,
     const std::size_t n_atoms)
 {
-    const auto rotations = build_rotations_by_from(member, n_atoms);
+    const auto rotations = build_rotations_by_to(member, n_atoms);
     std::unordered_map<int, std::vector<atpair_t>> requests;
     for (const auto &[pid, pairs] : target_pairs)
     {
@@ -110,8 +110,8 @@ static std::unordered_map<int, std::vector<atpair_t>> build_source_pair_requests
         {
             const auto *rot_i = rotations.at(static_cast<std::size_t>(pair.first));
             const auto *rot_j = rotations.at(static_cast<std::size_t>(pair.second));
-            source_pairs.insert({static_cast<atom_t>(rot_i->atom_to),
-                                 static_cast<atom_t>(rot_j->atom_to)});
+            source_pairs.insert(
+                {static_cast<atom_t>(rot_i->atom_from), static_cast<atom_t>(rot_j->atom_from)});
         }
         requests[pid] = std::vector<atpair_t>(source_pairs.cbegin(), source_pairs.cend());
     }
