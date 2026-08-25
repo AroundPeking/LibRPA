@@ -107,6 +107,28 @@ static void test_full_scf_kgrids_keep_loaded_order()
     assert(!pbc.kgrid_uses_time_reversal);
 }
 
+static void test_full_scf_kgrids_snap_cartesian_roundoff_to_bvk_mesh()
+{
+    PeriodicBoundaryData pbc;
+    pbc.set_latvec({1, 0, 0, 0, 1, 0, 0, 0, 1});
+
+    const double roundoff = 1.4e-6;
+    const std::vector<double> kvecs{
+        0.0, 0.0, 0.0,
+        librpa_int::TWO_PI * (0.25 - roundoff), 0.0, 0.0,
+        librpa_int::TWO_PI * (0.50 - 2.0 * roundoff), 0.0, 0.0,
+        librpa_int::TWO_PI * (0.75 - 3.0 * roundoff), 0.0, 0.0,
+    };
+    pbc.set_kgrids_kvec(4, 1, 1, kvecs);
+
+    for (int ik = 0; ik != 4; ++ik)
+    {
+        const double expected = 0.25 * ik;
+        assert(std::abs(pbc.kfrac_list[ik].x - expected) < 1e-14);
+        assert(std::abs(pbc.klist[ik].x - expected) < 1e-14);
+    }
+}
+
 static void test_reduced_scf_kgrids()
 {
     PeriodicBoundaryData pbc;
@@ -244,6 +266,7 @@ int main (int argc, char *argv[])
     test_periodic_boundary_data();
     test_kgrids_with_weighted_coulomb_mapping();
     test_full_scf_kgrids_keep_loaded_order();
+    test_full_scf_kgrids_snap_cartesian_roundoff_to_bvk_mesh();
     test_reduced_scf_kgrids();
     test_incomplete_time_reversal_reduced_scf_kgrids();
     test_irreducible_kgrids_from_symmetry_stars();

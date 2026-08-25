@@ -1368,6 +1368,8 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
     // arrdesc_pi.m_loc(),arrdesc_pi.n_loc(),arrdesc_pi.myprow(),arrdesc_pi.mypcol(),arrdesc_pi.nprows(),arrdesc_pi.npcols());
     complex<double> ln_det_loc(0.0, 0.0);
     complex<double> ln_det_all(0.0, 0.0);
+    int pivot_swaps_loc = 0;
+    int pivot_swaps = 0;
     // complex<double> det_loc(1.0,0.0);
     // complex<double> det_glo(0.0,0.0);
     // vector<complex<double>>  det_dig;
@@ -1391,19 +1393,10 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
             // det_dig.push_back(loc_piT(locr,locc));
             // det_dig_r.push_back(locr);
             // det_dig_c.push_back(locc);
-            complex<double> tmp_ln_det;
-            if (loc_piT(locr, locc).real() > 0)
-            {
-                tmp_ln_det = std::log(loc_piT(locr, locc));
-                // ln_det_dig.push_back(tmp_ln_det);
-            }
-            else
-            {
-                tmp_ln_det = std::log(-loc_piT(locr, locc));
-                // ln_det_dig.push_back(tmp_ln_det);
-            }
-            ln_det_loc += tmp_ln_det;
+            ln_det_loc += std::log(loc_piT(locr, locc));
         }
+        // PZGETRF replicates IPIV over process columns. Count it once.
+        if (arrdesc_pi.mypcol() == 0 && locr >= 0 && ipiv[locr] != ig + 1) ++pivot_swaps_loc;
     }
     double ln_end = omp_get_wtime();
 //     ComplexMatrix det_mm(loc_piT.nr(),loc_piT.nc());
@@ -1428,6 +1421,9 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
 
 
     MPI_Allreduce(&ln_det_loc,&ln_det_all,1,MPI_DOUBLE_COMPLEX,MPI_SUM, arrdesc_pi.comm());
+    MPI_Allreduce(&pivot_swaps_loc, &pivot_swaps, 1, MPI_INT, MPI_SUM, arrdesc_pi.comm());
+    if (pivot_swaps % 2 != 0) ln_det_all += complex<double>(0.0, PI);
+    ln_det_all.imag(std::remainder(ln_det_all.imag(), TWO_PI));
     double det_end = omp_get_wtime();
     // if(comm_h.myid == 0)
     //     lib_printf("    | Det time   trf: %f   ln: %f   allreduce: %f\n",trf_end-det_begin,ln_end-trf_end, det_end-ln_end);
