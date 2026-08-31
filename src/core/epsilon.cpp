@@ -1170,6 +1170,9 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 replace_gamma_headwing && headwing_settings.rpa_headwing_mode == "head_only";
             complex<double> rpa_for_omega_q = 0.0;
             bool rpa_for_omega_q_done = false;
+            complex<double> trace_pi_diag(0.0, 0.0);
+            complex<double> ln_det_diag(0.0, 0.0);
+            bool normal_split_diag = false;
             double headwing_proj_left_time = 0.0;
             double headwing_proj_right_time = 0.0;
             double headwing_trace_log_time = 0.0;
@@ -1257,6 +1260,9 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 MPI_Allreduce(&trace_pi_loc,&trace_pi,1,MPI_DOUBLE_COMPLEX,MPI_SUM,comm_h.comm);
                 delete[] ipiv;
                 rpa_for_omega_q = trace_pi + ln_det;
+                trace_pi_diag = trace_pi;
+                ln_det_diag = ln_det;
+                normal_split_diag = true;
             }
             double det_end = omp_get_wtime();
             comm_h.barrier();
@@ -1275,10 +1281,24 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                                freq, q.x, q.y, q.z, headwing_proj_left_time,
                                headwing_proj_right_time, headwing_trace_log_time);
                 }
-                //cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "      lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
                 const auto qweight = chi0.q_weight(q);
-                cRPA_q[q] += rpa_for_omega_q * freq_weight * qweight / TWO_PI;//!check
-                tot_RPA_energy += rpa_for_omega_q * freq_weight * qweight / TWO_PI;
+                const auto weighted_rpa = rpa_for_omega_q * freq_weight * qweight / TWO_PI;
+                if (global::should_output(LIBRPA_VERBOSE_DEBUG) && comm_h.is_root())
+                {
+                    if (normal_split_diag)
+                    {
+                        lib_printf("RPA normal split ifreq=%d freq=%.17e q=(%.17e,%.17e,%.17e) trace_pi=(%.17e,%.17e) logdet=(%.17e,%.17e) raw=(%.17e,%.17e)\n",
+                                   ifreq, freq, q.x, q.y, q.z, trace_pi_diag.real(),
+                                   trace_pi_diag.imag(), ln_det_diag.real(), ln_det_diag.imag(),
+                                   rpa_for_omega_q.real(), rpa_for_omega_q.imag());
+                    }
+                    lib_printf("RPA freqdiag ifreq=%d freq=%.17e q=(%.17e,%.17e,%.17e) raw=(%.17e,%.17e) freq_weight=%.17e qweight=%.17e weighted=(%.17e,%.17e)\n",
+                               ifreq, freq, q.x, q.y, q.z, rpa_for_omega_q.real(),
+                               rpa_for_omega_q.imag(), freq_weight, qweight, weighted_rpa.real(),
+                               weighted_rpa.imag());
+                }
+                cRPA_q[q] += weighted_rpa;//!check
+                tot_RPA_energy += weighted_rpa;
             }
         }
     }
