@@ -20,6 +20,18 @@ struct SternheimerChi0V1Matrix
     librpa_int::ComplexMatrix matrix;
 };
 
+struct SternheimerChi0V1Metadata
+{
+    std::string path;
+    int iq = 0;
+    int ifreq = 0;
+    double omega = 0.0;
+    double weight = 0.0;
+    std::vector<int> atom_naux;
+};
+
+SternheimerChi0V1Metadata read_sternheimer_chi0_v1_metadata_file(const std::string &path);
+
 SternheimerChi0V1Matrix read_sternheimer_chi0_v1_matrix_file(const std::string &path);
 
 void write_sternheimer_chi0_v1_matrix_file(const std::string &path,

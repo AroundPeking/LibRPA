@@ -33,6 +33,9 @@ struct SternheimerPartialResponseGroup
 using SternheimerPartialResponseGroups =
     std::map<std::pair<int, int>, SternheimerPartialResponseGroup>;
 
+using SternheimerPartialResponseMetadataGroups =
+    std::map<std::pair<int, int>, SternheimerChi0V1Metadata>;
+
 struct SternheimerFullKPoint
 {
     int ik_full = -1;
@@ -70,6 +73,9 @@ std::vector<SternheimerQStarRouteRecord> read_sternheimer_qstar_route_manifest(
     const std::string &path);
 
 SternheimerPartialResponseGroups read_sternheimer_partial_response_groups(
+    const std::vector<SternheimerPartialResponse> &records);
+
+SternheimerPartialResponseMetadataGroups read_sternheimer_partial_response_metadata_groups(
     const std::vector<SternheimerPartialResponse> &records);
 
 }  // namespace driver

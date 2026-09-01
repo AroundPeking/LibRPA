@@ -182,6 +182,79 @@ void test_streams_one_q_batch_at_a_time_without_changing_responses()
     assert(delivered == expected);
 }
 
+void test_file_backed_stream_reads_each_q_only_when_consumed()
+{
+    const Vector3_Order<double> gamma{0.0, 0.0, 0.0};
+    const Vector3_Order<double> boundary{0.5, 0.0, 0.0};
+    auto context = make_one_atom_context(gamma);
+    SymmetryKStar boundary_star;
+    boundary_star.star_index = 1;
+    boundary_star.k_ibz = boundary;
+    boundary_star.members.push_back(build_symmetry_kspace_operation_member(
+        context, 0, false, boundary, boundary, 0));
+    context.kstars.push_back(std::move(boundary_star));
+
+    const auto temp = std::filesystem::temp_directory_path() /
+                      "librpa_st_partial_streaming_reconstruction";
+    std::filesystem::remove_all(temp);
+    std::filesystem::create_directories(temp);
+    std::vector<driver::SternheimerPartialResponse> records;
+    std::filesystem::path q2_first_path;
+    for (int iq = 1; iq <= 2; ++iq)
+    {
+        for (int ifreq = 1; ifreq <= 2; ++ifreq)
+        {
+            for (int ik = 0; ik <= 1; ++ik)
+            {
+                driver::SternheimerChi0V1Matrix response;
+                response.iq = iq;
+                response.ifreq = ifreq;
+                response.omega = ifreq == 1 ? 0.5 : 1.5;
+                response.weight = ifreq == 1 ? 0.125 : 0.25;
+                response.atom_naux = {1};
+                response.matrix = scalar_matrix(-static_cast<double>(10 * iq + 2 * ifreq + ik));
+                const auto path = temp / ("q" + std::to_string(iq) + "_k" +
+                                          std::to_string(ik) + "_f" +
+                                          std::to_string(ifreq) + ".bin");
+                driver::write_sternheimer_chi0_v1_matrix_file(path.string(), response);
+                records.push_back({iq, ik, ifreq, path.string()});
+                if (iq == 2 && ifreq == 1 && ik == 0)
+                {
+                    q2_first_path = path;
+                }
+            }
+        }
+    }
+
+    const std::vector<SpeciesBasisLayout> layouts{make_s_layout()};
+    const std::map<atom_t, std::size_t> atom_nabf{{0, 1}};
+    const std::vector<Vector3_Order<double>> full_kpoints{gamma, boundary};
+    const std::vector<driver::SternheimerQPoint> qpoints{{1, {0.0, 0.0, 0.0}, 0.5},
+                                                         {2, {0.5, 0.0, 0.0}, 0.5}};
+    std::vector<int> delivered;
+    require_throws(
+        [&]() {
+            driver::for_each_sternheimer_reconstructed_q_from_files(
+                context, layouts, atom_nabf, full_kpoints, qpoints, records, 2, true, 0,
+                [&](const driver::SternheimerQPoint &point,
+                    std::vector<driver::SternheimerReconstructedResponse> responses) {
+                    delivered.push_back(point.iq);
+                    if (point.iq == 1)
+                    {
+                        assert(responses.size() == 2);
+                        assert(std::abs(responses[0].matrix(0, 0) -
+                                        std::complex<double>(-25.0, 0.0)) < 1.0e-12);
+                        assert(std::abs(responses[1].matrix(0, 0) -
+                                        std::complex<double>(-29.0, 0.0)) < 1.0e-12);
+                        std::filesystem::remove(q2_first_path);
+                    }
+                });
+        },
+        "Input file does not exist");
+    assert(delivered == std::vector<int>{1});
+    std::filesystem::remove_all(temp);
+}
+
 void test_boundary_q_time_reversal_reduces_two_kpoints_to_one_representative()
 {
     const Vector3_Order<double> q{0.5, 0.0, 0.0};
@@ -570,6 +643,7 @@ int main()
 {
     test_reconstructs_all_frequencies_and_reports_orbit_counts();
     test_streams_one_q_batch_at_a_time_without_changing_responses();
+    test_file_backed_stream_reads_each_q_only_when_consumed();
     test_boundary_q_time_reversal_reduces_two_kpoints_to_one_representative();
     test_explicit_routes_can_retain_two_discrete_hamiltonian_orbits();
     test_matrix_only_reconstructs_one_q_without_claiming_full_q_coverage();

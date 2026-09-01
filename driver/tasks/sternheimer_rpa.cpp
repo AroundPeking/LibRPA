@@ -147,11 +147,21 @@ void driver::task_sternheimer_rpa()
             driver_params.prefix_sternheimer_chi0, driver::opts.nfreq, driver_params.use_rpa_gamma);
     }
 
+    std::vector<SternheimerPartialResponse> partial_records;
     SternheimerPartialResponseGroups partial_groups;
+    SternheimerPartialResponseMetadataGroups partial_metadata_groups;
     if (partial_mode)
     {
-        const auto records = read_sternheimer_partial_manifest(partial_manifest_path);
-        partial_groups = read_sternheimer_partial_response_groups(records);
+        partial_records = read_sternheimer_partial_manifest(partial_manifest_path);
+        if (matrix_only)
+        {
+            partial_groups = read_sternheimer_partial_response_groups(partial_records);
+        }
+        else
+        {
+            partial_metadata_groups =
+                read_sternheimer_partial_response_metadata_groups(partial_records);
+        }
     }
 
     std::map<int, std::vector<SternheimerChi0V1Matrix>> response_cache;
@@ -161,8 +171,8 @@ void driver::task_sternheimer_rpa()
         std::vector<std::pair<int, double>> frequency_metadata;
         if (partial_mode)
         {
-            frequency_metadata.reserve(partial_groups.size());
-            for (const auto &[key, group] : partial_groups)
+            frequency_metadata.reserve(partial_metadata_groups.size());
+            for (const auto &[key, group] : partial_metadata_groups)
             {
                 frequency_metadata.emplace_back(group.ifreq, group.omega);
             }
@@ -219,6 +229,7 @@ void driver::task_sternheimer_rpa()
     if (partial_mode)
     {
         const auto &groups = partial_groups;
+        const auto &metadata_groups = partial_metadata_groups;
         std::vector<SternheimerFixedQRouteRecord> fixed_q_routes;
         std::vector<SternheimerQStarRouteRecord> qstar_routes;
         if (!driver_params.fn_sternheimer_symmetry_routes.empty())
@@ -357,9 +368,9 @@ void driver::task_sternheimer_rpa()
             return;
         }
 
-        for_each_sternheimer_reconstructed_q(
-            symmetry, layouts, atom_nabf, full_kpoints, qpoints, groups, driver::opts.nfreq,
-            driver_params.use_rpa_gamma, lmax,
+        for_each_sternheimer_reconstructed_q_from_files(
+            symmetry, layouts, atom_nabf, full_kpoints, qpoints, partial_records,
+            driver::opts.nfreq, driver_params.use_rpa_gamma, lmax,
             [&](const SternheimerQPoint &point,
                 std::vector<SternheimerReconstructedResponse> reconstructed)
             {
@@ -402,7 +413,7 @@ void driver::task_sternheimer_rpa()
                         gamma_headwing ? &headwing : nullptr);
                     if (write_reconstructed && mpi_comm_global_h.is_root())
                     {
-                        const auto &metadata = groups.at({point.iq, response.ifreq});
+                        const auto &metadata = metadata_groups.at({point.iq, response.ifreq});
                         for (const auto &member : response.qstar_responses)
                         {
                             const auto folded = librpa_int::fold_fractional_kpoint_to_targets(
@@ -423,7 +434,7 @@ void driver::task_sternheimer_rpa()
                     }
                     if (write_kresolved && mpi_comm_global_h.is_root())
                     {
-                        const auto &metadata = groups.at({point.iq, response.ifreq});
+                        const auto &metadata = metadata_groups.at({point.iq, response.ifreq});
                         for (const auto &member : response.kresolved_responses)
                         {
                             SternheimerChi0V1Matrix output;

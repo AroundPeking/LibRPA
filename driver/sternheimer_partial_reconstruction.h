@@ -84,6 +84,18 @@ void for_each_sternheimer_reconstructed_q(
     bool fixed_q_matrix_only = false,
     const std::vector<SternheimerQStarRouteRecord> *qstar_routes = nullptr);
 
+void for_each_sternheimer_reconstructed_q_from_files(
+    const librpa_int::SymmetryContext &symmetry,
+    const std::vector<librpa_int::SpeciesBasisLayout> &layouts,
+    const std::map<librpa_int::atom_t, std::size_t> &atom_nabf,
+    const std::vector<librpa_int::Vector3_Order<double>> &full_kpoints,
+    const std::vector<SternheimerQPoint> &qpoints,
+    const std::vector<SternheimerPartialResponse> &records, int expected_nfreq, bool use_rpa_gamma,
+    int lmax, const SternheimerReconstructedQConsumer &consumer,
+    const std::vector<SternheimerFixedQRouteRecord> *fixed_q_routes = nullptr,
+    bool fixed_q_matrix_only = false,
+    const std::vector<SternheimerQStarRouteRecord> *qstar_routes = nullptr);
+
 std::vector<librpa_int::SternheimerFixedQKOrbit> build_sternheimer_fixed_q_k_orbits_from_routes(
     const librpa_int::SpaceGroupSymOps &spatial_operations,
     const std::vector<librpa_int::Vector3_Order<double>> &full_kpoints,

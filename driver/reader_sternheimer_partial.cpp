@@ -432,4 +432,64 @@ SternheimerPartialResponseGroups read_sternheimer_partial_response_groups(
     return groups;
 }
 
+SternheimerPartialResponseMetadataGroups read_sternheimer_partial_response_metadata_groups(
+    const std::vector<SternheimerPartialResponse> &records)
+{
+    if (records.empty())
+    {
+        throw std::runtime_error("Cannot group an empty Sternheimer partial-response list");
+    }
+
+    SternheimerPartialResponseMetadataGroups groups;
+    for (const auto &record : records)
+    {
+        auto metadata = read_sternheimer_chi0_v1_metadata_file(record.response_path);
+        if (metadata.iq != record.iq)
+        {
+            throw std::runtime_error(record.response_path +
+                                     ": binary iq=" + std::to_string(metadata.iq) +
+                                     " does not match manifest iq=" + std::to_string(record.iq));
+        }
+        if (metadata.ifreq != record.ifreq)
+        {
+            throw std::runtime_error(
+                record.response_path + ": binary ifreq=" + std::to_string(metadata.ifreq) +
+                " does not match manifest ifreq=" + std::to_string(record.ifreq));
+        }
+        if (!std::isfinite(metadata.omega) || !std::isfinite(metadata.weight) ||
+            metadata.weight <= 0.0)
+        {
+            throw std::runtime_error(record.response_path +
+                                     ": invalid Sternheimer frequency metadata");
+        }
+
+        const auto key = std::make_pair(record.iq, record.ifreq);
+        const auto [group_iter, inserted] = groups.try_emplace(key, metadata);
+        if (!inserted)
+        {
+            const auto &group = group_iter->second;
+            const auto close = [](const double lhs, const double rhs) {
+                return std::abs(lhs - rhs) <= 1e-12 * std::max({1.0, std::abs(lhs), std::abs(rhs)});
+            };
+            if (!close(group.omega, metadata.omega))
+            {
+                throw std::runtime_error(record.response_path +
+                                         ": inconsistent omega within (iq, ifreq) group");
+            }
+            if (!close(group.weight, metadata.weight))
+            {
+                throw std::runtime_error(
+                    record.response_path +
+                    ": inconsistent frequency weight within (iq, ifreq) group");
+            }
+            if (group.atom_naux != metadata.atom_naux)
+            {
+                throw std::runtime_error(record.response_path +
+                                         ": inconsistent atom_naux within (iq, ifreq) group");
+            }
+        }
+    }
+    return groups;
+}
+
 }  // namespace driver

@@ -532,6 +532,22 @@ void validate_coulomb_v1_full_matrix_file(const std::string &dir_path, const std
     static_cast<void>(find_coulomb_files(dir_path, prefix, iq));
 }
 
+SternheimerChi0V1Metadata read_sternheimer_chi0_v1_metadata_file(const std::string &path)
+{
+    const auto metadata = read_sternheimer_file_metadata(path);
+    if (metadata.ifreq <= 0)
+    {
+        throw std::runtime_error(path + ": Sternheimer chi0 v1 requires a positive ifrequency");
+    }
+    if (metadata.value_flag != kComplexFlag)
+    {
+        throw std::runtime_error(path + ": Sternheimer chi0 v1 must be complex-valued");
+    }
+
+    return {metadata.path, metadata.iq, metadata.ifreq, metadata.omega, metadata.weight,
+            metadata.atom_naux};
+}
+
 SternheimerChi0V1Matrix read_sternheimer_chi0_v1_matrix_file(const std::string &path)
 {
     const auto metadata = read_sternheimer_file_metadata(path);

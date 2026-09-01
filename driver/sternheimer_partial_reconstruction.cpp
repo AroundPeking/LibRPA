@@ -267,12 +267,21 @@ std::vector<librpa_int::SternheimerQStarResponse> build_sternheimer_qstar_respon
     return restored;
 }
 
-void for_each_sternheimer_reconstructed_q(
+namespace
+{
+
+using SternheimerPartialGroupConsumer =
+    std::function<void(const SternheimerPartialResponseGroups &)>;
+using SternheimerPartialGroupProvider =
+    std::function<void(const SternheimerQPoint &, const SternheimerPartialGroupConsumer &)>;
+
+void for_each_sternheimer_reconstructed_q_impl(
     const librpa_int::SymmetryContext &symmetry,
     const std::vector<librpa_int::SpeciesBasisLayout> &layouts,
     const std::map<librpa_int::atom_t, std::size_t> &atom_nabf,
     const std::vector<librpa_int::Vector3_Order<double>> &full_kpoints,
-    const std::vector<SternheimerQPoint> &qpoints, const SternheimerPartialResponseGroups &groups,
+    const std::vector<SternheimerQPoint> &qpoints,
+    const SternheimerPartialGroupProvider &group_provider, const std::size_t expected_group_count,
     const int expected_nfreq, const bool use_rpa_gamma, const int lmax,
     const SternheimerReconstructedQConsumer &consumer,
     const std::vector<SternheimerFixedQRouteRecord> *fixed_q_routes, const bool fixed_q_matrix_only,
@@ -355,118 +364,192 @@ void for_each_sternheimer_reconstructed_q(
             continue;
         }
 
-        const auto q = q_vector(point);
-        std::vector<SternheimerQStarRouteRecord> point_qstar_routes;
-        if (qstar_routes != nullptr)
-        {
-            std::copy_if(qstar_routes->cbegin(), qstar_routes->cend(),
-                         std::back_inserter(point_qstar_routes),
-                         [&point](const auto &route)
-                         { return route.representative_iq == point.iq; });
-            if (!fixed_q_matrix_only && point_qstar_routes.empty())
+        group_provider(
+            point,
+            [&](const SternheimerPartialResponseGroups &groups)
             {
-                throw std::runtime_error(
-                    "Explicit Sternheimer q-star routes are missing representative iq=" +
-                    std::to_string(point.iq));
-            }
-        }
-        std::vector<SternheimerFixedQRouteRecord> point_routes;
-        if (fixed_q_routes != nullptr)
-        {
-            std::copy_if(fixed_q_routes->cbegin(), fixed_q_routes->cend(),
-                         std::back_inserter(point_routes),
-                         [&point](const auto &route) { return route.iq == point.iq; });
-            if (point_routes.empty())
-            {
-                throw std::runtime_error("Explicit fixed-q Sternheimer routes are missing iq=" +
-                                         std::to_string(point.iq));
-            }
-        }
-        const auto little_group =
-            fixed_q_routes == nullptr
-                ? librpa_int::build_sternheimer_fixed_q_little_group(symmetry.rspace_operations, q)
-                : std::vector<librpa_int::SternheimerSymmetryRoute>();
-        const auto orbits = fixed_q_routes == nullptr
-                                ? librpa_int::build_sternheimer_fixed_q_k_orbits(
-                                      symmetry.rspace_operations, full_kpoints, q)
-                                : build_sternheimer_fixed_q_k_orbits_from_routes(
-                                      symmetry.rspace_operations, full_kpoints, q, point_routes);
-        std::set<std::pair<int, bool>> route_operations;
-        for (const auto &route : point_routes)
-        {
-            route_operations.emplace(route.inverse_route.spatial_isym,
-                                     route.inverse_route.time_reversal);
-        }
-        std::vector<SternheimerReconstructedResponse> reconstructed;
-        reconstructed.reserve(static_cast<std::size_t>(expected_nfreq));
-        for (int ifreq = 1; ifreq <= expected_nfreq; ++ifreq)
-        {
-            const auto key = std::make_pair(point.iq, ifreq);
-            const auto group_iter = groups.find(key);
-            if (group_iter == groups.end())
-            {
-                throw std::runtime_error("Sternheimer partial responses are missing (iq, ifreq)=(" +
-                                         std::to_string(point.iq) + ", " + std::to_string(ifreq) +
-                                         ")");
-            }
-            used_groups.insert(key);
-            const auto &group = group_iter->second;
-            if (group.iq != point.iq || group.ifreq != ifreq)
-            {
-                throw std::runtime_error(
-                    "Sternheimer partial response group key disagrees with its metadata");
-            }
-            if (group.atom_naux != expected_atom_naux)
-            {
-                throw std::runtime_error(
-                    "Sternheimer partial response atom_naux does not match the active ABF basis");
-            }
-            if (!std::isfinite(group.omega) || !std::isfinite(group.weight) || group.weight <= 0.0)
-            {
-                throw std::runtime_error(
-                    "Sternheimer partial response group has invalid frequency metadata");
-            }
-
-            std::vector<librpa_int::SternheimerFixedQKResponse> kresolved_responses;
-            auto matrix = librpa_int::reconstruct_sternheimer_fixed_q_response(
-                symmetry, layouts, atom_nabf, q, orbits, group.representatives, lmax,
-                &kresolved_responses);
-            std::vector<librpa_int::SternheimerQStarResponse> qstar_responses;
-            double q_weight = 0.0;
-            if (!fixed_q_matrix_only)
-            {
-                qstar_responses = qstar_routes == nullptr
-                                      ? librpa_int::reconstruct_sternheimer_qstar_responses(
-                                            symmetry, layouts, atom_nabf, q, matrix, lmax)
-                                      : build_sternheimer_qstar_responses_from_routes(
-                                            symmetry, layouts, atom_nabf, full_kpoints, point.iq, q,
-                                            matrix, point_qstar_routes, lmax);
-                q_weight = static_cast<double>(qstar_responses.size()) /
-                           static_cast<double>(full_kpoints.size());
-                const double q_weight_scale =
-                    std::max({1.0, std::abs(point.weight), std::abs(q_weight)});
-                if (std::abs(point.weight - q_weight) > 1.0e-12 * q_weight_scale)
+                const auto q = q_vector(point);
+                std::vector<SternheimerQStarRouteRecord> point_qstar_routes;
+                if (qstar_routes != nullptr)
                 {
-                    throw std::runtime_error(
-                        "Sternheimer q-star weight disagrees with q-point manifest for iq=" +
-                        std::to_string(point.iq));
+                    std::copy_if(qstar_routes->cbegin(), qstar_routes->cend(),
+                                 std::back_inserter(point_qstar_routes),
+                                 [&point](const auto &route)
+                                 { return route.representative_iq == point.iq; });
+                    if (!fixed_q_matrix_only && point_qstar_routes.empty())
+                    {
+                        throw std::runtime_error(
+                            "Explicit Sternheimer q-star routes are missing representative iq=" +
+                            std::to_string(point.iq));
+                    }
                 }
-            }
-            reconstructed.push_back(
-                {point.iq, ifreq, group.omega, group.weight, q_weight,
-                 static_cast<int>(full_kpoints.size()), static_cast<int>(orbits.size()),
-                 fixed_q_routes == nullptr ? static_cast<int>(little_group.size())
-                                           : static_cast<int>(route_operations.size()),
-                 std::move(matrix), std::move(kresolved_responses), std::move(qstar_responses)});
-        }
-        consumer(point, std::move(reconstructed));
+                std::vector<SternheimerFixedQRouteRecord> point_routes;
+                if (fixed_q_routes != nullptr)
+                {
+                    std::copy_if(fixed_q_routes->cbegin(), fixed_q_routes->cend(),
+                                 std::back_inserter(point_routes),
+                                 [&point](const auto &route) { return route.iq == point.iq; });
+                    if (point_routes.empty())
+                    {
+                        throw std::runtime_error(
+                            "Explicit fixed-q Sternheimer routes are missing iq=" +
+                            std::to_string(point.iq));
+                    }
+                }
+                const auto little_group = fixed_q_routes == nullptr
+                                              ? librpa_int::build_sternheimer_fixed_q_little_group(
+                                                    symmetry.rspace_operations, q)
+                                              : std::vector<librpa_int::SternheimerSymmetryRoute>();
+                const auto orbits =
+                    fixed_q_routes == nullptr
+                        ? librpa_int::build_sternheimer_fixed_q_k_orbits(symmetry.rspace_operations,
+                                                                         full_kpoints, q)
+                        : build_sternheimer_fixed_q_k_orbits_from_routes(
+                              symmetry.rspace_operations, full_kpoints, q, point_routes);
+                std::set<std::pair<int, bool>> route_operations;
+                for (const auto &route : point_routes)
+                {
+                    route_operations.emplace(route.inverse_route.spatial_isym,
+                                             route.inverse_route.time_reversal);
+                }
+                std::vector<SternheimerReconstructedResponse> reconstructed;
+                reconstructed.reserve(static_cast<std::size_t>(expected_nfreq));
+                for (int ifreq = 1; ifreq <= expected_nfreq; ++ifreq)
+                {
+                    const auto key = std::make_pair(point.iq, ifreq);
+                    const auto group_iter = groups.find(key);
+                    if (group_iter == groups.end())
+                    {
+                        throw std::runtime_error(
+                            "Sternheimer partial responses are missing (iq, ifreq)=(" +
+                            std::to_string(point.iq) + ", " + std::to_string(ifreq) + ")");
+                    }
+                    used_groups.insert(key);
+                    const auto &group = group_iter->second;
+                    if (group.iq != point.iq || group.ifreq != ifreq)
+                    {
+                        throw std::runtime_error(
+                            "Sternheimer partial response group key disagrees with its metadata");
+                    }
+                    if (group.atom_naux != expected_atom_naux)
+                    {
+                        throw std::runtime_error(
+                            "Sternheimer partial response atom_naux does not match the active ABF "
+                            "basis");
+                    }
+                    if (!std::isfinite(group.omega) || !std::isfinite(group.weight) ||
+                        group.weight <= 0.0)
+                    {
+                        throw std::runtime_error(
+                            "Sternheimer partial response group has invalid frequency metadata");
+                    }
+
+                    std::vector<librpa_int::SternheimerFixedQKResponse> kresolved_responses;
+                    auto matrix = librpa_int::reconstruct_sternheimer_fixed_q_response(
+                        symmetry, layouts, atom_nabf, q, orbits, group.representatives, lmax,
+                        &kresolved_responses);
+                    std::vector<librpa_int::SternheimerQStarResponse> qstar_responses;
+                    double q_weight = 0.0;
+                    if (!fixed_q_matrix_only)
+                    {
+                        qstar_responses = qstar_routes == nullptr
+                                              ? librpa_int::reconstruct_sternheimer_qstar_responses(
+                                                    symmetry, layouts, atom_nabf, q, matrix, lmax)
+                                              : build_sternheimer_qstar_responses_from_routes(
+                                                    symmetry, layouts, atom_nabf, full_kpoints,
+                                                    point.iq, q, matrix, point_qstar_routes, lmax);
+                        q_weight = static_cast<double>(qstar_responses.size()) /
+                                   static_cast<double>(full_kpoints.size());
+                        const double q_weight_scale =
+                            std::max({1.0, std::abs(point.weight), std::abs(q_weight)});
+                        if (std::abs(point.weight - q_weight) > 1.0e-12 * q_weight_scale)
+                        {
+                            throw std::runtime_error(
+                                "Sternheimer q-star weight disagrees with q-point manifest for "
+                                "iq=" +
+                                std::to_string(point.iq));
+                        }
+                    }
+                    reconstructed.push_back(
+                        {point.iq, ifreq, group.omega, group.weight, q_weight,
+                         static_cast<int>(full_kpoints.size()), static_cast<int>(orbits.size()),
+                         fixed_q_routes == nullptr ? static_cast<int>(little_group.size())
+                                                   : static_cast<int>(route_operations.size()),
+                         std::move(matrix), std::move(kresolved_responses),
+                         std::move(qstar_responses)});
+                }
+                consumer(point, std::move(reconstructed));
+            });
     }
 
-    if (used_groups.size() != groups.size())
+    if (used_groups.size() != expected_group_count)
     {
         throw std::runtime_error(
             "Sternheimer partial manifest contains unexpected q/frequency response groups");
     }
+}
+
+}  // namespace
+
+void for_each_sternheimer_reconstructed_q(
+    const librpa_int::SymmetryContext &symmetry,
+    const std::vector<librpa_int::SpeciesBasisLayout> &layouts,
+    const std::map<librpa_int::atom_t, std::size_t> &atom_nabf,
+    const std::vector<librpa_int::Vector3_Order<double>> &full_kpoints,
+    const std::vector<SternheimerQPoint> &qpoints, const SternheimerPartialResponseGroups &groups,
+    const int expected_nfreq, const bool use_rpa_gamma, const int lmax,
+    const SternheimerReconstructedQConsumer &consumer,
+    const std::vector<SternheimerFixedQRouteRecord> *fixed_q_routes, const bool fixed_q_matrix_only,
+    const std::vector<SternheimerQStarRouteRecord> *qstar_routes)
+{
+    const SternheimerPartialGroupProvider provider =
+        [&groups](const SternheimerQPoint &, const SternheimerPartialGroupConsumer &consume)
+    { consume(groups); };
+    for_each_sternheimer_reconstructed_q_impl(symmetry, layouts, atom_nabf, full_kpoints, qpoints,
+                                              provider, groups.size(), expected_nfreq,
+                                              use_rpa_gamma, lmax, consumer, fixed_q_routes,
+                                              fixed_q_matrix_only, qstar_routes);
+}
+
+void for_each_sternheimer_reconstructed_q_from_files(
+    const librpa_int::SymmetryContext &symmetry,
+    const std::vector<librpa_int::SpeciesBasisLayout> &layouts,
+    const std::map<librpa_int::atom_t, std::size_t> &atom_nabf,
+    const std::vector<librpa_int::Vector3_Order<double>> &full_kpoints,
+    const std::vector<SternheimerQPoint> &qpoints,
+    const std::vector<SternheimerPartialResponse> &records, const int expected_nfreq,
+    const bool use_rpa_gamma, const int lmax, const SternheimerReconstructedQConsumer &consumer,
+    const std::vector<SternheimerFixedQRouteRecord> *fixed_q_routes, const bool fixed_q_matrix_only,
+    const std::vector<SternheimerQStarRouteRecord> *qstar_routes)
+{
+    if (records.empty())
+    {
+        throw std::runtime_error("Cannot reconstruct an empty Sternheimer partial-response list");
+    }
+    std::map<int, std::vector<SternheimerPartialResponse>> records_by_q;
+    std::set<std::pair<int, int>> group_keys;
+    for (const auto &record : records)
+    {
+        records_by_q[record.iq].push_back(record);
+        group_keys.emplace(record.iq, record.ifreq);
+    }
+    const SternheimerPartialGroupProvider provider =
+        [&records_by_q](const SternheimerQPoint &point,
+                        const SternheimerPartialGroupConsumer &consume)
+    {
+        const auto records_iter = records_by_q.find(point.iq);
+        if (records_iter == records_by_q.end())
+        {
+            throw std::runtime_error("Sternheimer partial manifest is missing iq=" +
+                                     std::to_string(point.iq));
+        }
+        const auto groups = read_sternheimer_partial_response_groups(records_iter->second);
+        consume(groups);
+    };
+    for_each_sternheimer_reconstructed_q_impl(symmetry, layouts, atom_nabf, full_kpoints, qpoints,
+                                              provider, group_keys.size(), expected_nfreq,
+                                              use_rpa_gamma, lmax, consumer, fixed_q_routes,
+                                              fixed_q_matrix_only, qstar_routes);
 }
 
 std::vector<SternheimerReconstructedResponse> reconstruct_sternheimer_partial_responses(

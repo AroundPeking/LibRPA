@@ -37,6 +37,8 @@ add_test(NAME test_reader_sternheimer_partial
 add_executable(
   test_sternheimer_partial_reconstruction
   test_sternheimer_partial_reconstruction.cpp
+  ../reader_sternheimer.cpp
+  ../reader_sternheimer_partial.cpp
   ../sternheimer_partial_reconstruction.cpp
   ../rpa_qsum.cpp
 )

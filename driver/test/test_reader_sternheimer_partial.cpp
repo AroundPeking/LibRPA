@@ -409,6 +409,31 @@ void test_sternheimer_v1_writer_round_trips_complex_atom_blocks()
     }
 }
 
+void test_sternheimer_v1_metadata_reader_does_not_materialize_matrix()
+{
+    TempDirectory temp;
+    driver::SternheimerChi0V1Matrix expected;
+    expected.iq = 4;
+    expected.ifreq = 2;
+    expected.omega = 0.75;
+    expected.weight = 0.125;
+    expected.atom_naux = {1, 2};
+    expected.matrix = librpa_int::ComplexMatrix(3, 3);
+    expected.matrix(0, 0) = {-1.0, 0.0};
+    expected.matrix(1, 1) = {-2.0, 0.0};
+    expected.matrix(2, 2) = {-3.0, 0.0};
+
+    const auto path = temp.path / "metadata.bin";
+    driver::write_sternheimer_chi0_v1_matrix_file(path.string(), expected);
+    const auto metadata = driver::read_sternheimer_chi0_v1_metadata_file(path.string());
+    assert(metadata.path == path.string());
+    assert(metadata.iq == expected.iq);
+    assert(metadata.ifreq == expected.ifreq);
+    assert(metadata.omega == expected.omega);
+    assert(metadata.weight == expected.weight);
+    assert(metadata.atom_naux == expected.atom_naux);
+}
+
 void test_sternheimer_v1_writer_rejects_nonhermitian_matrix()
 {
     TempDirectory temp;
@@ -451,6 +476,7 @@ int main()
     test_groups_explicit_response_files_by_q_and_frequency();
     test_grouping_rejects_binary_header_and_frequency_metadata_mismatch();
     test_sternheimer_v1_writer_round_trips_complex_atom_blocks();
+    test_sternheimer_v1_metadata_reader_does_not_materialize_matrix();
     test_sternheimer_v1_writer_rejects_nonhermitian_matrix();
     return 0;
 }
