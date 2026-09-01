@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -50,6 +51,9 @@ struct SternheimerQStarRpaAudit
     double max_integrand_difference = 0.0;
 };
 
+using SternheimerReconstructedQConsumer = std::function<void(
+    const SternheimerQPoint &, std::vector<SternheimerReconstructedResponse> &&)>;
+
 std::vector<librpa_int::SternheimerQStarResponse> reconstruct_sternheimer_full_q_matrices_from_ibz(
     const librpa_int::SymmetryContext &symmetry,
     const std::vector<librpa_int::SpeciesBasisLayout> &layouts,
@@ -64,6 +68,18 @@ std::vector<SternheimerReconstructedResponse> reconstruct_sternheimer_partial_re
     const std::vector<librpa_int::Vector3_Order<double>> &full_kpoints,
     const std::vector<SternheimerQPoint> &qpoints, const SternheimerPartialResponseGroups &groups,
     int expected_nfreq, bool use_rpa_gamma, int lmax,
+    const std::vector<SternheimerFixedQRouteRecord> *fixed_q_routes = nullptr,
+    bool fixed_q_matrix_only = false,
+    const std::vector<SternheimerQStarRouteRecord> *qstar_routes = nullptr);
+
+void for_each_sternheimer_reconstructed_q(
+    const librpa_int::SymmetryContext &symmetry,
+    const std::vector<librpa_int::SpeciesBasisLayout> &layouts,
+    const std::map<librpa_int::atom_t, std::size_t> &atom_nabf,
+    const std::vector<librpa_int::Vector3_Order<double>> &full_kpoints,
+    const std::vector<SternheimerQPoint> &qpoints, const SternheimerPartialResponseGroups &groups,
+    int expected_nfreq, bool use_rpa_gamma, int lmax,
+    const SternheimerReconstructedQConsumer &consumer,
     const std::vector<SternheimerFixedQRouteRecord> *fixed_q_routes = nullptr,
     bool fixed_q_matrix_only = false,
     const std::vector<SternheimerQStarRouteRecord> *qstar_routes = nullptr);

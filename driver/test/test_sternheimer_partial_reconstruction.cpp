@@ -133,6 +133,55 @@ void test_reconstructs_all_frequencies_and_reports_orbit_counts()
            < 1.0e-12);
 }
 
+void test_streams_one_q_batch_at_a_time_without_changing_responses()
+{
+    const Vector3_Order<double> gamma{0.0, 0.0, 0.0};
+    const Vector3_Order<double> boundary{0.5, 0.0, 0.0};
+    auto context = make_one_atom_context(gamma);
+    SymmetryKStar boundary_star;
+    boundary_star.star_index = 1;
+    boundary_star.k_ibz = boundary;
+    boundary_star.members.push_back(build_symmetry_kspace_operation_member(
+        context, 0, false, boundary, boundary, 0));
+    context.kstars.push_back(std::move(boundary_star));
+
+    const std::vector<SpeciesBasisLayout> layouts{make_s_layout()};
+    const std::map<atom_t, std::size_t> atom_nabf{{0, 1}};
+    const std::vector<Vector3_Order<double>> full_kpoints{{0.0, 0.0, 0.0},
+                                                          {0.5, 0.0, 0.0}};
+    const std::vector<driver::SternheimerQPoint> qpoints{{1, {0.0, 0.0, 0.0}, 0.5},
+                                                         {2, {0.5, 0.0, 0.0}, 0.5}};
+    driver::SternheimerPartialResponseGroups groups;
+    groups.emplace(std::make_pair(1, 1),
+                   make_group(1, 1, 0.5, 0.125,
+                              {{0, scalar_matrix(-1.0)}, {1, scalar_matrix(-2.0)}}));
+    groups.emplace(std::make_pair(1, 2),
+                   make_group(1, 2, 1.5, 0.25,
+                              {{0, scalar_matrix(-3.0)}, {1, scalar_matrix(-4.0)}}));
+    groups.emplace(std::make_pair(2, 1),
+                   make_group(2, 1, 0.5, 0.125,
+                              {{0, scalar_matrix(-5.0)}, {1, scalar_matrix(-6.0)}}));
+    groups.emplace(std::make_pair(2, 2),
+                   make_group(2, 2, 1.5, 0.25,
+                              {{0, scalar_matrix(-7.0)}, {1, scalar_matrix(-8.0)}}));
+
+    std::vector<std::pair<int, int>> delivered;
+    driver::for_each_sternheimer_reconstructed_q(
+        context, layouts, atom_nabf, full_kpoints, qpoints, groups, 2, true, 0,
+        [&](const driver::SternheimerQPoint &point,
+            std::vector<driver::SternheimerReconstructedResponse> responses) {
+            assert(responses.size() == 2);
+            assert(responses[0].iq == point.iq);
+            assert(responses[0].ifreq == 1);
+            assert(responses[1].ifreq == 2);
+            assert(std::abs(responses[0].q_weight - point.weight) < 1.0e-15);
+            delivered.emplace_back(point.iq, static_cast<int>(responses.size()));
+        });
+
+    const std::vector<std::pair<int, int>> expected{{1, 2}, {2, 2}};
+    assert(delivered == expected);
+}
+
 void test_boundary_q_time_reversal_reduces_two_kpoints_to_one_representative()
 {
     const Vector3_Order<double> q{0.5, 0.0, 0.0};
@@ -520,6 +569,7 @@ void test_rejects_missing_representative_and_frequency()
 int main()
 {
     test_reconstructs_all_frequencies_and_reports_orbit_counts();
+    test_streams_one_q_batch_at_a_time_without_changing_responses();
     test_boundary_q_time_reversal_reduces_two_kpoints_to_one_representative();
     test_explicit_routes_can_retain_two_discrete_hamiltonian_orbits();
     test_matrix_only_reconstructs_one_q_without_claiming_full_q_coverage();

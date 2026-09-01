@@ -267,13 +267,14 @@ std::vector<librpa_int::SternheimerQStarResponse> build_sternheimer_qstar_respon
     return restored;
 }
 
-std::vector<SternheimerReconstructedResponse> reconstruct_sternheimer_partial_responses(
+void for_each_sternheimer_reconstructed_q(
     const librpa_int::SymmetryContext &symmetry,
     const std::vector<librpa_int::SpeciesBasisLayout> &layouts,
     const std::map<librpa_int::atom_t, std::size_t> &atom_nabf,
     const std::vector<librpa_int::Vector3_Order<double>> &full_kpoints,
     const std::vector<SternheimerQPoint> &qpoints, const SternheimerPartialResponseGroups &groups,
     const int expected_nfreq, const bool use_rpa_gamma, const int lmax,
+    const SternheimerReconstructedQConsumer &consumer,
     const std::vector<SternheimerFixedQRouteRecord> *fixed_q_routes, const bool fixed_q_matrix_only,
     const std::vector<SternheimerQStarRouteRecord> *qstar_routes)
 {
@@ -289,6 +290,10 @@ std::vector<SternheimerReconstructedResponse> reconstruct_sternheimer_partial_re
     if (lmax < 0)
     {
         throw std::runtime_error("Sternheimer partial reconstruction requires ABF l-shell data");
+    }
+    if (!consumer)
+    {
+        throw std::runtime_error("Sternheimer partial reconstruction requires a q consumer");
     }
 
     const auto expected_atom_naux = ordered_atom_naux(atom_nabf);
@@ -343,7 +348,6 @@ std::vector<SternheimerReconstructedResponse> reconstruct_sternheimer_partial_re
     }
 
     std::set<std::pair<int, int>> used_groups;
-    std::vector<SternheimerReconstructedResponse> reconstructed;
     for (const auto &point : qpoints)
     {
         if (!use_rpa_gamma && is_rpa_gamma_point(point.q))
@@ -393,6 +397,8 @@ std::vector<SternheimerReconstructedResponse> reconstruct_sternheimer_partial_re
             route_operations.emplace(route.inverse_route.spatial_isym,
                                      route.inverse_route.time_reversal);
         }
+        std::vector<SternheimerReconstructedResponse> reconstructed;
+        reconstructed.reserve(static_cast<std::size_t>(expected_nfreq));
         for (int ifreq = 1; ifreq <= expected_nfreq; ++ifreq)
         {
             const auto key = std::make_pair(point.iq, ifreq);
@@ -453,6 +459,7 @@ std::vector<SternheimerReconstructedResponse> reconstruct_sternheimer_partial_re
                                            : static_cast<int>(route_operations.size()),
                  std::move(matrix), std::move(kresolved_responses), std::move(qstar_responses)});
         }
+        consumer(point, std::move(reconstructed));
     }
 
     if (used_groups.size() != groups.size())
@@ -460,6 +467,29 @@ std::vector<SternheimerReconstructedResponse> reconstruct_sternheimer_partial_re
         throw std::runtime_error(
             "Sternheimer partial manifest contains unexpected q/frequency response groups");
     }
+}
+
+std::vector<SternheimerReconstructedResponse> reconstruct_sternheimer_partial_responses(
+    const librpa_int::SymmetryContext &symmetry,
+    const std::vector<librpa_int::SpeciesBasisLayout> &layouts,
+    const std::map<librpa_int::atom_t, std::size_t> &atom_nabf,
+    const std::vector<librpa_int::Vector3_Order<double>> &full_kpoints,
+    const std::vector<SternheimerQPoint> &qpoints, const SternheimerPartialResponseGroups &groups,
+    const int expected_nfreq, const bool use_rpa_gamma, const int lmax,
+    const std::vector<SternheimerFixedQRouteRecord> *fixed_q_routes, const bool fixed_q_matrix_only,
+    const std::vector<SternheimerQStarRouteRecord> *qstar_routes)
+{
+    std::vector<SternheimerReconstructedResponse> reconstructed;
+    for_each_sternheimer_reconstructed_q(
+        symmetry, layouts, atom_nabf, full_kpoints, qpoints, groups, expected_nfreq, use_rpa_gamma,
+        lmax,
+        [&reconstructed](const SternheimerQPoint &,
+                         std::vector<SternheimerReconstructedResponse> responses)
+        {
+            reconstructed.insert(reconstructed.end(), std::make_move_iterator(responses.begin()),
+                                 std::make_move_iterator(responses.end()));
+        },
+        fixed_q_routes, fixed_q_matrix_only, qstar_routes);
     return reconstructed;
 }
 
