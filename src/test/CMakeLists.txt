@@ -88,10 +88,15 @@ foreach(target
   test_matrix_m_mpi
   test_meanfield_mpi
   test_kpoint_blacs_parallel_context
+  test_rpa_headwing_mpi
   test_shared_memory_mpi
   )
   config_test(${target} 4)
 endforeach()
+
+# These suites use standard assert() and must remain active in Release builds.
+target_compile_options(test_rpa_headwing PRIVATE -UNDEBUG)
+target_compile_options(test_rpa_headwing_mpi PRIVATE -UNDEBUG)
 
 if(LIBRPA_USE_LIBRI AND _LIBRPA_USE_BUNDLED_LIBCOMM)
   config_test(test_libcomm_bounded_exchange 4)

@@ -56,6 +56,10 @@ struct RpaHeadwingSettings
     double sqrt_coulomb_threshold = 0.0;
 };
 
+bool rpa_headwing_matrix_matches_descriptor(
+    const matrix_m<std::complex<double>> &matrix, const ArrayDesc &descriptor,
+    const ArrayDesc &expected_descriptor);
+
 //! Velocity/momentum matrix, indexed as [spin][k][cartesian].
 using velocity_matrix_t = std::vector<std::vector<std::vector<ComplexMatrix>>>;
 
@@ -310,7 +314,8 @@ public:
     // std::complex<double> compute_Cijk(const librpa_int::Cs_LRI &Cs_data, int mu, int I, int i,
     // int J, int j, int ik); transform wing from ABF to Coulomb representation
     void wing_mu_to_lambda(matrix_m<std::complex<double>> &sqrtveig_blacs,
-                           ArrayDesc &desc_nabf_nabf_opt, std::size_t n_nonsingular_in);
+                           const ArrayDesc &desc_nabf_nabf_opt,
+                           std::size_t n_nonsingular_in);
     // tranform Cs_ij(R) to Cs_ij(k)
     // diagonalize real Vq_cut(q=0)
     // void get_Xv_real(double vq_threshold, const librpa_int::atpair_k_cplx_mat_t &Vq);

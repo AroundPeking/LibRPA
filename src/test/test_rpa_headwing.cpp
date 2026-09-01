@@ -165,6 +165,58 @@ void test_chi0_qspace_symmetry_diagnostic_requires_explicit_enable()
     assert(rejected_invalid_value);
 }
 
+void test_rpa_finite_q_matrix_diagnostic_requires_explicit_enable()
+{
+    assert(!librpa_int::rpa_finite_q_matrix_diagnostic_requested(nullptr));
+    assert(!librpa_int::rpa_finite_q_matrix_diagnostic_requested(""));
+    assert(librpa_int::rpa_finite_q_matrix_diagnostic_requested("enabled"));
+
+    bool rejected_invalid_value = false;
+    try
+    {
+        librpa_int::rpa_finite_q_matrix_diagnostic_requested("true");
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected_invalid_value = true;
+    }
+    assert(rejected_invalid_value);
+}
+
+void test_distributed_hermiticity_metrics_on_one_rank(const BlacsCtxtHandler &blacs_h)
+{
+    ArrayDesc desc(blacs_h);
+    desc.init_square_blk(3, 3, 0, 0);
+    auto matrix = init_local_mat<std::complex<double>>(desc, MAJOR::COL);
+    const matrix_m<std::complex<double>> dense(
+        std::vector<std::vector<std::complex<double>>>{
+            {{1.0, 0.0}, {0.2, 0.3}, {-0.1, 0.05}},
+            {{0.2, -0.3}, {2.0, 0.0}, {0.4, -0.2}},
+            {{-0.1, -0.05}, {0.4, 0.2}, {3.0, 0.0}}},
+        MAJOR::COL);
+    for (int i = 0; i != 3; ++i)
+    {
+        const int iloc = desc.indx_g2l_r(i);
+        for (int j = 0; j != 3; ++j)
+        {
+            const int jloc = desc.indx_g2l_c(j);
+            matrix(iloc, jloc) = dense(i, j);
+        }
+    }
+
+    const auto exact = librpa_int::distributed_hermiticity_metrics(matrix, desc);
+    assert(exact.frobenius_norm > 0.0);
+    assert(exact.antihermitian_frobenius_norm < 1.0e-14);
+    assert(exact.antihermitian_max_abs < 1.0e-14);
+    assert(exact.relative_frobenius_residual < 1.0e-14);
+
+    matrix(desc.indx_g2l_r(0), desc.indx_g2l_c(2)) += std::complex<double>(0.25, 0.0);
+    const auto perturbed = librpa_int::distributed_hermiticity_metrics(matrix, desc);
+    assert(std::abs(perturbed.antihermitian_frobenius_norm - std::sqrt(0.125)) < 1.0e-14);
+    assert(std::abs(perturbed.antihermitian_max_abs - 0.25) < 1.0e-14);
+    assert(perturbed.relative_frobenius_residual > 0.0);
+}
+
 void test_sigc_rspace_symmetry_diagnostic_requires_explicit_enable()
 {
     assert(!librpa_int::disable_sigc_rspace_symmetry_diagnostic_requested(nullptr));
@@ -3371,6 +3423,8 @@ int main(int argc, char *argv[])
         test_chi0_rspace_symmetry_diagnostic_requires_explicit_enable();
         test_gamma_shrink_transform_diagnostic_requires_explicit_enable();
         test_chi0_qspace_symmetry_diagnostic_requires_explicit_enable();
+        test_rpa_finite_q_matrix_diagnostic_requires_explicit_enable();
+        test_distributed_hermiticity_metrics_on_one_rank(blacs_h);
         test_sigc_rspace_symmetry_diagnostic_requires_explicit_enable();
         test_single_q_member_diagnostic_disables_sigc_rspace_symmetry_restore();
         test_strict_2d_qmember_diagnostic_selects_one_periodic_member();

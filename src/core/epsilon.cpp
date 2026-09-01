@@ -93,6 +93,59 @@ bool strict_2d_qradial_is_corner(const double q_norm, const double first_q_norm)
     return q_norm / first_q_norm > 6.5;
 }
 
+DistributedHermiticityMetrics distributed_hermiticity_metrics(
+    const matrix_m<std::complex<double>> &matrix, const ArrayDesc &descriptor)
+{
+    if (descriptor.m() != descriptor.n())
+        throw std::invalid_argument("Hermiticity metrics require a square descriptor");
+    if (matrix.nr() != descriptor.m_loc() || matrix.nc() != descriptor.n_loc())
+        throw std::invalid_argument("Hermiticity metrics matrix does not match its descriptor");
+
+    auto antihermitian = matrix.copy();
+    ScalapackConnector::pgeadd_f(
+        'C', descriptor.m(), descriptor.n(), -C_ONE, matrix.ptr(), 1, 1, descriptor.desc, C_ONE,
+        antihermitian.ptr(), 1, 1, descriptor.desc);
+
+    double local_norm_squared = 0.0;
+    double local_antihermitian_norm_squared = 0.0;
+    double local_antihermitian_max_abs = 0.0;
+    for (int i = 0; i != matrix.nr(); ++i)
+    {
+        for (int j = 0; j != matrix.nc(); ++j)
+        {
+            local_norm_squared += std::norm(matrix(i, j));
+            local_antihermitian_norm_squared += std::norm(antihermitian(i, j));
+            local_antihermitian_max_abs =
+                std::max(local_antihermitian_max_abs, std::abs(antihermitian(i, j)));
+        }
+    }
+
+    double global_sums[2] = {0.0, 0.0};
+    const double local_sums[2] = {local_norm_squared, local_antihermitian_norm_squared};
+    MPI_Allreduce(local_sums, global_sums, 2, MPI_DOUBLE, MPI_SUM, descriptor.comm());
+    double global_antihermitian_max_abs = 0.0;
+    MPI_Allreduce(&local_antihermitian_max_abs, &global_antihermitian_max_abs, 1, MPI_DOUBLE,
+                  MPI_MAX, descriptor.comm());
+
+    DistributedHermiticityMetrics metrics;
+    metrics.frobenius_norm = std::sqrt(global_sums[0]);
+    metrics.antihermitian_frobenius_norm = std::sqrt(global_sums[1]);
+    metrics.antihermitian_max_abs = global_antihermitian_max_abs;
+    metrics.relative_frobenius_residual =
+        metrics.frobenius_norm > 0.0
+            ? metrics.antihermitian_frobenius_norm / metrics.frobenius_norm
+            : metrics.antihermitian_frobenius_norm;
+    return metrics;
+}
+
+bool rpa_finite_q_matrix_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_RPA_FINITE_Q_MATRIX_DIAG only accepts enabled");
+}
+
 Strict2dWcBlock strict_2d_first_shell_wc_block_diagnostic(const char *value)
 {
     if (value == nullptr || value[0] == '\0') return Strict2dWcBlock::full;
@@ -1360,6 +1413,8 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
     // const auto & mf = chi0.mf;
     const int n_abf = chi0.atbasis_abf.nb_total;
     const auto part_range = chi0.atbasis_abf.get_part_range();
+    const bool rpa_finite_q_matrix_diagnostic = rpa_finite_q_matrix_diagnostic_requested(
+        std::getenv("LIBRPA_RPA_FINITE_Q_MATRIX_DIAG"));
 
     comm_h.barrier();
 
@@ -1404,6 +1459,8 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
     for (const auto &q : qpts)
     {
         coul_block.zero_out();
+        const bool diagnose_finite_q =
+            rpa_finite_q_matrix_diagnostic && !is_gamma_point(q);
 
         // int iq = chi0.pbc.get_k_index_full(q);
         std::array<double, 3> qa = {q.x, q.y, q.z};
@@ -1490,6 +1547,18 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                            vq_end - block_begin);
         }
 
+        if (diagnose_finite_q)
+        {
+            const auto metrics = distributed_hermiticity_metrics(coul_block, desc_nabf_nabf_opt);
+            if (comm_h.is_root())
+                lib_printf(
+                    "RPA_FINITE_Q_MATRIX_DIAG stage=V q=(%.17e,%.17e,%.17e) ifreq=-1 "
+                    "fro=%.17e anti_fro=%.17e anti_max=%.17e anti_rel=%.17e\n",
+                    q.x, q.y, q.z, metrics.frobenius_norm,
+                    metrics.antihermitian_frobenius_norm, metrics.antihermitian_max_abs,
+                    metrics.relative_frobenius_residual);
+        }
+
         // if(comm_h.is_root())
         // printf("Finish RPA blacs 2d  vq comm\n");
         //  char fn[100];
@@ -1514,7 +1583,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 coul_eigenvalues.c, 0.5, headwing_settings.sqrt_coulomb_threshold);
             n_nonsingular_headwing = n_abf - as_int(n_singular);
             if (headwing_settings.rpa_headwing_mode == "qavg")
-                df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf,
+                df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf_opt,
                                                n_nonsingular_headwing);
             desc_headwing_response.init_square_blk(n_nonsingular_headwing, n_nonsingular_headwing,
                                                    0, 0);
@@ -1606,6 +1675,19 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 //     print_matrix_mm_file_parallel(fnc, chi0_block, desc_nabf_nabf);
             }
 
+            if (diagnose_finite_q)
+            {
+                const auto metrics =
+                    distributed_hermiticity_metrics(chi0_block, desc_nabf_nabf_opt);
+                if (comm_h.is_root())
+                    lib_printf(
+                        "RPA_FINITE_Q_MATRIX_DIAG stage=chi0 q=(%.17e,%.17e,%.17e) ifreq=%d "
+                        "fro=%.17e anti_fro=%.17e anti_max=%.17e anti_rel=%.17e\n",
+                        q.x, q.y, q.z, ifreq, metrics.frobenius_norm,
+                        metrics.antihermitian_frobenius_norm, metrics.antihermitian_max_abs,
+                        metrics.relative_frobenius_residual);
+            }
+
             double pi_begin = omp_get_wtime();
             const bool average_gamma_headwing = replace_gamma_headwing &&
                                                 headwing_settings.option_dielect_func == 3 &&
@@ -1658,6 +1740,18 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                                             desc_nabf_nabf_opt.desc, 0.0, coul_chi0_block.ptr(), 1,
                                             1, desc_nabf_nabf_opt.desc);
             }
+            if (diagnose_finite_q)
+            {
+                const auto metrics =
+                    distributed_hermiticity_metrics(coul_chi0_block, desc_nabf_nabf_opt);
+                if (comm_h.is_root())
+                    lib_printf(
+                        "RPA_FINITE_Q_MATRIX_DIAG stage=Vchi0_general q=(%.17e,%.17e,%.17e) "
+                        "ifreq=%d fro=%.17e anti_fro=%.17e anti_max=%.17e anti_rel=%.17e\n",
+                        q.x, q.y, q.z, ifreq, metrics.frobenius_norm,
+                        metrics.antihermitian_frobenius_norm, metrics.antihermitian_max_abs,
+                        metrics.relative_frobenius_residual);
+            }
             // char fnp[100];
             // sprintf(fnp, "pi_ifreq_%d_iq_%d.mtx", ifreq, iq);
             double pi_end = omp_get_wtime();
@@ -1701,6 +1795,12 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 MPI_Allreduce(&trace_pi_loc, &trace_pi, 1, MPI_DOUBLE_COMPLEX, MPI_SUM,
                               comm_h.comm);
                 delete[] ipiv;
+                if (diagnose_finite_q && comm_h.is_root())
+                    lib_printf(
+                        "RPA_FINITE_Q_LOGDET_DIAG q=(%.17e,%.17e,%.17e) ifreq=%d info=%d "
+                        "trace=(%.17e,%.17e) logdet=(%.17e,%.17e)\n",
+                        q.x, q.y, q.z, ifreq, info, trace_pi.real(), trace_pi.imag(),
+                        ln_det.real(), ln_det.imag());
                 rpa_for_omega_q = trace_pi + ln_det;
             }
             double det_end = omp_get_wtime();
@@ -1816,14 +1916,17 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
     // ScalapackConnector::transpose_desc(DESCPI_T, arrdesc_pi.desc);
     pzgetrf_(&range_all, &range_all, loc_piT.ptr(), &one, &one, arrdesc_pi.desc, ipiv, &info);
     double trf_end = omp_get_wtime();
+    if (info != 0)
+        throw LIBRPA_RUNTIME_ERROR("RPA complex LU factorization failed with info=" +
+                                   std::to_string(info));
     // ScalapackConnector::pgetrf_f(range_all,range_all,loc_piT.c,one,one,DESCPI_T,ipiv, info);
     // printf("   after LU myid: %d\n",mpi_comm_global_h.myid);
     // printf("desc myid: %d,  m n: %d,%d,  mb nb: %d, %d,  loc_m_n: %d, %d, myp: %d,%d, npr,npc:
     // %d, %d\n",mpi_comm_global_h.myid, arrdesc_pi.m(),arrdesc_pi.n(),
     // arrdesc_pi.mb(),arrdesc_pi.nb(),
     // arrdesc_pi.m_loc(),arrdesc_pi.n_loc(),arrdesc_pi.myprow(),arrdesc_pi.mypcol(),arrdesc_pi.nprows(),arrdesc_pi.npcols());
-    complex<double> ln_det_loc(0.0, 0.0);
-    complex<double> ln_det_all(0.0, 0.0);
+    double log_abs_det_loc = 0.0;
+    double phase_det_loc = 0.0;
     // complex<double> det_loc(1.0,0.0);
     // complex<double> det_glo(0.0,0.0);
     // vector<complex<double>>  det_dig;
@@ -1847,18 +1950,9 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
             // det_dig.push_back(loc_piT(locr,locc));
             // det_dig_r.push_back(locr);
             // det_dig_c.push_back(locc);
-            complex<double> tmp_ln_det;
-            if (loc_piT(locr, locc).real() > 0)
-            {
-                tmp_ln_det = std::log(loc_piT(locr, locc));
-                // ln_det_dig.push_back(tmp_ln_det);
-            }
-            else
-            {
-                tmp_ln_det = std::log(-loc_piT(locr, locc));
-                // ln_det_dig.push_back(tmp_ln_det);
-            }
-            ln_det_loc += tmp_ln_det;
+            const auto diagonal = loc_piT(locr, locc);
+            log_abs_det_loc += std::log(std::abs(diagonal));
+            phase_det_loc += std::arg(diagonal);
         }
     }
     double ln_end = omp_get_wtime();
@@ -1882,7 +1976,22 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
     //     sprintf(fn, "det_mat_myid_%d.mtx", comm_h.myid);
     //     print_complex_matrix_file("det_mat_loc", det_mm, fn, false);
 
-    MPI_Allreduce(&ln_det_loc, &ln_det_all, 1, MPI_DOUBLE_COMPLEX, MPI_SUM, arrdesc_pi.comm());
+    double determinant_parts_loc[3] = {log_abs_det_loc, phase_det_loc, 0.0};
+    if (arrdesc_pi.mypcol() == arrdesc_pi.icsrc())
+    {
+        for (int ig = 0; ig != range_all; ++ig)
+        {
+            const int locr = arrdesc_pi.indx_g2l_r(ig);
+            if (locr >= 0 && ipiv[locr] != ig + 1) determinant_parts_loc[2] += 1.0;
+        }
+    }
+    double determinant_parts_all[3] = {0.0, 0.0, 0.0};
+    MPI_Allreduce(determinant_parts_loc, determinant_parts_all, 3, MPI_DOUBLE, MPI_SUM,
+                  arrdesc_pi.comm());
+    const double phase =
+        std::remainder(determinant_parts_all[1] + determinant_parts_all[2] * 0.5 * TWO_PI,
+                       TWO_PI);
+    const complex<double> ln_det_all(determinant_parts_all[0], phase);
     double det_end = omp_get_wtime();
     // if(comm_h.myid == 0)
     //     lib_printf("    | Det time   trf: %f   ln: %f   allreduce:

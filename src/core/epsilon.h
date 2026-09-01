@@ -41,9 +41,20 @@ enum class Strict2dWcBlock
     body
 };
 
+struct DistributedHermiticityMetrics
+{
+    double frobenius_norm = 0.0;
+    double antihermitian_frobenius_norm = 0.0;
+    double antihermitian_max_abs = 0.0;
+    double relative_frobenius_residual = 0.0;
+};
+
 Strict2dQshellRegion classify_strict_2d_qshell(double q_norm, double first_q_norm);
 Strict2dQradialRegion classify_strict_2d_qradial(double q_norm, double first_q_norm);
 bool strict_2d_qradial_is_corner(double q_norm, double first_q_norm);
+DistributedHermiticityMetrics distributed_hermiticity_metrics(
+    const matrix_m<std::complex<double>> &matrix, const ArrayDesc &descriptor);
+bool rpa_finite_q_matrix_diagnostic_requested(const char *value);
 Strict2dWcBlock strict_2d_first_shell_wc_block_diagnostic(const char *value);
 bool strict_2d_wc_block_keeps(Strict2dWcBlock block, int row, int column, int head_index);
 Vector3_Order<double> strict_2d_minimum_image_q(const PeriodicBoundaryData &pbc,
