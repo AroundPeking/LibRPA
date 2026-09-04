@@ -120,6 +120,16 @@ void TFGrids::reset(const unsigned &N)
     set_freq();
 }
 
+std::complex<double> TFGrids::get_time_to_frequency_factor(
+    const size_t ifreq, const size_t itime) const
+{
+    if (ifreq >= n_grids || itime >= n_time_grids)
+        throw std::out_of_range("time-to-frequency transform index out of range");
+    if (grid_type == LIBRPA_TFGRID_FD_MATSUBARA)
+        return fourier_t2f(static_cast<int>(ifreq), static_cast<int>(itime));
+    return costrans_t2f(static_cast<int>(ifreq), static_cast<int>(itime));
+}
+
 TFGrids::~TFGrids()
 {
     /* unset(); */

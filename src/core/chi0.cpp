@@ -83,6 +83,18 @@ using Chi0BlockKey = Chi0CollectKey;
 template <typename Tdata>
 using Chi0CollectMap = std::map<int, std::map<Chi0BlockKey, RI::Tensor<Tdata>>>;
 
+template <typename Tdata>
+static Tdata time_to_frequency_factor_as(const TFGrids &tfg,
+                                         const std::size_t ifreq,
+                                         const std::size_t itime)
+{
+    const auto factor = tfg.get_time_to_frequency_factor(ifreq, itime);
+    if constexpr (std::is_same<Tdata, std::complex<double>>::value)
+        return factor;
+    else
+        return factor.real();
+}
+
 using Chi0CollectRequest = std::pair<std::set<int>, std::set<int>>;
 using Chi0ExactCollectRequest = std::pair<std::set<int>, std::set<Chi0CollectKey>>;
 
@@ -939,8 +951,14 @@ void Chi0::build_chi0_q_space_time(const LibrpaParallelRouting routing, const Cs
 {
     const bool force_complex_spacetime = force_complex_spacetime_diagnostic_requested(
         std::getenv("LIBRPA_FORCE_COMPLEX_SPACETIME_DIAG"));
+    const bool finite_temperature =
+        tfg.get_grid_type() == LIBRPA_TFGRID_FD_MATSUBARA;
+    if (finite_temperature && routing != LIBRPA_ROUTING_LIBRI)
+        throw LIBRPA_RUNTIME_ERROR(
+            "finite-temperature space-time chi0 currently requires LibRI routing");
     const bool physical_soc = mf.get_n_spinor() > 1;
-    const bool use_complex_tensor = physical_soc || force_complex_spacetime;
+    const bool use_complex_tensor =
+        physical_soc || force_complex_spacetime || finite_temperature;
     if (force_complex_spacetime && comm_h.is_root())
     {
         global::lib_printf(
@@ -1307,7 +1325,7 @@ static void build_gf_Rt_libri_kblacs_para(
     global::profiler.stop("build_gf_Rt_libri_kblacs_para");
 }
 
-// Perform both R-k Fourier transform and time-freq cosine transform of chi0
+// Perform both R-k Fourier transform and the active time-frequency transform of chi0
 // Only for LibRI routing
 template <typename Tdata>
 static void chi_libri_ft_ct(
@@ -1363,7 +1381,7 @@ static void chi_libri_ft_ct(
         const auto &n_mu = atbasis_abf.get_atom_nb(Mu);
         const auto &n_nu = atbasis_abf.get_atom_nb(Nu);
         const double freq = tfg.get_freq_nodes()[ifreq];
-        const double trans = tfg.get_costrans_t2f()(ifreq, it);
+        const auto trans = tfg.get_time_to_frequency_factor(ifreq, it);
         // ofs_myid << "Locating chi" << endl;
         const auto &chi = chi0_q[freq][q][static_cast<atom_t>(Mu)][static_cast<atom_t>(Nu)];
         // ofs_myid << n_mu << " " << n_nu << endl;
@@ -1440,8 +1458,8 @@ static void chi_libri_ct_accumulate_R(const int &isp, const double spin_scale, c
         const auto &task = tasks[itask];
         for (std::size_t ifreq = 0; ifreq != freqs.size(); ++ifreq)
         {
-            const double trans = tfg.get_costrans_t2f()(as_int(ifreq), it);
-            const Tdata scale = Tdata(spin_scale * trans);
+            const Tdata scale = spin_scale
+                                * time_to_frequency_factor_as<Tdata>(tfg, ifreq, it);
             *task.dst_by_freq[ifreq]->data += scale * *task.src->data;
         }
     }
@@ -1634,7 +1652,7 @@ static void chi_libri_ft_tw(
         const auto &Mu = index[2];
         const auto &Nu = index[3];
         const double freq = tfg.get_freq_nodes()[ifreq];
-        const double trans = tfg.get_costrans_t2f()(ifreq, it);
+        const auto trans = tfg.get_time_to_frequency_factor(ifreq, it);
         auto &chi = chi0_q[freq][q][Mu][Nu];
         const auto &cm_chi0 = chi0_tau_q.at(tau).at(q).at(Mu).at(Nu);
         LapackConnector::axpy(cm_chi0.size, trans, cm_chi0.c, 1, chi.c, 1);
@@ -2129,7 +2147,7 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
     // omp_init_lock(&lock_chi0_fourier_cosine);
     // int count_gf = 0;
     map<double, Chi0CollectMap<Tdata>> chi0_freq_R;
-    for (size_t it = 0; it != tfg.size(); it++)
+    for (size_t it = 0; it != tfg.get_n_time_grids(); it++)
     {
         const double tau = tfg.get_time_nodes()[it];
         // cout << tau << " ";
@@ -2375,7 +2393,7 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
             }
             else
             {
-                profiler.start("chi0_libri_routing_ct_R", "Cosine transform to R-space");
+                profiler.start("chi0_libri_routing_ct_R", "Time-frequency transform in R-space");
                 const auto &atpairs_ct = use_chi0_rspace_symmetry && !use_shrink_chi
                                              ? symmetry_irreducible_atpairs
                                              : atpairs_chi0;
@@ -2497,7 +2515,7 @@ void Chi0::build_chi0_q_space_time_R_tau_routing(const Cs_LRI &Cs,
     // taus and Rs to compute on MPI task
     // tend to calculate more Rs on one process
     vector<pair<int, int>> itauiRs_local = librpa_int::dispatcher(
-        0, tfg.size(), 0, Rlist_gf.size(), comm_h.myid, comm_h.nprocs, true, false);
+        0, tfg.get_n_time_grids(), 0, Rlist_gf.size(), comm_h.myid, comm_h.nprocs, true, false);
     map<Vector3_Order<double>, int> qlist2myid;
 
     const auto &qlist = this->active_qpoints();
@@ -2562,7 +2580,8 @@ void Chi0::build_chi0_q_space_time_R_tau_routing(const Cs_LRI &Cs,
                             for (int ifreq = 0; ifreq != nfreq; ifreq++)
                             {
                                 double freq = tfg.get_freq_nodes()[ifreq];
-                                double trans = tfg.get_costrans_t2f()(ifreq, itau);
+                                const auto trans =
+                                    tfg.get_time_to_frequency_factor(ifreq, itau);
                                 const complex<double> weight = trans * kphase;
                                 /* cout << weight << endl; */
                                 // if(freq==tfg.get_freq_nodes()[10] && tau ==
@@ -2648,6 +2667,7 @@ void Chi0::build_chi0_q_space_time_atom_pair_routing(const Cs_LRI &Cs,
     const auto &latvec = this->pbc.latvec;
     const auto &qlist = this->active_qpoints();
     const int nfreq = as_int(tfg.size());
+    const int ntime = as_int(tfg.get_n_time_grids());
 
     const auto n_spinor = mf.get_n_spinor();
 
@@ -2676,7 +2696,7 @@ void Chi0::build_chi0_q_space_time_atom_pair_routing(const Cs_LRI &Cs,
                     {
                         for (auto &R : Rlist_gf)
                         {
-                            for (int it = 0; it != nfreq; it++)
+                            for (int it = 0; it != ntime; it++)
                             {
                                 double tau = tfg.get_time_nodes()[it];
                                 ComplexMatrix tmp_chi0_tau(
@@ -2692,7 +2712,8 @@ void Chi0::build_chi0_q_space_time_atom_pair_routing(const Cs_LRI &Cs,
                                     for (int ifreq = 0; ifreq != nfreq; ifreq++)
                                     {
                                         double freq = tfg.get_freq_nodes()[ifreq];
-                                        double trans = tfg.get_costrans_t2f()(ifreq, it);
+                                        const auto trans =
+                                            tfg.get_time_to_frequency_factor(ifreq, it);
                                         const complex<double> weight = trans * kphase;
                                         /* const complex<double> cos_weight_kpashe = kphase *
                                          * tfg.get_costrans_t2f()[ifreq, it]; */
