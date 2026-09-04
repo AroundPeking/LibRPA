@@ -1514,7 +1514,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 coul_eigenvalues.c, 0.5, headwing_settings.sqrt_coulomb_threshold);
             n_nonsingular_headwing = n_abf - as_int(n_singular);
             if (headwing_settings.rpa_headwing_mode == "qavg")
-                df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf,
+                df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf_opt,
                                                n_nonsingular_headwing);
             desc_headwing_response.init_square_blk(n_nonsingular_headwing, n_nonsingular_headwing,
                                                    0, 0);

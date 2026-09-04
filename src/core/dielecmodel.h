@@ -310,7 +310,8 @@ public:
     // std::complex<double> compute_Cijk(const librpa_int::Cs_LRI &Cs_data, int mu, int I, int i,
     // int J, int j, int ik); transform wing from ABF to Coulomb representation
     void wing_mu_to_lambda(matrix_m<std::complex<double>> &sqrtveig_blacs,
-                           ArrayDesc &desc_nabf_nabf_opt, std::size_t n_nonsingular_in);
+                           const ArrayDesc &desc_nabf_nabf_opt,
+                           std::size_t n_nonsingular_in);
     // tranform Cs_ij(R) to Cs_ij(k)
     // diagonalize real Vq_cut(q=0)
     // void get_Xv_real(double vq_threshold, const librpa_int::atpair_k_cplx_mat_t &Vq);
@@ -457,6 +458,10 @@ double strict_2d_bare_coulomb_gamma_average(const std::vector<double> &weights,
 
 ArrayDesc make_rpa_chi0v_wing_desc(const ArrayDesc &desc_body, const int wing_row_offset,
                                    const int wing_rows_loc, const int wing_cols_loc);
+
+bool rpa_headwing_matrix_matches_descriptor(const matrix_m<std::complex<double>> &matrix,
+                                              const ArrayDesc &descriptor,
+                                              const ArrayDesc &expected_descriptor);
 
 std::complex<double> compute_rpa_chi0v_headwing_trace_log_average(
     const matrix_m<std::complex<double>> &head, const matrix_m<std::complex<double>> &schur_l,
