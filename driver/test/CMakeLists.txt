@@ -54,3 +54,10 @@ add_executable(
   ../rpa_qsum.cpp
 )
 add_test(NAME test_rpa_qsum COMMAND $<TARGET_FILE:test_rpa_qsum>)
+
+add_executable(
+  test_bz_sampling_utils
+  test_bz_sampling_utils.cpp
+  ../bz_sampling_utils.cpp
+)
+add_test(NAME test_bz_sampling_utils COMMAND $<TARGET_FILE:test_bz_sampling_utils>)

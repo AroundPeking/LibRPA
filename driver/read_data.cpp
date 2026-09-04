@@ -1,6 +1,7 @@
 #include "read_data.h"
 #include <librpa_enums.h>
 
+#include "bz_sampling_utils.h"
 #include "reader_2d_coulomb_head.h"
 #include "reader_basis.h"
 #include "reader_eigenvec.h"
@@ -16,6 +17,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cctype>
 #include <cerrno>
@@ -1628,6 +1630,7 @@ void read_bz_sampling(const std::string &file_path)
             + std::to_string(n_kpoints_scf) + " != " + std::to_string(driver::n_kpoints));
     }
 
+    std::vector<std::array<double, 3>> kfracs(static_cast<std::size_t>(n_kpoints_scf));
     std::vector<double> kvecs(3 * n_kpoints_scf);
     std::vector<double> kweights(n_kpoints_scf);
     std::vector<int> map_q_ks(n_kpoints_scf, -1);
@@ -1641,6 +1644,7 @@ void read_bz_sampling(const std::string &file_path)
         double kfrac_x, kfrac_y, kfrac_z;
         infile >> ik_read >> kweights[i];
         infile >> kfrac_x >> kfrac_y >> kfrac_z;
+        kfracs[static_cast<std::size_t>(i)] = {kfrac_x, kfrac_y, kfrac_z};
         infile >> kvecs[3 * i] >> kvecs[3 * i + 1] >> kvecs[3 * i + 2];
         infile >> ik_ibz >> ik_rep;
         if (!infile.good())
@@ -1688,6 +1692,24 @@ void read_bz_sampling(const std::string &file_path)
         weight_sum += kweights[i];
     }
     infile.close();
+
+    const auto pds = librpa_int::api::get_dataset_instance(driver::h);
+    const auto &G = pds->pbc.G;
+    const std::array<double, 9> reciprocal_cartesian{
+        TWO_PI * G.e11, TWO_PI * G.e12, TWO_PI * G.e13,
+        TWO_PI * G.e21, TWO_PI * G.e22, TWO_PI * G.e23,
+        TWO_PI * G.e31, TWO_PI * G.e32, TWO_PI * G.e33,
+    };
+    const auto canonical_kvectors = driver::canonical_bz_kvectors_from_fractional(
+        kfracs, kvecs, reciprocal_cartesian, kSymmetryKpointMatchTol);
+    kvecs = canonical_kvectors.kvectors;
+    if (canonical_kvectors.maximum_reported_difference > 1.0e-12)
+    {
+        global::lib_printf_root(
+            "Canonicalized BZ Cartesian k-vectors from fractional coordinates; "
+            "maximum reported discrepancy = %.8e\n",
+            canonical_kvectors.maximum_reported_difference);
+    }
 
     if (std::abs(weight_sum - 1.0) > kBzSamplingWeightSumTol)
     {

@@ -6,6 +6,7 @@ set_target_properties(rpa_exe PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
 
 list(APPEND exe_sources
+  bz_sampling_utils.cpp
   driver.cpp
   input_parser.cpp
   inputfile.cpp
