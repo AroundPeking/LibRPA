@@ -227,6 +227,9 @@ void TFGrids::generate_finite_beta_matsubara(const size_t n_time,
         throw LIBRPA_RUNTIME_ERROR("finite-beta grid requires at least one frequency");
     if (n_time == 0)
         throw LIBRPA_RUNTIME_ERROR("finite-beta grid requires at least one time point");
+    if (n_grids > n_time / 2 + 1)
+        throw LIBRPA_RUNTIME_ERROR(
+            "finite-beta grid requests Matsubara modes above the midpoint-grid Nyquist limit");
     if (!std::isfinite(beta_ha_inv) || beta_ha_inv <= 0.0)
         throw LIBRPA_RUNTIME_ERROR("finite-beta grid requires positive finite beta");
 

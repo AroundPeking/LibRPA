@@ -7,6 +7,7 @@
 
 #include "testutils.h"
 
+#include <algorithm>
 #include <iostream>
 #include <cassert>
 #include <cmath>
@@ -154,13 +155,26 @@ void check_finite_beta_matsubara_grid()
         rejected = true;
     }
     assert(rejected);
+
+    rejected = false;
+    try
+    {
+        TFGrids aliased(4);
+        aliased.generate_finite_beta_matsubara(4, beta);
+    }
+    catch (const std::runtime_error &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
 }
 
 double finite_beta_rpa_model_sum(const std::size_t nfreq, const double beta, const double pole,
                                  const bool add_power4_tail)
 {
     TFGrids tfg(nfreq);
-    tfg.generate_finite_beta_matsubara(8, beta);
+    const std::size_t ntime = std::max<std::size_t>(8, 2 * (nfreq - 1));
+    tfg.generate_finite_beta_matsubara(ntime, beta);
     double sum = 0.0;
     for (const double frequency : tfg.get_freq_nodes())
     {
