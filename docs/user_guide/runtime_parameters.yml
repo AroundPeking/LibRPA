@@ -80,6 +80,7 @@ blocks:
       - api.use_kpara_scf_eigvec
       - api.tfgrids_type
       - api.nfreq
+      - api.ntau
       - api.tfgrids_freq_min
       - api.tfgrids_freq_interval
       - api.tfgrids_freq_max

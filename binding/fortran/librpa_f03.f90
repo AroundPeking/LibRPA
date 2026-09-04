@@ -94,6 +94,8 @@ module librpa_f03
    integer, parameter, public :: LIBRPA_TFGRID_MINIMAX = 3              !< Minimax grid
    integer, parameter, public :: LIBRPA_TFGRID_EVENSPACED = 4           !< Evenly spaced
    integer, parameter, public :: LIBRPA_TFGRID_EVENSPACED_TF = 5        !< Evenly spaced in time-frequency
+   integer, parameter, public :: LIBRPA_TFGRID_SPLIT_GL = 6             !< Split Gauss-Legendre
+   integer, parameter, public :: LIBRPA_TFGRID_FD_MATSUBARA = 7         !< Finite-beta Matsubara
    !> @}
 
    !> @name Angular basis ordering conventions
@@ -156,6 +158,7 @@ module librpa_f03
       integer(c_int) :: use_kpara_scf_eigvec
       integer(c_int) :: tfgrids_type
       integer(c_int) :: nfreq
+      integer(c_int) :: ntau
       real(c_double) :: tfgrids_freq_min
       real(c_double) :: tfgrids_freq_interval
       real(c_double) :: tfgrids_freq_max
@@ -260,6 +263,8 @@ module librpa_f03
       integer :: tfgrids_type
       !> Number of frequency integration grid points.
       integer :: nfreq
+      !> Number of imaginary-time points for the finite-beta Matsubara grid.
+      integer :: ntau
       !> Minimum frequency for grid generation, in Hartree.
       real(dp) :: tfgrids_freq_min
       !> Frequency interval for even-spaced grids, in Hartree.
@@ -1144,6 +1149,7 @@ contains
       call sync_opt(opts%use_kpara_scf_eigvec,    opts%opts_c%use_kpara_scf_eigvec,    direction)
       call sync_opt(opts%tfgrids_type,            opts%opts_c%tfgrids_type,            direction)
       call sync_opt(opts%nfreq,                   opts%opts_c%nfreq,                   direction)
+      call sync_opt(opts%ntau,                    opts%opts_c%ntau,                    direction)
       call sync_opt(opts%tfgrids_freq_min,        opts%opts_c%tfgrids_freq_min,        direction)
       call sync_opt(opts%tfgrids_freq_interval,   opts%opts_c%tfgrids_freq_interval,   direction)
       call sync_opt(opts%tfgrids_freq_max,        opts%opts_c%tfgrids_freq_max,        direction)

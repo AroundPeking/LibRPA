@@ -54,6 +54,7 @@ void librpa_init_options(LibrpaOptions *opts)
 
     opts->tfgrids_type = LIBRPA_TFGRID_UNSET;
     opts->nfreq = 6;
+    opts->ntau = 0;
     opts->tfgrids_freq_min = 0.005;
     opts->tfgrids_freq_interval = 0.0;
     opts->tfgrids_freq_max = 1000.0;

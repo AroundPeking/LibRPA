@@ -112,7 +112,24 @@ void reject_spinor_symmetry_speedup(const Dataset &ds, const char *calculation)
 void initialize_ds_tfgrids(Dataset &ds, const LibrpaOptions &opts)
 {
     global::profiler.start("initialize_ds_tfgrids");
+    if (opts.nfreq <= 0)
+        throw LIBRPA_RUNTIME_ERROR("number of frequency points must be positive");
     ds.tfg.reset(opts.nfreq);
+    if (opts.tfgrids_type == LIBRPA_TFGRID_FD_MATSUBARA)
+    {
+        if (!ds.fermi_dirac_reference.enabled)
+            throw LIBRPA_RUNTIME_ERROR(
+                "fd_matsubara requires an explicit Fermi-Dirac occupation reference");
+        if (opts.ntau <= 0)
+            throw LIBRPA_RUNTIME_ERROR("fd_matsubara requires positive ntau");
+        ds.tfg.generate_finite_beta_matsubara(
+            static_cast<std::size_t>(opts.ntau), 1.0 / ds.fermi_dirac_reference.kbt_ha);
+        global::profiler.stop("initialize_ds_tfgrids");
+        return;
+    }
+    if (ds.fermi_dirac_reference.enabled)
+        throw LIBRPA_RUNTIME_ERROR(
+            "Fermi-Dirac finite-temperature mode requires tfgrids_type = fd_matsubara");
     double emin = opts.tfgrids_freq_min;
     double eintv = opts.tfgrids_freq_interval;
     double emax = opts.tfgrids_freq_max;

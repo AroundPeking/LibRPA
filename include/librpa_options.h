@@ -77,7 +77,8 @@ typedef struct
 
     //! Type of time/frequency grids.
     /*!
-     * Available driver values: `GL`, `GC-I`, `GL-II`, `minimax`, `evenspaced`, `evenspaced_tf`.
+     * Available driver values: `GL`, `GC-I`, `GL-II`, `minimax`, `evenspaced`,
+     * `evenspaced_tf`, `split-GL`, `fd_matsubara`.
      * The driver maps the unset API value to `minimax`.
      *
      * @par Default
@@ -89,6 +90,13 @@ typedef struct
     //! @par Default
     //! 6
     int nfreq;
+
+    //! Number of imaginary-time points for `fd_matsubara`.
+    //! Ignored by other grid types. A positive value is required for
+    //! `fd_matsubara`.
+    //! @par Default
+    //! 0
+    int ntau;
 
     /* ============================================================================= */
     /* Parameters for time and freqeuncy grids.

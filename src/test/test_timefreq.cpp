@@ -3,6 +3,7 @@
 #include "../mpi/global_mpi.h"
 #include "../io/global_io.h"
 #include "../io/stl_io_helper.h"
+#include "../utils/constants.h"
 
 #include "testutils.h"
 
@@ -13,6 +14,15 @@
 
 using namespace std;
 using namespace librpa_int;
+
+namespace
+{
+void require_near(const double actual, const double expected, const double tolerance)
+{
+    if (std::abs(actual - expected) > tolerance)
+        throw std::runtime_error("values differ beyond tolerance");
+}
+}
 
 void check_initialize()
 {
@@ -80,6 +90,64 @@ void check_gauss_grids()
         assert(std::fabs(split_weight[i] - split_ref_weight[i]) < tol);
         if (i > 0) assert(split_freq[i - 1] < split_freq[i]);
     }
+}
+
+void check_finite_beta_matsubara_grid()
+{
+    constexpr std::size_t nfreq = 3;
+    constexpr std::size_t ntau = 4;
+    constexpr double beta = 8.0;
+    constexpr double tol = 1.0e-13;
+
+    TFGrids tfg(nfreq);
+    tfg.generate_finite_beta_matsubara(ntau, beta);
+    assert(tfg.get_grid_type() == LIBRPA_TFGRID_FD_MATSUBARA);
+    assert(tfg.get_n_grids() == nfreq);
+    assert(tfg.get_n_time_grids() == ntau);
+
+    const auto frequencies = tfg.get_freq_nodes();
+    const auto frequency_weights = tfg.get_freq_weights();
+    const auto times = tfg.get_time_nodes();
+    const auto time_weights = tfg.get_time_weights();
+    for (std::size_t itau = 0; itau != ntau; ++itau)
+    {
+        require_near(times[itau], (itau + 0.5) * beta / ntau, tol);
+        require_near(time_weights[itau], beta / ntau, tol);
+    }
+    for (std::size_t ifreq = 0; ifreq != nfreq; ++ifreq)
+    {
+        require_near(frequencies[ifreq], TWO_PI * ifreq / beta, tol);
+        require_near(frequency_weights[ifreq],
+                     (ifreq == 0 ? 0.5 * TWO_PI : TWO_PI) / beta, tol);
+    }
+
+    const auto &fourier = tfg.get_fourier_t2f();
+    assert(fourier.nr == static_cast<int>(nfreq));
+    assert(fourier.nc == static_cast<int>(ntau));
+    for (std::size_t ifreq = 0; ifreq != nfreq; ++ifreq)
+    {
+        std::complex<double> transformed_constant = 0.0;
+        for (std::size_t itau = 0; itau != ntau; ++itau)
+        {
+            const auto expected = (beta / ntau)
+                                  * std::exp(std::complex<double>(0.0, 1.0)
+                                             * frequencies[ifreq] * times[itau]);
+            require_near(std::abs(fourier(ifreq, itau) - expected), 0.0, tol);
+            transformed_constant += fourier(ifreq, itau);
+        }
+        require_near(std::abs(transformed_constant - (ifreq == 0 ? beta : 0.0)), 0.0, tol);
+    }
+
+    bool rejected = false;
+    try
+    {
+        tfg.generate_finite_beta_matsubara(0, beta);
+    }
+    catch (const std::runtime_error &)
+    {
+        rejected = true;
+    }
+    assert(rejected);
 }
 
 void check_minimax_ng16_diamond_k222()
@@ -210,6 +278,7 @@ int main (int argc, char **argv)
 
     check_initialize();
     check_gauss_grids();
+    check_finite_beta_matsubara_grid();
     check_minimax_ng16_diamond_k222();
     check_minimax_ng6_HF_123();
     check_minimax_ng32_H2O();

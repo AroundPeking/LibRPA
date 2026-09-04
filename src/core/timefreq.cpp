@@ -3,6 +3,8 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <cmath>
+#include <complex>
 #include <fstream>
 #include <iostream>
 #include <utility>
@@ -27,10 +29,11 @@ const string TFGrids::GRID_TYPES_NOTES[LIBRPA_TFGRID_COUNT] =
         "Even-spaced frequency grids",
         "Even-spaced time-frequency grids (debug use)",
         "Split Gauss-Legendre grids",
+        "Finite-beta Fermi-Dirac/Matsubara grids",
     };
 
 const bool TFGrids::SUPPORT_TIME_GRIDS[LIBRPA_TFGRID_COUNT] =
-    { false, false, false, true, false, true, false };
+    { false, false, false, true, false, true, false, true };
 
 void TFGrids::set_freq()
 {
@@ -40,13 +43,19 @@ void TFGrids::set_freq()
 
 void TFGrids::set_time()
 {
-    time_nodes.resize(n_grids);
-    time_weights.resize(n_grids);
+    set_time(n_grids);
+}
+
+void TFGrids::set_time(const size_t n_time)
+{
+    n_time_grids = n_time;
+    time_nodes.resize(n_time_grids);
+    time_weights.resize(n_time_grids);
     costrans_t2f.create(n_grids, n_grids);
     sintrans_t2f.create(n_grids, n_grids);
     costrans_f2t.create(n_grids, n_grids);
     sintrans_f2t.create(n_grids, n_grids);
-    // fourier_t2f.create(n_grids, n_grids);
+    fourier_t2f.create(n_grids, n_time_grids);
 }
 
 void TFGrids::show() const
@@ -63,7 +72,7 @@ void TFGrids::show() const
     if (has_time_grids())
     {
         cout << "Time node & weight: " << endl;
-        for ( size_t i = 0; i != n_grids; i++ )
+        for (size_t i = 0; i != n_time_grids; i++)
             lib_printf("%2d %23.16f %23.16f\n", i, time_nodes[i], time_weights[i]);
         cout << "t->f transform: " << endl;
         if (costrans_t2f.size)
@@ -85,7 +94,9 @@ void TFGrids::show() const
 
 void TFGrids::unset()
 {
+    grid_type = LIBRPA_TFGRID_UNSET;
     n_grids = 0;
+    n_time_grids = 0;
     freq_nodes.clear();
     freq_weights.clear();
     time_nodes.clear();
@@ -94,12 +105,11 @@ void TFGrids::unset()
     sintrans_t2f.create(0, 0);
     costrans_f2t.create(0, 0);
     sintrans_f2t.create(0, 0);
-    // fourier_t2f.create(0, 0);
+    fourier_t2f.create(0, 0);
 }
 
-TFGrids::TFGrids(const unsigned &N)
+TFGrids::TFGrids(const unsigned &N) : grid_type(LIBRPA_TFGRID_UNSET), n_grids(N), n_time_grids(0)
 {
-    n_grids = N;
     set_freq();
 }
 
@@ -197,6 +207,43 @@ void TFGrids::generate_evenspaced_tf(double emin, double eintv, double tmin, dou
         sintrans_f2t(i, i) = 1/weight;
     }
     grid_type = LIBRPA_TFGRID_EVEN_SPACED_TF;
+}
+
+void TFGrids::generate_finite_beta_matsubara(const size_t n_time,
+                                              const double beta_ha_inv)
+{
+    if (n_grids == 0)
+        throw LIBRPA_RUNTIME_ERROR("finite-beta grid requires at least one frequency");
+    if (n_time == 0)
+        throw LIBRPA_RUNTIME_ERROR("finite-beta grid requires at least one time point");
+    if (!std::isfinite(beta_ha_inv) || beta_ha_inv <= 0.0)
+        throw LIBRPA_RUNTIME_ERROR("finite-beta grid requires positive finite beta");
+
+    set_time(n_time);
+    const double time_weight = beta_ha_inv / n_time_grids;
+    for (size_t itime = 0; itime != n_time_grids; ++itime)
+    {
+        time_nodes[itime] = (itime + 0.5) * time_weight;
+        time_weights[itime] = time_weight;
+    }
+
+    const std::complex<double> imag_unit(0.0, 1.0);
+    for (size_t ifreq = 0; ifreq != n_grids; ++ifreq)
+    {
+        freq_nodes[ifreq] = 2.0 * std::acos(-1.0) * ifreq / beta_ha_inv;
+        // Existing RPA paths multiply these weights by 1/(2*pi). These
+        // equivalent integration weights therefore produce
+        // (1/(2*beta)) [F(0) + 2 sum_{l>0} F(nu_l)].
+        freq_weights[ifreq] =
+            (ifreq == 0 ? std::acos(-1.0) : 2.0 * std::acos(-1.0)) / beta_ha_inv;
+        for (size_t itime = 0; itime != n_time_grids; ++itime)
+        {
+            fourier_t2f(ifreq, itime) =
+                time_weight
+                * std::exp(imag_unit * freq_nodes[ifreq] * time_nodes[itime]);
+        }
+    }
+    grid_type = LIBRPA_TFGRID_FD_MATSUBARA;
 }
 
 double TFGrids::generate_minimax(double emin, double emax, double regulation)
@@ -354,6 +401,9 @@ double TFGrids::find_freq_weight(const double & freq) const
 
 void TFGrids::write_cos_sin_trans_matrices(const std::string &filename) const
 {
+    if (grid_type == LIBRPA_TFGRID_FD_MATSUBARA)
+        throw LIBRPA_RUNTIME_ERROR(
+            "finite-beta grids use a complex Fourier matrix, not cosine/sine matrices");
     std::ofstream ofs;
     const int n_grids_int = as_int(n_grids);
     std::vector<int> is_authentic(4, 0);

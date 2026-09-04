@@ -202,6 +202,7 @@ std::string format_runtime_options(const librpa::Options &opts) noexcept
     const std::vector<std::pair<std::string, int>> int_params
         {
             normal_pair(nfreq),
+            normal_pair(ntau),
             normal_pair(n_bands_chi0),
             normal_pair(n_bands_sigc),
             normal_pair(n_params_anacon),
@@ -297,6 +298,8 @@ LibrpaTimeFreqGrid get_tfgrid_type(const std::string& grid_str)
         return LIBRPA_TFGRID_EVEN_SPACED;
     if (grid_str == "evenspaced_tf")
         return LIBRPA_TFGRID_EVEN_SPACED_TF;
+    if (grid_str == "fd_matsubara")
+        return LIBRPA_TFGRID_FD_MATSUBARA;
     throw std::runtime_error("Unknown time-frequency grid string: " + grid_str);
 }
 
@@ -316,6 +319,8 @@ std::string get_tfgrid_string(const LibrpaTimeFreqGrid& grid_type) noexcept
         return "evenspaced";
     if (grid_type == LIBRPA_TFGRID_EVEN_SPACED_TF)
         return "evenspaced_tf";
+    if (grid_type == LIBRPA_TFGRID_FD_MATSUBARA)
+        return "fd_matsubara";
     return "unset";
 }
 
