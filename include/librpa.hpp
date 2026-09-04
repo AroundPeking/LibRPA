@@ -255,6 +255,14 @@ public:
     void set_wg_ekb_efermi(int nspins, int nkpts, int nstates, const double *wg, const double *ekb,
                            double efermi);
 
+    /** @brief Enable an explicit Fermi-Dirac occupation reference. */
+    void set_fermi_dirac_reference(double kbt_ha, double chemical_potential_ha,
+                                   double max_occupation_per_band,
+                                   double occupation_tolerance);
+
+    /** @brief Return to the legacy occupation model. */
+    void clear_fermi_dirac_reference();
+
     /**
      * @brief Set wavefunction coefficients from separate real and imaginary arrays.
      * @param[in] ispin Spin index.

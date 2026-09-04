@@ -6,6 +6,7 @@
 #include "reader/read_data.h"
 #include "reader_2d_coulomb_head.h"
 #include "../src/api/dataset_helper.h"
+#include "../src/core/thermal_occupation.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -1712,3 +1713,63 @@ void read_scf_occ_eigenvalues(const string &file_path, MeanField &mf, bool use_s
     librpa::reader::read_scf_occ_eigenvalues(file_path, mf, use_spinor_wfc,
                                            source_ik_for_target, source_n_kpoints);
 }
+
+bool read_thermal_occupation_reference(const std::string &file_path)
+{
+    using namespace librpa_int;
+
+    if (!path_exists(file_path.c_str())) return false;
+
+    const auto metadata = read_thermal_occupation_metadata(file_path);
+    const auto pds = api::get_dataset_instance(driver::h);
+    const auto &mf = pds->mf;
+    const auto &kweights = pds->pbc.weight_k;
+
+    if (!pds->is_scf_eigocc_set)
+        throw LIBRPA_RUNTIME_ERROR(
+            "Thermal occupation metadata requires mean-field occupations and eigenvalues");
+    if (metadata.spin_channels != mf.get_n_spins()
+        || metadata.kpoints_per_spin != mf.get_n_kpoints()
+        || metadata.bands != mf.get_n_states())
+        throw LIBRPA_RUNTIME_ERROR(
+            "Thermal occupation metadata dimensions do not match band_out");
+    if (kweights.size() != static_cast<std::size_t>(mf.get_n_kpoints()))
+        throw LIBRPA_RUNTIME_ERROR(
+            "Thermal occupation validation requires one weight per SCF k-point");
+
+    const auto &eigenvalues = mf.get_eigenvals();
+    const auto &meanfield_weights = mf.get_weight();
+    std::vector<ThermalOccupationSample> samples;
+    samples.reserve(static_cast<std::size_t>(mf.get_n_spins())
+                    * static_cast<std::size_t>(mf.get_n_kpoints())
+                    * static_cast<std::size_t>(mf.get_n_states()));
+    for (int ispin = 0; ispin != mf.get_n_spins(); ++ispin)
+    {
+        for (int ik = 0; ik != mf.get_n_kpoints(); ++ik)
+        {
+            for (int iband = 0; iband != mf.get_n_states(); ++iband)
+            {
+                samples.push_back({
+                    eigenvalues[ispin](ik, iband),
+                    meanfield_weights[ispin](ik, iband) * mf.get_n_kpoints(),
+                    kweights[static_cast<std::size_t>(ik)],
+                });
+            }
+        }
+    }
+
+    constexpr double occupation_tolerance = 1.0e-12;
+    const double maximum_error = validate_thermal_occupations(
+        metadata, mf.get_efermi(), samples, occupation_tolerance);
+    driver::h.set_fermi_dirac_reference(
+        metadata.kbt_ha, metadata.chemical_potential_ha,
+        metadata.max_occupation_per_band, occupation_tolerance);
+
+    global::lib_printf_root("Fermi-Dirac occupation reference enabled:\n");
+    global::lib_printf_root("| kBT                         (Ha): %18.10e\n", metadata.kbt_ha);
+    global::lib_printf_root("| chemical potential          (Ha): %18.10e\n",
+                            metadata.chemical_potential_ha);
+    global::lib_printf_root("| maximum occupation mismatch     : %18.10e\n", maximum_error);
+    return true;
+}
+

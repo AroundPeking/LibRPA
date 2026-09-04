@@ -15,6 +15,22 @@ double fermi_dirac_derivative(double energy_minus_mu, double kbt_ha);
 // retain responsibility for their own branch sign and k/spin normalization.
 double thermal_green_amplitude(double energy_minus_mu, double tau, double kbt_ha);
 
+struct FermiDiracReference
+{
+    bool enabled = false;
+    double chemical_potential_ha = 0.0;
+    double kbt_ha = 0.0;
+    double max_occupation_per_band = 0.0;
+    double occupation_tolerance = 0.0;
+};
+
+FermiDiracReference make_fermi_dirac_reference(double kbt_ha,
+                                                double chemical_potential_ha,
+                                                double max_occupation_per_band,
+                                                double occupation_tolerance);
+void validate_fermi_dirac_chemical_potential(const FermiDiracReference &reference,
+                                              double meanfield_chemical_potential_ha);
+
 struct ThermalOccupationMetadata
 {
     std::string occupation_model;
@@ -46,4 +62,3 @@ double validate_thermal_occupations(const ThermalOccupationMetadata &metadata,
                                     double occupation_tolerance);
 
 } // namespace librpa_int
-

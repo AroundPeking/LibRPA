@@ -151,6 +151,18 @@ LIBRPA_CPP_H_METHOD_DEF_WRAP_VOID(
 )
 
 LIBRPA_CPP_H_METHOD_DEF_WRAP_VOID(
+    set_fermi_dirac_reference,
+    (double kbt_ha, double chemical_potential_ha, double max_occupation_per_band,
+     double occupation_tolerance),
+    (kbt_ha, chemical_potential_ha, max_occupation_per_band, occupation_tolerance)
+)
+
+void Handler::clear_fermi_dirac_reference()
+{
+    ::librpa_clear_fermi_dirac_reference(this->h_);
+}
+
+LIBRPA_CPP_H_METHOD_DEF_WRAP_VOID(
     set_wfc,
     (int ispin, int ik, int nstates_local, int nbasis_local, const double* wfc_real, const double* wfc_imag),
     (ispin, ik, nstates_local, nbasis_local, wfc_real, wfc_imag)
