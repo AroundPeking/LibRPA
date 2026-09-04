@@ -60,6 +60,8 @@ void check_gauss_grids()
         assert(std::isfinite(gl_weight[i]) && gl_weight[i] > 0.0);
         assert(std::fabs(gl_freq[i] - gl_ref_freq[i]) < tol);
         assert(std::fabs(gl_weight[i] - gl_ref_weight[i]) < tol);
+        require_near(gl.find_correlation_frequency_weight(gl_freq[i]), gl_ref_weight[i] / TWO_PI,
+                     tol);
         if (i > 0) assert(gl_freq[i - 1] < gl_freq[i]);
     }
 
@@ -119,6 +121,8 @@ void check_finite_beta_matsubara_grid()
         require_near(frequencies[ifreq], TWO_PI * ifreq / beta, tol);
         require_near(frequency_weights[ifreq],
                      (ifreq == 0 ? 0.5 * TWO_PI : TWO_PI) / beta, tol);
+        require_near(tfg.find_correlation_frequency_weight(frequencies[ifreq]),
+                     (ifreq == 0 ? 0.5 : 1.0) / beta, tol);
     }
 
     const auto &fourier = tfg.get_fourier_t2f();
@@ -150,6 +154,42 @@ void check_finite_beta_matsubara_grid()
         rejected = true;
     }
     assert(rejected);
+}
+
+double finite_beta_rpa_model_sum(const std::size_t nfreq, const double beta, const double pole,
+                                 const bool add_power4_tail)
+{
+    TFGrids tfg(nfreq);
+    tfg.generate_finite_beta_matsubara(8, beta);
+    double sum = 0.0;
+    for (const double frequency : tfg.get_freq_nodes())
+    {
+        const double denominator = frequency * frequency + pole * pole;
+        const double integrand = std::pow(pole, 4) / (denominator * denominator);
+        sum += tfg.find_correlation_frequency_weight(frequency) * integrand;
+    }
+    if (add_power4_tail) sum += std::pow(pole, 4) * tfg.finite_beta_power4_tail_weight(nfreq);
+    return sum;
+}
+
+void check_finite_beta_rpa_sum_and_tail()
+{
+    constexpr double beta = 8.0;
+    constexpr double pole = 0.7;
+    const double x = 0.5 * beta * pole;
+    const double exact =
+        pole / (8.0 * std::tanh(x)) + beta * pole * pole / (16.0 * std::pow(std::sinh(x), 2));
+
+    const double raw_16_error = std::abs(finite_beta_rpa_model_sum(16, beta, pole, false) - exact);
+    const double raw_32_error = std::abs(finite_beta_rpa_model_sum(32, beta, pole, false) - exact);
+    const double corrected_32_error =
+        std::abs(finite_beta_rpa_model_sum(32, beta, pole, true) - exact);
+
+    if (!(raw_16_error > 5.0 * raw_32_error && raw_16_error < 12.0 * raw_32_error))
+        throw std::runtime_error(
+            "finite-beta RPA model tail does not show the expected N^-3 decay");
+    if (!(corrected_32_error < 0.02 * raw_32_error))
+        throw std::runtime_error("leading power-four Matsubara tail did not improve the model sum");
 }
 
 void check_minimax_ng16_diamond_k222()
@@ -281,6 +321,7 @@ int main (int argc, char **argv)
     check_initialize();
     check_gauss_grids();
     check_finite_beta_matsubara_grid();
+    check_finite_beta_rpa_sum_and_tail();
     check_minimax_ng16_diamond_k222();
     check_minimax_ng6_HF_123();
     check_minimax_ng32_H2O();

@@ -97,6 +97,7 @@ void TFGrids::unset()
     grid_type = LIBRPA_TFGRID_UNSET;
     n_grids = 0;
     n_time_grids = 0;
+    finite_beta_ha_inv = 0.0;
     freq_nodes.clear();
     freq_weights.clear();
     time_nodes.clear();
@@ -229,6 +230,7 @@ void TFGrids::generate_finite_beta_matsubara(const size_t n_time,
     if (!std::isfinite(beta_ha_inv) || beta_ha_inv <= 0.0)
         throw LIBRPA_RUNTIME_ERROR("finite-beta grid requires positive finite beta");
 
+    finite_beta_ha_inv = beta_ha_inv;
     set_time(n_time);
     const double time_weight = beta_ha_inv / n_time_grids;
     for (size_t itime = 0; itime != n_time_grids; ++itime)
@@ -407,6 +409,45 @@ const std::pair<int, int> TFGrids::get_tf_index(const std::pair<double, double> 
 double TFGrids::find_freq_weight(const double & freq) const
 {
     return freq_weights[get_freq_index(freq)];
+}
+
+double TFGrids::find_correlation_frequency_weight(const double freq) const
+{
+    return find_freq_weight(freq) / (2.0 * std::acos(-1.0));
+}
+
+double TFGrids::finite_beta_power4_tail_weight(const size_t first_omitted) const
+{
+    if (grid_type != LIBRPA_TFGRID_FD_MATSUBARA || !(finite_beta_ha_inv > 0.0))
+        throw LIBRPA_RUNTIME_ERROR("power-four Matsubara tail requires a finite-beta grid");
+    if (first_omitted == 0)
+        throw LIBRPA_RUNTIME_ERROR("power-four Matsubara tail must start above zero frequency");
+
+    // Sum a short explicit prefix, then use Euler--Maclaurin for the smooth
+    // positive-index remainder.  This avoids cancellation against zeta(4).
+    constexpr size_t explicit_terms = 64;
+    long double inverse_fourth_sum = 0.0L;
+    for (size_t index = first_omitted; index != first_omitted + explicit_terms; ++index)
+    {
+        const long double value = static_cast<long double>(index);
+        inverse_fourth_sum += 1.0L / (value * value * value * value);
+    }
+    const long double boundary = static_cast<long double>(first_omitted + explicit_terms);
+    const long double inverse = 1.0L / boundary;
+    const long double inverse2 = inverse * inverse;
+    const long double inverse3 = inverse2 * inverse;
+    const long double inverse4 = inverse2 * inverse2;
+    const long double inverse5 = inverse4 * inverse;
+    const long double inverse7 = inverse5 * inverse2;
+    const long double inverse9 = inverse7 * inverse2;
+    const long double inverse11 = inverse9 * inverse2;
+    inverse_fourth_sum += inverse3 / 3.0L + inverse4 / 2.0L + inverse5 / 3.0L - inverse7 / 6.0L +
+                          2.0L * inverse9 / 9.0L - inverse11 / 2.0L;
+
+    const long double two_pi = 2.0L * std::acos(-1.0L);
+    const long double beta = static_cast<long double>(finite_beta_ha_inv);
+    return static_cast<double>(beta * beta * beta * inverse_fourth_sum /
+                               (two_pi * two_pi * two_pi * two_pi));
 }
 
 void TFGrids::write_cos_sin_trans_matrices(const std::string &filename) const
