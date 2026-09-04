@@ -28,6 +28,9 @@ FermiDiracReference make_fermi_dirac_reference(double kbt_ha,
                                                 double chemical_potential_ha,
                                                 double max_occupation_per_band,
                                                 double occupation_tolerance);
+double normalized_fermi_dirac_band_weight(double energy_ha,
+                                          const FermiDiracReference &reference,
+                                          int normalized_kpoint_count);
 void validate_fermi_dirac_chemical_potential(const FermiDiracReference &reference,
                                               double meanfield_chemical_potential_ha);
 

@@ -480,6 +480,7 @@ void read_scf_occ_eigenvalues(const string &file_path, MeanField &mf, bool use_s
                               const std::vector<int> &source_ik_for_target,
                               const int source_n_kpoints_expected)
 {
+    const auto fd_reference = mf.get_fermi_dirac_reference();
     ifstream infile;
     infile.open(file_path);
     if (!infile.good())
@@ -588,6 +589,22 @@ void read_scf_occ_eigenvalues(const string &file_path, MeanField &mf, bool use_s
                             librpa_int::as_size(ik)] == 0)
             {
                 throw std::logic_error("band_out is missing a selected head/wing k-point");
+            }
+        }
+    }
+    if (fd_reference.enabled)
+    {
+        mf.get_efermi() = fd_reference.chemical_potential_ha;
+        mf.set_fermi_dirac_reference(fd_reference);
+        for (int is = 0; is != n_spins; ++is)
+        {
+            for (int ik = 0; ik != n_kpoints_target; ++ik)
+            {
+                for (int ib = 0; ib != n_states; ++ib)
+                {
+                    wskb[is](ik, ib) = normalized_fermi_dirac_band_weight(
+                        eskb[is](ik, ib), fd_reference, n_kpoints_target);
+                }
             }
         }
     }
