@@ -12,6 +12,7 @@
 #include "atom.h"
 #include "pbc.h"
 #include "symmetry_context.h"
+#include "thermal_occupation.h"
 #include "../math/matrix.h"
 #include "../math/complexmatrix.h"
 #include "../math/vector3_order.h"
@@ -51,6 +52,8 @@ private:
     std::map<int, std::map<int, std::map<int, ComplexMatrix>>> wfc;
     //! Fermi energy
     double efermi;
+    //! Explicit finite-temperature occupation model. Disabled by default.
+    FermiDiracReference fermi_dirac_reference;
     void resize(int ns, int nk, int nb, int nao, int n_spinor, int st_ib, int nb_local, int st_iao, int nao_local);
 
 public:
@@ -67,7 +70,8 @@ public:
           eskb(),
           wg(),
           wfc(),
-          efermi(0) {};
+          efermi(0),
+          fermi_dirac_reference() {};
     MeanField(int ns, int nk, int nb, int nao, int n_spinor = 1);
     MeanField(int ns, int nk, int nb, int nao, int n_spinor, int st_ib, int nb_local, int st_iao, int nao_local);
     MeanField(int ns, int nk, int nb, int nao, int st_ib, int nb_local, int st_iao, int nao_local)  // backward compability
@@ -90,6 +94,12 @@ public:
     inline int get_n_spinor() const { return n_spinor; }
     inline double& get_efermi() { return efermi; }
     inline const double& get_efermi() const { return efermi; }
+    inline const FermiDiracReference& get_fermi_dirac_reference() const
+    {
+        return fermi_dirac_reference;
+    }
+    void set_fermi_dirac_reference(const FermiDiracReference& reference);
+    void clear_fermi_dirac_reference();
     std::vector<matrix>& get_eigenvals() { return eskb; }
     const std::vector<matrix>& get_eigenvals() const { return eskb; }
     std::vector<matrix>& get_weight() { return wg; }
@@ -120,6 +130,10 @@ public:
     ComplexMatrix get_dmat_cplx(int ispin, int ispinor_bra, int ispinor_ket, int ikpt) const;
 
     // Density matrix and green's function calculation, serial version
+    //! Positive spectral amplitude including the k-point weight but not the
+    //! negative-time Green-function branch sign.
+    double green_spectral_amplitude(int ispin, int ikpt, int iband,
+                                    double tau, double kpoint_weight) const;
     ComplexMatrix get_dmat_cplx_R(int ispin, int ispinor_bra, int ispinor_ket,
                                   const std::vector<Vector3_Order<double>>& kfrac_list,
                                   const Vector3_Order<int>& R) const;

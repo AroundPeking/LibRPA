@@ -142,6 +142,37 @@ static void test_gf_cplx_Rs_kpara(int nk, int nb, int nocc, double gap, double t
     }
 }
 
+static void test_thermal_gf_cplx_Rs_kpara()
+{
+    constexpr double kbt = 0.002;
+    const double beta = 1.0 / kbt;
+    const double expected = std::exp(-500.0);
+    std::vector<Vector3_Order<double>> kfrac_list;
+    std::vector<Vector3_Order<int>> Rs;
+    auto mf = init_mf_pbc(4, 2, 1, 4.0, kfrac_list, Rs);
+    mf.set_fermi_dirac_reference(
+        make_fermi_dirac_reference(kbt, 0.0, 2.0, 1.0e-12));
+
+    const std::vector<double> taus{0.5 * beta, -0.5 * beta};
+    const auto gf_Rs = get_gf_cplx_imagtimes_Rs_kpara(
+        0, mf, kfrac_list, taus, Rs, mpi_comm_global_h);
+    for (const auto tau : taus)
+    {
+        for (const auto &R : Rs)
+        {
+            if (R != Vector3_Order<int>{0, 0, 0}) continue;
+            const double signed_expected = tau > 0.0 ? expected : -expected;
+            for (int ib = 0; ib != 2; ++ib)
+            {
+                const auto value = gf_Rs.at(tau).at(R)(ib, ib);
+                if (std::abs(value - signed_expected) > expected * 1.0e-12)
+                    throw std::runtime_error(
+                        "k-parallel finite-temperature Green function is unstable");
+            }
+        }
+    }
+}
+
 // Actual data from FHI-aims: a=3A, k222, light, minimal + 2p in tier1, PBE
 static void get_BCC_He_k222_light_min_2p_aims_ref(int &nk, int &nb, std::vector<Vector3_Order<double>> &kfrac_list,
                                                   double &efermi, Matd &eigvals, Matd &eigvecs)
@@ -991,6 +1022,7 @@ int main (int argc, char *argv[])
     test_dmat_cplx_Rs_kpara(15, 4, 2);
     test_gf_cplx_Rs_kpara(3, 7, 2, 1.0, 1.0);
     test_gf_cplx_Rs_kpara(15, 3, 2, 0.5, -1.0);
+    test_thermal_gf_cplx_Rs_kpara();
 
     // Actual examples
     test_dmat_cplx_Rs_kpara();

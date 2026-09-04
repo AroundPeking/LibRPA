@@ -2,6 +2,7 @@
 #include "../core/symmetry_context.h"
 #include <cassert>
 #include <array>
+#include <cmath>
 #include <map>
 #include <stdexcept>
 #include <utility>
@@ -59,6 +60,53 @@ void test_BCC_He_gamma_minimal_basis_aims()
     assert(fequal(gf_gamma(4, 0), { 1.549199411968699e-01, 0}, thres));
     assert(fequal(gf_gamma(0, 4), { 1.549199411968699e-01, 0}, thres));
     assert(fequal(gf_gamma(4, 4), {-0.962374022009208e+00, 0}, thres));
+}
+
+void test_finite_temperature_green_function_uses_stable_combined_factors()
+{
+    using namespace librpa_int;
+
+    constexpr double kbt = 0.002;
+    const double beta = 1.0 / kbt;
+    const double expected = std::exp(-500.0);
+
+    MeanField occupied(1, 1, 1, 1);
+    occupied.get_efermi() = 0.0;
+    occupied.get_eigenvals()[0](0, 0) = -1000.0 * kbt;
+    occupied.get_weight()[0](0, 0) = 2.0;
+    occupied.get_eigenvectors()[0][0][0].create(1, 1);
+    occupied.get_eigenvectors()[0][0][0](0, 0) = {1.0, 0.0};
+    occupied.set_fermi_dirac_reference(
+        make_fermi_dirac_reference(kbt, 0.0, 2.0, 1.0e-12));
+
+    const auto gf_positive = occupied.get_gf_cplx_imagtime(0, 0, 0, 0, 0.5 * beta);
+    if (std::abs(gf_positive(0, 0) - expected) > expected * 1.0e-12)
+        throw std::runtime_error("finite-temperature positive-time Green function is unstable");
+    const std::vector<Vector3_Order<double>> kfrac_list{{0.0, 0.0, 0.0}};
+    const std::vector<Vector3_Order<int>> Rs{{0, 0, 0}};
+    const auto gf_positive_R = occupied.get_gf_cplx_imagtimes_Rs(
+        0, 0, 0, kfrac_list, {0.5 * beta}, Rs);
+    if (std::abs(gf_positive_R.at(0.5 * beta).at(Rs.front())(0, 0) - expected)
+        > expected * 1.0e-12)
+        throw std::runtime_error("finite-temperature real-space Green function is unstable");
+
+    MeanField empty(1, 1, 1, 1);
+    empty.get_efermi() = 0.0;
+    empty.get_eigenvals()[0](0, 0) = 1000.0 * kbt;
+    empty.get_weight()[0](0, 0) = 0.0;
+    empty.get_eigenvectors()[0][0][0].create(1, 1);
+    empty.get_eigenvectors()[0][0][0](0, 0) = {1.0, 0.0};
+    empty.set_fermi_dirac_reference(
+        make_fermi_dirac_reference(kbt, 0.0, 2.0, 1.0e-12));
+
+    const auto gf_negative = empty.get_gf_cplx_imagtime(0, 0, 0, 0, -0.5 * beta);
+    if (std::abs(gf_negative(0, 0) + expected) > expected * 1.0e-12)
+        throw std::runtime_error("finite-temperature negative-time Green function is unstable");
+    const auto gf_negative_R = empty.get_gf_cplx_imagtimes_Rs(
+        0, 0, 0, kfrac_list, {-0.5 * beta}, Rs);
+    if (std::abs(gf_negative_R.at(-0.5 * beta).at(Rs.front())(0, 0) + expected)
+        > expected * 1.0e-12)
+        throw std::runtime_error("finite-temperature negative real-space Green function is unstable");
 }
 
 void test_state_index_energy_bounds()
@@ -323,6 +371,27 @@ void test_symmetry_context_full_grid_kstar_route_matches_direct_full_k()
             }
         }
     }
+
+    mf.set_fermi_dirac_reference(
+        make_fermi_dirac_reference(0.1, 0.0, 2.0, 1.0e-12));
+    const std::vector<double> thermal_taus{-5.0, 5.0};
+    const auto direct_thermal =
+        mf.get_gf_cplx_imagtimes_Rs(0, 0, 0, kfrac_list, thermal_taus, Rs);
+    const auto restored_thermal = get_symmetry_restored_gf_cplx_imagtimes_Rs(
+        ctx, wfc_layouts, mf, 0, 0, 0, kfrac_list, thermal_taus, Rs, atom_nw, -1,
+        &member_kfrac_targets, &representative_indices);
+    for (const auto tau : thermal_taus)
+    {
+        for (const auto &R : Rs)
+        {
+            if (!fequal(direct_thermal.at(tau).at(R)(0, 0),
+                        restored_thermal.at(tau).at(R)(0, 0), {1e-12, 0.0}))
+            {
+                throw std::runtime_error(
+                    "finite-temperature k-star Green function differs from direct full-k");
+            }
+        }
+    }
 }
 
 void test_symmetry_context_kstar_restored_dmat_uses_target_kpoint_gauge()
@@ -401,6 +470,7 @@ void test_symmetry_context_kstar_restored_dmat_uses_target_kpoint_gauge()
 int main(int argc, char *argv[])
 {
     test_BCC_He_gamma_minimal_basis_aims();
+    test_finite_temperature_green_function_uses_stable_combined_factors();
     test_state_index_energy_bounds();
     test_find_highest_occupied_state();
     test_dmat_cplx_Rs_matches_single_R_accumulation();

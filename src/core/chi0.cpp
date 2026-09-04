@@ -841,8 +841,6 @@ void Chi0::build_gf_Rt(Vector3_Order<int> R, double tau)
 
     const int nbands_G = this->nbands_G;
     const auto nsoc = 1;  // TODO replace with meanfield member variable
-    const bool use_soc = mf.get_n_spinor() > 1;
-
     assert(tau != 0);
 
     // temporary Green's function
@@ -863,32 +861,6 @@ void Chi0::build_gf_Rt(Vector3_Order<int> R, double tau)
                 }
                 else
                 {
-                    auto wg = mf.get_weight()[is];
-                    if (tau > 0)
-                        for (std::size_t i = 0; i != wg.size; i++)
-                        {
-                            // wg.c[i] = 1.0 / nkpts *nspins - wg.c[i];
-                            if (use_soc)
-                                wg.c[i] = 1.0 / nkpts - wg.c[i];
-                            else
-                                wg.c[i] = 1.0 / nkpts - wg.c[i] / 2 * nspins;  //
-                            if (wg.c[i] < 0) wg.c[i] = 0;
-                        }
-                    else
-                    {
-                        if (!use_soc) wg *= 0.5 * nspins;
-                    }
-                    matrix scale(nkpts, nbands);
-                    // tau-energy phase
-                    scale = -tau * (mf.get_eigenvals()[is] - mf.get_efermi());
-                    /* print_matrix("-(e-ef)*tau", scale); */
-                    for (std::size_t ie = 0; ie != scale.size; ie++)
-                    {
-                        // NOTE: enforce non-positive phase
-                        if (scale.c[ie] > 0) scale.c[ie] = 0;
-                        scale.c[ie] = std::exp(scale.c[ie]) * wg.c[ie];
-                    }
-                    /* print_matrix("exp(-dE*tau)", scale); */
                     for (int ik = 0; ik != nkpts; ik++)
                     {
                         double ang = -pbc.klist[ik] * (R * pbc.latvec) * TWO_PI;
@@ -897,8 +869,12 @@ void Chi0::build_gf_Rt(Vector3_Order<int> R, double tau)
                         const auto &ev2 = mf.get_eigenvectors().at(is).at(isoc2).at(ik);
                         auto scaled_wfc_conj = conj(ev2);
                         for (int ib = 0; ib != nbands; ib++)
-                            LapackConnector::scal(naos, scale(ik, ib),
+                        {
+                            const double scale = mf.green_spectral_amplitude(
+                                is, ik, ib, tau, 1.0 / static_cast<double>(nkpts));
+                            LapackConnector::scal(naos, scale,
                                                   scaled_wfc_conj.c + naos * ib, 1);
+                        }
                         if (nbands_G >= 0)
                         {
                             for (int ib = nbands_G; ib != nbands; ib++)
@@ -1013,10 +989,8 @@ static void build_gf_Rt_libri_serial(
     global::profiler.start("build_gf_Rt_libri_serial");
 
     const auto nkpts = mf.get_n_kpoints();
-    const auto nspins = mf.get_n_spins();
     const auto nbands = mf.get_n_bands();
     const auto naos = mf.get_n_aos();
-    const bool use_soc = mf.get_n_spinor() > 1;
 
     assert(kfrac_list.size() == as_size(nkpts));
     assert(nbands_G < nbands);
@@ -1129,30 +1103,6 @@ static void build_gf_Rt_libri_serial(
         }
     }
 
-    auto wg = mf.get_weight()[ispin];
-    if (tau > 0)
-    {
-        for (size_t i = 0; i != wg.size; i++)
-        {
-            if (use_soc)
-                wg.c[i] = 1.0 / nkpts - wg.c[i];
-            else
-                wg.c[i] = 1.0 / nkpts - wg.c[i] / 2 * nspins;  //
-            if (wg.c[i] < 0) wg.c[i] = 0;
-        }
-    }
-    else
-    {
-        if (!use_soc) wg *= 0.5 * nspins;
-    }
-    auto scale = -tau * (mf.get_eigenvals()[ispin] - mf.get_efermi());
-    for (size_t ie = 0; ie != scale.size; ie++)
-    {
-        // NOTE: enforce non-positive phase
-        if (scale.c[ie] > 0) scale.c[ie] = 0;
-        scale.c[ie] = std::exp(scale.c[ie]) * wg.c[ie];
-    }
-
     for (const auto &R_IJs : map_R_IJs)
     {
         ComplexMatrix gf_cplx(naos, naos, true);
@@ -1175,7 +1125,11 @@ static void build_gf_Rt_libri_serial(
             // global::ofs_myid << "nkpts " << nkpts << " ik " << ik << " nbands_G " <<  nbands_G <<
             // " " << isoc1 << " " << isoc2 << std::endl;
             for (int ib = 0; ib != nbands; ib++)
-                LapackConnector::scal(naos, scale(ik, ib), scaled_wfc_conj.c + naos * ib, 1);
+            {
+                const double scale = mf.green_spectral_amplitude(
+                    ispin, ik, ib, tau, 1.0 / static_cast<double>(nkpts));
+                LapackConnector::scal(naos, scale, scaled_wfc_conj.c + naos * ib, 1);
+            }
             if (nbands_G >= 0)
             {
                 for (int ib = nbands_G; ib < nbands; ib++)

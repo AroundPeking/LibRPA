@@ -653,17 +653,27 @@ void diele_func::output_gw_gf_kstar_wfc_comparison() const
                     std::vector<double> scales(static_cast<std::size_t>(n_states), 0.0);
                     for (int ib = 0; ib != n_states; ++ib)
                     {
-                        const double occupied =
-                            source_meanfield.get_weight()[0](ik_ibz, ib) * active_to_full *
-                            scale_spin;
-                        const double prefactor =
-                            tau > 0.0 ? std::max(0.0, 1.0 / n_full - occupied) : occupied;
-                        double exponent =
-                            -tau * (source_meanfield.get_eigenvals()[0](ik_ibz, ib) -
-                                    source_meanfield.get_efermi());
-                        exponent = std::min(0.0, exponent);
-                        scales[static_cast<std::size_t>(ib)] =
-                            std::exp(exponent) * prefactor;
+                        if (source_meanfield.get_fermi_dirac_reference().enabled)
+                        {
+                            scales[static_cast<std::size_t>(ib)] =
+                                source_meanfield.green_spectral_amplitude(
+                                    0, ik_ibz, ib, tau, 1.0 / n_full);
+                        }
+                        else
+                        {
+                            const double occupied =
+                                source_meanfield.get_weight()[0](ik_ibz, ib) * active_to_full *
+                                scale_spin;
+                            const double prefactor = tau > 0.0
+                                ? std::max(0.0, 1.0 / n_full - occupied)
+                                : occupied;
+                            double exponent =
+                                -tau * (source_meanfield.get_eigenvals()[0](ik_ibz, ib) -
+                                        source_meanfield.get_efermi());
+                            exponent = std::min(0.0, exponent);
+                            scales[static_cast<std::size_t>(ib)] =
+                                std::exp(exponent) * prefactor;
+                        }
                     }
                     const auto restored = rotate_headwing_wfc_to_kstar_member(
                         *symmetry_context_, member, layouts, atom_nw, kfrac_band[ik_ibz],

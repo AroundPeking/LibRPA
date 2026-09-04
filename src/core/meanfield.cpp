@@ -220,14 +220,14 @@ static std::vector<SymmetryKStarMeanFieldRestoreEntry> build_symmetry_kstar_rest
     return entries;
 }
 
-static ComplexMatrix build_gf_cplx_imagtime_with_prefactor(
+static ComplexMatrix build_gf_cplx_imagtime_with_kpoint_weight(
     const MeanField& mf,
     const int ispin,
     const int ispinor_bra,
     const int ispinor_ket,
     const int ikpt,
     const double tau,
-    const std::vector<double>& prefactors,
+    const double kpoint_weight,
     const int nbands_G)
 {
     const int n_aos = mf.get_n_aos();
@@ -242,9 +242,8 @@ static ComplexMatrix build_gf_cplx_imagtime_with_prefactor(
     auto scaled_wfc_conj = conj(*wfc_ket);
     for (int ib = 0; ib != n_bands; ++ib)
     {
-        const double energy_scale = -tau * (mf.get_eigenvals()[ispin](ikpt, ib) - mf.get_efermi());
-        const double bounded_scale = energy_scale > 0.0 ? 0.0 : energy_scale;
-        const double scale = std::exp(bounded_scale) * prefactors[static_cast<std::size_t>(ib)];
+        const double scale =
+            mf.green_spectral_amplitude(ispin, ikpt, ib, tau, kpoint_weight);
         LapackConnector::scal(n_aos, scale, scaled_wfc_conj.c + n_aos * ib, 1);
     }
     if (nbands_G >= 0)
@@ -387,9 +386,6 @@ get_symmetry_restored_gf_cplx_imagtimes_Rs(
         return gf_tau_R;
     }
 
-    const int n_bands = mf.get_n_bands();
-    const double scale_spin = 0.5 * mf.get_n_spins() * mf.get_n_spinor();
-
     for (const auto tau : imagtimes)
     {
         const double tau_sign = tau > 0.0 ? 1.0 : -1.0;
@@ -398,16 +394,9 @@ get_symmetry_restored_gf_cplx_imagtimes_Rs(
             const auto& entry = restore_entries[ientry];
             const auto& star = *entry.star;
 
-            std::vector<double> prefactors(static_cast<std::size_t>(n_bands), 0.0);
-            for (int ib = 0; ib != n_bands; ++ib)
-            {
-                const double occ_weight = mf.get_weight()[ispin](entry.ik_mf, ib) * scale_spin;
-                prefactors[static_cast<std::size_t>(ib)] =
-                    tau > 0.0 ? std::max(0.0, entry.kpoint_weight - occ_weight) : occ_weight;
-            }
-
-            const auto gf_ibz = build_gf_cplx_imagtime_with_prefactor(
-                mf, ispin, ispinor_bra, ispinor_ket, entry.ik_mf, tau, prefactors, nbands_G);
+            const auto gf_ibz = build_gf_cplx_imagtime_with_kpoint_weight(
+                mf, ispin, ispinor_bra, ispinor_ket, entry.ik_mf, tau,
+                entry.kpoint_weight, nbands_G);
 
             for (std::size_t imember = 0; imember != star.members.size(); ++imember)
             {
@@ -497,7 +486,8 @@ MeanField::MeanField(int ns, int nk, int nb, int nao, int nspinor)
       eskb(),
       wg(),
       wfc(),
-      efermi(0)
+      efermi(0),
+      fermi_dirac_reference()
 {
     resize(ns, nk, nb, nao, nspinor, 0, nb, 0, nao);
 }
@@ -515,7 +505,8 @@ MeanField::MeanField(int ns, int nk, int nb, int nao, int nspinor, int st_ib, in
       eskb(),
       wg(),
       wfc(),
-      efermi(0)
+      efermi(0),
+      fermi_dirac_reference()
 {
     resize(ns, nk, nb, nao, nspinor, st_ib, nb_local, st_iao, nao_local);
 }
@@ -538,6 +529,48 @@ void MeanField::set(int ns, int nk, int nb, int nao, int nspinor, int st_ib, int
         throw LIBRPA_RUNTIME_ERROR("MeanField object already set");
     }
     resize(ns, nk, nb, nao, nspinor, st_ib, nb_local, st_iao, nao_local);
+}
+
+void MeanField::set_fermi_dirac_reference(const FermiDiracReference& reference)
+{
+    if (!reference.enabled)
+        throw std::invalid_argument("cannot set a disabled Fermi-Dirac reference");
+    fermi_dirac_reference = reference;
+}
+
+void MeanField::clear_fermi_dirac_reference()
+{
+    fermi_dirac_reference = FermiDiracReference{};
+}
+
+double MeanField::green_spectral_amplitude(const int ispin,
+                                           const int ikpt,
+                                           const int iband,
+                                           const double tau,
+                                           const double kpoint_weight) const
+{
+    if (ispin < 0 || ispin >= n_spins || ikpt < 0 || ikpt >= n_kpoints
+        || iband < 0 || iband >= n_states)
+        throw std::out_of_range("Green-function state index out of range");
+    if (!std::isfinite(kpoint_weight) || kpoint_weight < 0.0)
+        throw std::invalid_argument("Green-function k-point weight must be finite and nonnegative");
+
+    const double energy = eskb[ispin](ikpt, iband);
+    if (fermi_dirac_reference.enabled)
+    {
+        return kpoint_weight * thermal_green_amplitude(
+            energy - fermi_dirac_reference.chemical_potential_ha,
+            tau,
+            fermi_dirac_reference.kbt_ha);
+    }
+
+    const double scale_spin = 0.5 * n_spins * n_spinor;
+    const double occupied_weight = wg[ispin](ikpt, iband) * scale_spin;
+    const double branch_weight = tau > 0.0
+        ? std::max(0.0, kpoint_weight - occupied_weight)
+        : occupied_weight;
+    const double exponent = std::min(0.0, -tau * (energy - efermi));
+    return std::exp(exponent) * branch_weight;
 }
 
 ComplexMatrix *MeanField::find_wfc(int ispin, int ispinor, int ikpt) noexcept
@@ -776,24 +809,11 @@ ComplexMatrix MeanField::get_gf_cplx_imagtime(int ispin, int ispinor_bra, int is
     assert(ispin < this->n_spins);
     assert(ikpt < this->n_kpoints);
 
-    const double scale_spin = 0.5 * n_spins * n_spinor;
-
-    std::vector<double> wg_sk(wg[ispin].c + n_states * ikpt, wg[ispin].c + n_states * (ikpt + 1));
-    std::vector<double> wg_empty_sk(wg_sk);
+    std::vector<double> scale(static_cast<std::size_t>(n_states));
     for (int ib = 0; ib < n_states; ib++)
     {
-        wg_sk[ib] *= scale_spin;
-        wg_empty_sk[ib] = 1.0 / n_kpoints - wg_empty_sk[ib] * scale_spin;
-        if (wg_empty_sk[ib] < 0.0) wg_empty_sk[ib] = 0.0;
-    }
-    const auto &prefac_occ = tau > 0 ? wg_empty_sk : wg_sk;
-
-    std::vector<double> scale(eskb[ispin].c + n_states * ikpt, eskb[ispin].c + n_states * (ikpt + 1));
-    for (int ib = 0; ib < n_states; ib++)
-    {
-        scale[ib] = -tau * (scale[ib] - efermi);
-        if (scale[ib] > 0) scale[ib] = 0.0;
-        scale[ib] = std::exp(scale[ib]) * prefac_occ[ib];
+        scale[ib] = green_spectral_amplitude(
+            ispin, ikpt, ib, tau, 1.0 / static_cast<double>(n_kpoints));
         if (tau <= 0) scale[ib] *= -1.0;
     }
     const auto wfc_bra = find_wfc(ispin, ispinor_bra, ikpt);
@@ -815,34 +835,12 @@ std::map<double, std::map<Vector3_Order<int>, ComplexMatrix>> MeanField::get_gf_
     const std::vector<Vector3_Order<int>> &Rs) const
 {
     std::map<double, std::map<Vector3_Order<int>, ComplexMatrix>> gf_tau_R;
-    const double scale_spin = 0.5 * n_spins * n_spinor;
-    // NOTE: occupation must be copied here, not reference
-    auto wg_empty = wg[ispin];
-    // cout << "In get_gf_cplx_imagtimes_Rs ispin " << ispin << endl << wg_empty << endl;
-    for (size_t i = 0; i != wg_empty.size; i++)
-    {
-        wg_empty.c[i] = 1.0 / n_kpoints - wg_empty.c[i] * scale_spin;
-        if (wg_empty.c[i] < 0) wg_empty.c[i] = 0;
-        // printf("%d %f\n", i, wg_empty.c[i]);
-    }
-    // cout << "wg_empty " << wg_empty << endl;
-    const auto wg_occ = wg[ispin] * scale_spin;
-    // cout << "wg_occ " << wg_occ << endl;
     for (const auto &tau : imagtimes)
     {
         gf_tau_R[tau] = {};
         // cout << "tau " << tau << endl;
         // Empty local R, cycle after initialize the tau container
         if (Rs.size() == 0) continue;
-        const auto &prefac_occ = tau > 0 ? wg_empty : wg_occ;
-        // cout << "prefac_occ " << prefac_occ << endl;
-        const auto scale = -tau * (eskb[ispin] - efermi);
-        for (size_t ie = 0; ie != scale.size; ie++)
-        {
-            if (scale.c[ie] > 0) scale.c[ie] = 0;
-            scale.c[ie] = std::exp(scale.c[ie]) * prefac_occ.c[ie];
-        }
-        // ofs_myid cout << "tau " << tau << endl << scale << endl;
         for (int ik = 0; ik != n_kpoints; ik++)
         {
             const auto wfc_ket = find_wfc(ispin, ispinor_ket, ik);
@@ -850,7 +848,11 @@ std::map<double, std::map<Vector3_Order<int>, ComplexMatrix>> MeanField::get_gf_
                 throw LIBRPA_RUNTIME_ERROR("wfc of ispinor_ket not found");
             auto scaled_wfc_conj = conj(*wfc_ket);
             for (int ib = 0; ib != n_states; ib++)
-                LapackConnector::scal(n_aos, scale(ik, ib), scaled_wfc_conj.c + n_aos * ib, 1);
+            {
+                const double scale = green_spectral_amplitude(
+                    ispin, ik, ib, tau, 1.0 / static_cast<double>(n_kpoints));
+                LapackConnector::scal(n_aos, scale, scaled_wfc_conj.c + n_aos * ib, 1);
+            }
             const auto wfc_bra = find_wfc(ispin, ispinor_bra, ik);
             if (wfc_bra == nullptr)
                 throw LIBRPA_RUNTIME_ERROR("wfc of ispinor_bra not found");

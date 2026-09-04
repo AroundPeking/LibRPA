@@ -1007,7 +1007,6 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> get_gf_cplx_imagtimes_Rs_kb
                                                         kblacs_ctxt.blacs_h);
     Matz kmat(nk_local, n_elem, MAJOR::COL);
 
-    const double scale_spin = 0.5 * mf.get_n_spins() * mf.get_n_spinor();
     for (const auto tau: imagtimes)
     {
         std::map<Vector3_Order<int>, Matz> gf_tau;
@@ -1033,13 +1032,8 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> get_gf_cplx_imagtimes_Rs_kb
 #pragma omp parallel for schedule(static) if (n_states > 64)
             for (int ib = 0; ib != n_states; ++ib)
             {
-                const double wg_occ = mf.get_weight()[ispin](ik, ib) * scale_spin;
-                double wg_empty = 1.0 / n_kpoints - wg_occ;
-                if (wg_empty < 0.0) wg_empty = 0.0;
-                const double prefac = tau > 0 ? wg_empty : wg_occ;
-                double scale = -tau * (mf.get_eigenvals()[ispin](ik, ib) - mf.get_efermi());
-                if (scale > 0.0) scale = 0.0;
-                scales[ib] = std::exp(scale) * prefac;
+                scales[ib] = mf.green_spectral_amplitude(
+                    ispin, ik, ib, tau, 1.0 / static_cast<double>(n_kpoints));
             }
 
             scaled_wfc_ket = C_ZERO;
@@ -1229,7 +1223,6 @@ get_symmetry_restored_gf_cplx_imagtimes_Rs_kblacs_para(
     if (nk_sum != n_kpoints)
         throw LIBRPA_RUNTIME_ERROR("k-point BLACS context has inconsistent k-point distribution");
 
-    const double scale_spin = 0.5 * mf.get_n_spins() * mf.get_n_spinor();
     const double full_k_count =
         static_cast<double>(symmetry_context.count_kstar_members());
     if (full_k_count <= 0.0)
@@ -1278,13 +1271,8 @@ get_symmetry_restored_gf_cplx_imagtimes_Rs_kblacs_para(
 #pragma omp parallel for schedule(static) if (n_states > 64)
                 for (int ib = 0; ib != n_states; ++ib)
                 {
-                    const double wg_occ = mf.get_weight()[ispin](ik, ib) * scale_spin;
-                    const double prefac = tau > 0.0
-                        ? std::max(0.0, kpoint_weight - wg_occ)
-                        : wg_occ;
-                    double scale = -tau * (mf.get_eigenvals()[ispin](ik, ib) - mf.get_efermi());
-                    if (scale > 0.0) scale = 0.0;
-                    scales[ib] = std::exp(scale) * prefac;
+                    scales[ib] = mf.green_spectral_amplitude(
+                        ispin, ik, ib, tau, kpoint_weight);
                 }
 
                 scaled_wfc_ket = C_ZERO;

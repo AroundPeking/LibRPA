@@ -16,7 +16,6 @@
 #include "../core/pbc.h"
 #include "../core/ri.h"
 #include "../core/timefreq.h"
-#include "../core/thermal_occupation.h"
 #include "../math/matrix_m.h"
 #include "../math/symmetry.h"
 #include "../mpi/base_blacs.h"
@@ -96,8 +95,6 @@ public:
     MeanField mf;
     //! Whether occupation/eigenvalue data have been supplied after dimensions.
     bool is_scf_eigocc_set;
-    //! Explicit finite-temperature occupation model. Disabled by default.
-    FermiDiracReference fermi_dirac_reference;
     //! Velocity/momentum matrix input.
     //! Currently consumed by analytic head/wing construction.
     //! File readers may convert producer-specific momentum/velocity files before

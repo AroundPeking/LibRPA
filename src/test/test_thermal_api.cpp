@@ -25,17 +25,18 @@ int main(int argc, char **argv)
     {
         librpa::Handler handler(MPI_COMM_WORLD);
         const auto dataset = librpa_int::api::get_dataset_instance(handler);
-        assert(!dataset->fermi_dirac_reference.enabled);
+        assert(!dataset->mf.get_fermi_dirac_reference().enabled);
 
         handler.set_fermi_dirac_reference(0.0025, 0.125, 2.0, 1.0e-12);
-        assert(dataset->fermi_dirac_reference.enabled);
-        assert(near(dataset->fermi_dirac_reference.kbt_ha, 0.0025));
-        assert(near(dataset->fermi_dirac_reference.chemical_potential_ha, 0.125));
-        assert(near(dataset->fermi_dirac_reference.max_occupation_per_band, 2.0));
-        assert(near(dataset->fermi_dirac_reference.occupation_tolerance, 1.0e-12));
+        const auto &reference = dataset->mf.get_fermi_dirac_reference();
+        assert(reference.enabled);
+        assert(near(reference.kbt_ha, 0.0025));
+        assert(near(reference.chemical_potential_ha, 0.125));
+        assert(near(reference.max_occupation_per_band, 2.0));
+        assert(near(reference.occupation_tolerance, 1.0e-12));
 
         handler.clear_fermi_dirac_reference();
-        assert(!dataset->fermi_dirac_reference.enabled);
+        assert(!dataset->mf.get_fermi_dirac_reference().enabled);
 
         bool rejected = false;
         try

@@ -214,9 +214,9 @@ void librpa_set_wg_ekb_efermi(LibrpaHandler* h, int nspins, int nkpts, int nstat
     auto pds = librpa_int::api::get_dataset_instance(h);
     auto &meanfield = pds->mf;
 
-    if (pds->fermi_dirac_reference.enabled)
+    if (pds->mf.get_fermi_dirac_reference().enabled)
         librpa_int::validate_fermi_dirac_chemical_potential(
-            pds->fermi_dirac_reference, efermi);
+            pds->mf.get_fermi_dirac_reference(), efermi);
 
     meanfield.get_efermi() = efermi;
     auto& eskb = meanfield.get_eigenvals();
@@ -258,14 +258,14 @@ void librpa_set_fermi_dirac_reference(LibrpaHandler* h,
         kbt_ha, chemical_potential_ha, max_occupation_per_band, occupation_tolerance);
     if (pds->is_scf_eigocc_set)
         librpa_int::validate_fermi_dirac_chemical_potential(reference, pds->mf.get_efermi());
-    pds->fermi_dirac_reference = reference;
+    pds->mf.set_fermi_dirac_reference(reference);
     pds->invalidate_compute_objects();
 }
 
 void librpa_clear_fermi_dirac_reference(LibrpaHandler* h)
 {
     auto pds = librpa_int::api::get_dataset_instance(h);
-    pds->fermi_dirac_reference = librpa_int::FermiDiracReference{};
+    pds->mf.clear_fermi_dirac_reference();
     pds->invalidate_compute_objects();
 }
 
