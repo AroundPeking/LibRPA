@@ -98,6 +98,15 @@ double metallic_static_3d_head_only_rpa_cell_average(
 double metallic_static_3d_head_only_wc_cell_average(
     double screening_wavevector_squared, const std::vector<double> &angular_weights,
     const std::vector<double> &qmax, double gamma_cell_volume);
+std::complex<double> compute_metallic_static_3d_rpa_trace_log_average(
+    const matrix_m<std::complex<double>> &regular_chi0v_head,
+    const matrix_m<std::complex<double>> &regular_schur,
+    std::complex<double> trace_body, std::complex<double> logdet_body,
+    double screening_wavevector_squared, std::complex<double> schur_qminus2,
+    const std::array<std::complex<double>, 3> &schur_qminus1,
+    const std::vector<double> &qx, const std::vector<double> &qy,
+    const std::vector<double> &qz, const std::vector<double> &angular_weights,
+    const std::vector<double> &qmax, double gamma_cell_volume, int radial_order = 48);
 std::vector<int> headwing_local_kpoints(int n_kpoints,
                                         const KPointBlacsParallelContext *kblacs_ctxt);
 ComplexMatrix rotate_headwing_wfc_to_kstar_member(
@@ -200,6 +209,9 @@ private:
     std::vector<Vector3_Order<double>> g_enclosing_gamma;
     std::vector<double> q_gamma;
     double vol_gamma = 0.0;
+    double static_intraband_screening_wavevector_squared_ = 0.0;
+    std::vector<std::complex<double>> static_intraband_chi0v_wing_mu_;
+    std::vector<std::complex<double>> static_intraband_chi0v_wing_;
     double strict_2d_pw_to_auxiliary_scale_ = 0.0;
     std::vector<std::complex<double>> strict_2d_pw_wc_head_average_;
 
@@ -212,6 +224,18 @@ public:
     void configure_strict_2d_coulomb_head(bool enabled,
                                           double auxiliary_monopole_norm_squared);
     double get_strict_2d_pw_to_auxiliary_scale() const;
+    double get_static_intraband_screening_wavevector_squared() const
+    {
+        return static_intraband_screening_wavevector_squared_;
+    }
+    const std::vector<std::complex<double>> &get_static_intraband_chi0v_wing_mu() const
+    {
+        return static_intraband_chi0v_wing_mu_;
+    }
+    const std::vector<std::complex<double>> &get_static_intraband_chi0v_wing() const
+    {
+        return static_intraband_chi0v_wing_;
+    }
 
     // Symmetry-aware head/wing switches. When use_symmetry is true and the
     // input symmetry context can restore the BZ from the IBZ k-grid, cal_head

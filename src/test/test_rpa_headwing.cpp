@@ -706,6 +706,17 @@ double midpoint_radial_integral(const double qmax, const int intervals,
     return value * dq;
 }
 
+std::complex<double> midpoint_complex_radial_integral(
+    const double qmax, const int intervals,
+    const std::function<std::complex<double>(double)> &integrand)
+{
+    const double dq = qmax / static_cast<double>(intervals);
+    std::complex<double> value = 0.0;
+    for (int i = 0; i != intervals; ++i)
+        value += integrand((static_cast<double>(i) + 0.5) * dq);
+    return value * dq;
+}
+
 void test_metallic_static_3d_head_only_radial_integrals_match_direct_quadrature()
 {
     constexpr double screening_wavevector_squared = 0.7;
@@ -792,6 +803,97 @@ void test_metallic_static_3d_head_only_cell_average_handles_anisotropic_shape()
         librpa_int::metallic_static_3d_head_only_wc_cell_average(
             screening_wavevector_squared, angular_weights, qmax, gamma_volume),
         wc_reference, 2.0e-10);
+}
+
+void test_metallic_static_3d_rpa_trace_log_reduces_to_head_only_integral()
+{
+    matrix_m<std::complex<double>> head(3, 3, MAJOR::COL);
+    matrix_m<std::complex<double>> regular_schur(3, 3, MAJOR::COL);
+    for (int alpha = 0; alpha != 3; ++alpha) regular_schur(alpha, alpha) = 1.0;
+    constexpr double kappa_squared = 0.65;
+    const std::array<std::complex<double>, 3> no_qminus1{};
+    const std::vector<double> qx{1.0, 0.0, 0.0};
+    const std::vector<double> qy{0.0, 1.0, 0.0};
+    const std::vector<double> qz{0.0, 0.0, 1.0};
+    const std::vector<double> weights{0.7, 1.1, 2.3};
+    const std::vector<double> qmax{0.35, 0.8, 1.25};
+    double gamma_volume = 0.0;
+    for (std::size_t idir = 0; idir != qmax.size(); ++idir)
+        gamma_volume += weights[idir] * std::pow(qmax[idir], 3) / 3.0;
+
+    const auto actual = librpa_int::compute_metallic_static_3d_rpa_trace_log_average(
+        head, regular_schur, 0.0, 0.0, kappa_squared, kappa_squared, no_qminus1,
+        qx, qy, qz, weights, qmax, gamma_volume, 64);
+    const auto expected = librpa_int::metallic_static_3d_head_only_rpa_cell_average(
+        kappa_squared, weights, qmax, gamma_volume);
+    assert_complex_close(actual, expected, 2.0e-12);
+}
+
+void test_metallic_static_3d_rpa_trace_log_matches_direct_radial_quadrature()
+{
+    matrix_m<std::complex<double>> head(3, 3, MAJOR::COL);
+    head(0, 0) = {-0.20, 0.0};
+    head(1, 1) = {-0.35, 0.0};
+    head(2, 2) = {-0.10, 0.0};
+    head(0, 1) = {0.03, 0.01};
+    head(1, 0) = std::conj(head(0, 1));
+
+    matrix_m<std::complex<double>> regular_schur(3, 3, MAJOR::COL);
+    regular_schur(0, 0) = 1.30;
+    regular_schur(1, 1) = 1.45;
+    regular_schur(2, 2) = 1.20;
+    regular_schur(0, 1) = {0.04, -0.01};
+    regular_schur(1, 0) = std::conj(regular_schur(0, 1));
+
+    const std::complex<double> trace_body{-0.42, 0.0};
+    const std::complex<double> logdet_body{0.31, 0.0};
+    constexpr double kappa_squared = 0.72;
+    const std::complex<double> schur_qminus2{0.58, 0.0};
+    const std::array<std::complex<double>, 3> schur_qminus1{
+        std::complex<double>{0.08, 0.0}, std::complex<double>{-0.05, 0.0},
+        std::complex<double>{0.03, 0.0}};
+    const std::vector<double> qx{1.0, 0.0, 1.0 / std::sqrt(3.0)};
+    const std::vector<double> qy{0.0, 1.0, 1.0 / std::sqrt(3.0)};
+    const std::vector<double> qz{0.0, 0.0, 1.0 / std::sqrt(3.0)};
+    const std::vector<double> weights{0.7, 1.1, 2.3};
+    const std::vector<double> qmax{0.35, 0.8, 1.25};
+    double gamma_volume = 0.0;
+    std::complex<double> reference = 0.0;
+    for (std::size_t idir = 0; idir != qmax.size(); ++idir)
+    {
+        gamma_volume += weights[idir] * std::pow(qmax[idir], 3) / 3.0;
+        const double nx = qx[idir], ny = qy[idir], nz = qz[idir];
+        const auto directional_head =
+            nx * (nx * head(0, 0) + ny * head(0, 1) + nz * head(0, 2))
+            + ny * (nx * head(1, 0) + ny * head(1, 1) + nz * head(1, 2))
+            + nz * (nx * head(2, 0) + ny * head(2, 1) + nz * head(2, 2));
+        const auto directional_schur =
+            nx * (nx * regular_schur(0, 0) + ny * regular_schur(0, 1)
+                  + nz * regular_schur(0, 2))
+            + ny * (nx * regular_schur(1, 0) + ny * regular_schur(1, 1)
+                    + nz * regular_schur(1, 2))
+            + nz * (nx * regular_schur(2, 0) + ny * regular_schur(2, 1)
+                    + nz * regular_schur(2, 2));
+        const auto directional_qminus1 = nx * schur_qminus1[0]
+                                           + ny * schur_qminus1[1]
+                                           + nz * schur_qminus1[2];
+        reference += weights[idir] * midpoint_complex_radial_integral(
+            qmax[idir], 300000,
+            [&](const double q)
+            {
+                const auto schur = schur_qminus2 / (q * q)
+                                   + directional_qminus1 / q + directional_schur;
+                return q * q
+                       * (trace_body + directional_head - kappa_squared / (q * q)
+                          + logdet_body + std::log(schur));
+            });
+    }
+    reference /= gamma_volume;
+
+    const auto actual = librpa_int::compute_metallic_static_3d_rpa_trace_log_average(
+        head, regular_schur, trace_body, logdet_body, kappa_squared, schur_qminus2,
+        schur_qminus1, qx, qy, qz, weights, qmax, gamma_volume, 64);
+    assert_complex_close(actual, reference, 2.0e-10);
 }
 
 void test_strict_2d_inverse_head_average_has_linear_q_screening()
@@ -2241,6 +2343,14 @@ RI::Tensor<double> make_single_value_tensor(const double value)
     return RI::Tensor<double>({1UL, 1UL, 1UL}, data);
 }
 
+RI::Tensor<double> make_two_auxiliary_value_tensor(const double first, const double second)
+{
+    auto data = std::make_shared<std::valarray<double>>(2);
+    (*data)[0] = first;
+    (*data)[1] = second;
+    return RI::Tensor<double>({2UL, 1UL, 1UL}, data);
+}
+
 void test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(
     const BlacsCtxtHandler &blacs_h)
 {
@@ -2289,14 +2399,21 @@ void test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(
     df.cal_head();
     df.cal_wing(coefficients, 0.0, empty_vq);
 
+    const double transformed_diagonal_vertex = 2.0;
+    const double dielectric_unit = 2.0 * std::sqrt(2.0 * librpa_int::TWO_PI);
+    const double spin_prefactor = 2.0;
+    const auto &static_wing_mu = df.get_static_intraband_chi0v_wing_mu();
+    assert(static_wing_mu.size() == 1);
+    assert_complex_close(static_wing_mu[0],
+                         -dielectric_unit * spin_prefactor * (1.0 / (4.0 * kbt))
+                             * transformed_diagonal_vertex,
+                         1.0e-12);
+
     librpa_int::RpaHeadwingSettings settings;
     const auto static_input = df.get_sternheimer_rpa_headwing_input(0, settings);
     for (int alpha = 0; alpha != 3; ++alpha)
         assert_complex_close(static_input.wing_mu(0, alpha), 0.0, 1.0e-12);
 
-    const double transformed_diagonal_vertex = 2.0;
-    const double dielectric_unit = 2.0 * std::sqrt(2.0 * librpa_int::TWO_PI);
-    const double spin_prefactor = 2.0;
     for (std::size_t ifreq = 1; ifreq != omega.size(); ++ifreq)
     {
         const auto input =
@@ -2310,6 +2427,76 @@ void test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(
             assert_complex_close(input.wing_mu(0, alpha), expected, 1.0e-12);
         }
     }
+#else
+    (void)blacs_h;
+#endif
+}
+
+void test_finite_temperature_static_metallic_rpa_gamma_path(const BlacsCtxtHandler &blacs_h)
+{
+#ifdef LIBRPA_USE_LIBRI
+    constexpr double kbt = 0.25;
+    MeanField mf(1, 1, 1, 1);
+    mf.get_efermi() = 0.0;
+    mf.get_eigenvals()[0](0, 0) = 0.0;
+    mf.get_weight()[0](0, 0) = 1.0;
+    mf.set_fermi_dirac_reference(
+        librpa_int::make_fermi_dirac_reference(kbt, 0.0, 2.0, 1.0e-12));
+    auto &wfc = mf.get_eigenvectors()[0][0][0];
+    wfc.create(1, 1);
+    wfc(0, 0) = 1.0;
+
+    librpa_int::velocity_matrix_t velocity;
+    librpa_int::initialize_velocity_matrix(velocity, 1, 1, 1);
+    AtomicBasis basis_wfc({1});
+    AtomicBasis basis_abf({2});
+    PeriodicBoundaryData pbc;
+    pbc.set_latvec({1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0});
+    pbc.set_kgrids_kvec(1, 1, 1, {0.0, 0.0, 0.0});
+    const std::vector<Vector3_Order<double>> kfrac{{0.0, 0.0, 0.0}};
+    const std::vector<double> omega{0.0, 0.5};
+    const atpair_k_cplx_mat_t empty_vq;
+    librpa_int::Cs_LRI coefficients;
+    coefficients.use_libri = true;
+    coefficients.data_libri[0][{0, {0, 0, 0}}] =
+        make_two_auxiliary_value_tensor(1.0, 0.01);
+
+    diele_func df(mf, velocity, kfrac, basis_wfc, basis_abf, omega, 1, 1, 1, 2, pbc,
+                  librpa_int::global::mpi_comm_global_h, blacs_h);
+    df.init(0.0, empty_vq);
+    df.cal_head();
+    df.cal_wing(coefficients, 0.0, empty_vq);
+
+    ArrayDesc desc_coulomb(blacs_h);
+    desc_coulomb.init_square_blk(2, 2, 0, 0);
+    auto identity_sqrt_coulomb = init_local_mat<std::complex<double>>(desc_coulomb, MAJOR::COL);
+    for (int i = 0; i != 2; ++i)
+    {
+        const int iloc = desc_coulomb.indx_g2l_r(i);
+        const int jloc = desc_coulomb.indx_g2l_c(i);
+        if (iloc >= 0 && jloc >= 0) identity_sqrt_coulomb(iloc, jloc) = 1.0;
+    }
+    df.wing_mu_to_lambda(identity_sqrt_coulomb, desc_coulomb, 2);
+    const auto &static_wing_mu = df.get_static_intraband_chi0v_wing_mu();
+    const auto &static_wing = df.get_static_intraband_chi0v_wing();
+    assert(static_wing_mu.size() == 2);
+    assert(static_wing.size() == 1);
+    assert_complex_close(static_wing[0], static_wing_mu[1], 1.0e-12);
+
+    auto response = init_local_mat<std::complex<double>>(desc_coulomb, MAJOR::COL);
+    const int body_row = desc_coulomb.indx_g2l_r(1);
+    const int body_col = desc_coulomb.indx_g2l_c(1);
+    if (body_row >= 0 && body_col >= 0) response(body_row, body_col) = -0.2;
+    librpa_int::RpaHeadwingSettings settings;
+    settings.enabled = true;
+    settings.rpa_headwing_mode = "qavg";
+    const auto static_gamma = df.compute_rpa_trace_log_average(response, 0, desc_coulomb, settings);
+    assert(std::isfinite(static_gamma.real()));
+    assert(std::isfinite(static_gamma.imag()));
+    assert(std::abs(static_gamma.imag()) < 1.0e-10);
+    assert(static_gamma.real() < -0.2 + std::log(1.2));
 #else
     (void)blacs_h;
 #endif
@@ -2569,6 +2756,8 @@ void test_finite_temperature_dynamic_intraband_head_is_velocity_weighted(
     for (int alpha = 0; alpha != 3; ++alpha)
         for (int beta = 0; beta != 3; ++beta)
             assert_complex_close(static_chi0v_head(alpha, beta), 0.0, 1.0e-12);
+    require_double_close(df.get_static_intraband_screening_wavevector_squared(),
+                         8.0 * librpa_int::PI * (1.0 / (4.0 * kbt)), 1.0e-12);
 
     for (std::size_t ifreq = 1; ifreq != omega.size(); ++ifreq)
     {
@@ -3508,6 +3697,8 @@ int main(int argc, char *argv[])
         test_static_intraband_auxiliary_response_is_complete_outer_product();
         test_metallic_static_3d_head_only_radial_integrals_match_direct_quadrature();
         test_metallic_static_3d_head_only_cell_average_handles_anisotropic_shape();
+        test_metallic_static_3d_rpa_trace_log_reduces_to_head_only_integral();
+        test_metallic_static_3d_rpa_trace_log_matches_direct_radial_quadrature();
         test_strict_2d_inverse_head_average_has_linear_q_screening();
         test_strict_2d_finite_q_reference_matches_head_and_schur_limits();
         test_strict_2d_schur_coefficient_removes_identity();
@@ -3556,6 +3747,7 @@ int main(int argc, char *argv[])
         test_head_initialization_does_not_require_coulomb_diagonalization(blacs_h);
         test_finite_temperature_dynamic_intraband_head_is_velocity_weighted(blacs_h);
         test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(blacs_h);
+        test_finite_temperature_static_metallic_rpa_gamma_path(blacs_h);
         test_strict_2d_gamma_quadrature_is_ready_after_wing_initialization(blacs_h);
         test_wq_to_wr_symmetry_reduced_q_matches_full_bz();
         test_wq_to_wr_qmember_diagnostic_keeps_original_full_bz_weight();

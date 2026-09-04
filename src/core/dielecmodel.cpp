@@ -344,6 +344,136 @@ double metallic_static_3d_head_only_wc_cell_average(
         metallic_static_3d_head_only_wc_radial_integral);
 }
 
+static std::pair<std::vector<double>, std::vector<double>> gauss_legendre_unit_interval(
+    const int order)
+{
+    if (order < 2 || order > 256)
+        throw std::invalid_argument("Gauss-Legendre radial order must be between 2 and 256");
+
+    std::vector<double> nodes(as_size(order));
+    std::vector<double> weights(as_size(order));
+    const int roots = (order + 1) / 2;
+    for (int i = 0; i != roots; ++i)
+    {
+        double z = std::cos(PI * (static_cast<double>(i) + 0.75)
+                            / (static_cast<double>(order) + 0.5));
+        double derivative = 0.0;
+        for (int iteration = 0; iteration != 100; ++iteration)
+        {
+            double p0 = 1.0;
+            double p1 = z;
+            for (int degree = 2; degree <= order; ++degree)
+            {
+                const double p2 = ((2.0 * degree - 1.0) * z * p1
+                                   - (degree - 1.0) * p0)
+                                  / static_cast<double>(degree);
+                p0 = p1;
+                p1 = p2;
+            }
+            derivative = static_cast<double>(order) * (z * p1 - p0) / (z * z - 1.0);
+            const double next = z - p1 / derivative;
+            if (std::abs(next - z) <= 4.0 * std::numeric_limits<double>::epsilon())
+            {
+                z = next;
+                break;
+            }
+            z = next;
+            if (iteration == 99)
+                throw std::runtime_error("Gauss-Legendre radial nodes did not converge");
+        }
+        double p0 = 1.0;
+        double p1 = z;
+        for (int degree = 2; degree <= order; ++degree)
+        {
+            const double p2 = ((2.0 * degree - 1.0) * z * p1 - (degree - 1.0) * p0)
+                              / static_cast<double>(degree);
+            p0 = p1;
+            p1 = p2;
+        }
+        derivative = static_cast<double>(order) * (z * p1 - p0) / (z * z - 1.0);
+        const double full_weight = 2.0 / ((1.0 - z * z) * derivative * derivative);
+        nodes[as_size(i)] = (1.0 - z) / 2.0;
+        nodes[as_size(order - 1 - i)] = (1.0 + z) / 2.0;
+        weights[as_size(i)] = full_weight / 2.0;
+        weights[as_size(order - 1 - i)] = full_weight / 2.0;
+    }
+    return {std::move(nodes), std::move(weights)};
+}
+
+static std::complex<double> directional_quadratic_form(
+    const matrix_m<std::complex<double>> &tensor, const double nx, const double ny,
+    const double nz)
+{
+    return nx * (nx * tensor(0, 0) + ny * tensor(0, 1) + nz * tensor(0, 2))
+           + ny * (nx * tensor(1, 0) + ny * tensor(1, 1) + nz * tensor(1, 2))
+           + nz * (nx * tensor(2, 0) + ny * tensor(2, 1) + nz * tensor(2, 2));
+}
+
+std::complex<double> compute_metallic_static_3d_rpa_trace_log_average(
+    const matrix_m<std::complex<double>> &regular_chi0v_head,
+    const matrix_m<std::complex<double>> &regular_schur,
+    const std::complex<double> trace_body, const std::complex<double> logdet_body,
+    const double screening_wavevector_squared, const std::complex<double> schur_qminus2,
+    const std::array<std::complex<double>, 3> &schur_qminus1,
+    const std::vector<double> &qx, const std::vector<double> &qy,
+    const std::vector<double> &qz, const std::vector<double> &angular_weights,
+    const std::vector<double> &qmax, const double gamma_cell_volume, const int radial_order)
+{
+    if (regular_chi0v_head.nr() != 3 || regular_chi0v_head.nc() != 3
+        || regular_schur.nr() != 3 || regular_schur.nc() != 3)
+        throw std::invalid_argument("metallic static RPA average requires 3x3 head tensors");
+    if (qx.empty() || qx.size() != qy.size() || qx.size() != qz.size()
+        || qx.size() != angular_weights.size() || qx.size() != qmax.size())
+        throw std::invalid_argument("metallic static RPA Gamma-cell grids are inconsistent");
+    if (!std::isfinite(screening_wavevector_squared) || screening_wavevector_squared <= 0.0
+        || !std::isfinite(gamma_cell_volume) || gamma_cell_volume <= 0.0
+        || std::abs(schur_qminus2) <= std::numeric_limits<double>::min())
+        throw std::invalid_argument("metallic static RPA screening coefficients are invalid");
+
+    const auto radial_grid = gauss_legendre_unit_interval(radial_order);
+    const auto &radial_nodes = radial_grid.first;
+    const auto &radial_weights = radial_grid.second;
+    std::complex<double> integral = 0.0;
+    for (std::size_t idir = 0; idir != qx.size(); ++idir)
+    {
+        const double norm_squared = qx[idir] * qx[idir] + qy[idir] * qy[idir]
+                                    + qz[idir] * qz[idir];
+        if (!std::isfinite(angular_weights[idir]) || angular_weights[idir] < 0.0
+            || !std::isfinite(qmax[idir]) || qmax[idir] <= 0.0
+            || std::abs(norm_squared - 1.0) > 1.0e-10)
+            throw std::invalid_argument("metallic static RPA angular grid contains invalid data");
+
+        const double nx = qx[idir], ny = qy[idir], nz = qz[idir];
+        const double upper_q = qmax[idir];
+        const auto head_direction =
+            directional_quadratic_form(regular_chi0v_head, nx, ny, nz);
+        const auto schur_regular_direction =
+            directional_quadratic_form(regular_schur, nx, ny, nz);
+        const auto schur_qminus1_direction = nx * schur_qminus1[0]
+                                             + ny * schur_qminus1[1]
+                                             + nz * schur_qminus1[2];
+
+        const double upper_q_cubed = upper_q * upper_q * upper_q;
+        std::complex<double> radial_integral =
+            upper_q_cubed / 3.0
+                * (trace_body + head_direction + logdet_body
+                   + std::log(schur_qminus2 / (upper_q * upper_q)))
+            + 2.0 * upper_q_cubed / 9.0
+            - screening_wavevector_squared * upper_q;
+        for (int irad = 0; irad != radial_order; ++irad)
+        {
+            const double q = upper_q * radial_nodes[as_size(irad)];
+            const auto regular_remainder =
+                1.0 + schur_qminus1_direction * q / schur_qminus2
+                + schur_regular_direction * q * q / schur_qminus2;
+            radial_integral += upper_q * radial_weights[as_size(irad)] * q * q
+                               * std::log(regular_remainder);
+        }
+        integral += angular_weights[idir] * radial_integral;
+    }
+    return integral / gamma_cell_volume;
+}
+
 static void print_wing_mu_k_contribution_gram(
     const char *route, const int ik, const Vector3_Order<double> &kfrac,
     const std::vector<std::complex<double>> &wing_mu_iomega0, const int n_abf,
@@ -1468,6 +1598,7 @@ void diele_func::init(double coulomb_eigen_threshold, const librpa_int::atpair_k
 
     this->head.clear();
     this->head.resize(n_omega);
+    this->static_intraband_screening_wavevector_squared_ = 0.0;
     for (int iomega = 0; iomega != n_omega; iomega++)
     {
         head[iomega].resize(3, 3, MAJOR::COL);
@@ -1481,6 +1612,8 @@ void diele_func::init_wing(double coulomb_eigen_threshold, const atpair_k_cplx_m
     this->wing_mu.clear();
     this->wing_mu.resize(n_omega);
     this->wing.clear();
+    this->static_intraband_chi0v_wing_mu_.clear();
+    this->static_intraband_chi0v_wing_.clear();
     this->n_nonsingular = n_abf;
     this->Lind.resize(3, 3, MAJOR::COL);
     this->strict_2d_lind_by_freq.clear();
@@ -1555,6 +1688,7 @@ void diele_func::cal_head()
                   << (can_sym ? "active" : "fallback") << " (" << reason << ")." << std::endl;
     }
 
+    this->static_intraband_screening_wavevector_squared_ = 0.0;
     if (can_sym)
         cal_head_symmetric();
     else
@@ -1563,6 +1697,8 @@ void diele_func::cal_head()
     // Common post-processing: apply dielectric unit and spin prefactor, add the
     // 1 contribution on the diagonal. Identical for both paths.
     const double dielectric_unit = cal_factor("head");
+    this->static_intraband_screening_wavevector_squared_ *=
+        dielectric_unit * headwing_spin_prefactor(n_spin, use_soc);
     for (int alpha = 0; alpha != 3; alpha++)
     {
         for (int beta = 0; beta != 3; beta++)
@@ -1608,6 +1744,8 @@ void diele_func::cal_head_full_bz()
                     const double minus_fd_derivative = -fermi_dirac_derivative(
                         eigenvalues(ik, iband) - fd_reference.chemical_potential_ha,
                         fd_reference.kbt_ha);
+                    static_intraband_screening_wavevector_squared_ +=
+                        full_bz_kpoint_weight * minus_fd_derivative;
                     for (int alpha = 0; alpha != 3; ++alpha)
                     {
                         const auto velocity_alpha = velocity[ik][alpha](iband, iband);
@@ -1668,7 +1806,12 @@ void diele_func::cal_head_full_bz()
             }
         }
     }
-    if (use_kblacs) allreduce_head_matrices(this->head, comm_h.comm);
+    if (use_kblacs)
+    {
+        allreduce_head_matrices(this->head, comm_h.comm);
+        MPI_Allreduce(MPI_IN_PLACE, &static_intraband_screening_wavevector_squared_, 1,
+                      MPI_DOUBLE, MPI_SUM, comm_h.comm);
+    }
     if (comm_h.is_root())
     {
         for (int ik = 0; ik != nk; ++ik)
@@ -1765,6 +1908,8 @@ void diele_func::cal_head_symmetric()
                             eigenvalues(ik_ibz, iband)
                                 - fd_reference.chemical_potential_ha,
                             fd_reference.kbt_ha);
+                        static_intraband_screening_wavevector_squared_ +=
+                            full_bz_kpoint_weight * minus_fd_derivative;
                         for (int alpha = 0; alpha != 3; ++alpha)
                         {
                             const auto velocity_alpha = v_band_bz[alpha](iband, iband);
@@ -1831,6 +1976,8 @@ void diele_func::cal_head_symmetric()
     }
 
     allreduce_head_matrices(this->head, comm_h.comm);
+    MPI_Allreduce(MPI_IN_PLACE, &static_intraband_screening_wavevector_squared_, 1, MPI_DOUBLE,
+                  MPI_SUM, comm_h.comm);
     if (debug) allreduce_head_check(head_check, comm_h.comm);
 
     // Self-verification: compare the symmetric-path head (this->head) against the
@@ -2051,6 +2198,7 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
     int n_lambda = this->n_nonsingular - 1;
     std::vector<std::complex<double>> local_wing_mu;
     local_wing_mu.resize(this->omega.size() * 3 * n_abf, 0.0);
+    std::vector<std::complex<double>> local_static_intraband_wing_mu(as_size(n_abf), 0.0);
     std::vector<std::complex<double>> local_wing_mu_k_iomega0(as_size(nk) * as_size(n_abf) * 3,
                                                               0.0);
     const bool use_kblacs = use_matching_kpoint_blacs(nk, kblacs_ctxt_);
@@ -2103,6 +2251,9 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
                         const std::array<std::complex<double>, 3> diagonal_velocity{
                             velocity[0](iband, iband), velocity[1](iband, iband),
                             velocity[2](iband, iband)};
+                        local_static_intraband_wing_mu[as_size(mu)] -=
+                            full_bz_kpoint_weight * minus_fd_derivative
+                            * C_mnk(loc_m, loc_n);
                         accumulate_dynamic_intraband_wing_for_state(
                             omega, diagonal_velocity, C_mnk(loc_m, loc_n),
                             minus_fd_derivative, full_bz_kpoint_weight, wing_mu_for_mu);
@@ -2162,8 +2313,17 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
     profiler.start("Comm_wing");
     MPI_Allreduce(MPI_IN_PLACE, local_wing_mu.data(), static_cast<int>(local_wing_mu.size()),
                   MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD);
+    if (fd_reference.enabled)
+        MPI_Allreduce(MPI_IN_PLACE, local_static_intraband_wing_mu.data(), n_abf,
+                      MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD);
     profiler.stop("Comm_wing");
     double dielectric_unit = cal_factor("wing");
+    if (fd_reference.enabled)
+    {
+        this->static_intraband_chi0v_wing_mu_ = std::move(local_static_intraband_wing_mu);
+        for (auto &value : this->static_intraband_chi0v_wing_mu_)
+            value *= dielectric_unit * headwing_spin_prefactor(n_spin, use_soc);
+    }
 
     for (int alpha = 0; alpha != 3; alpha++)
     {
@@ -2196,6 +2356,7 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
     init_wing(coulomb_eigen_threshold, Vq);
     std::vector<std::complex<double>> local_wing_mu;
     local_wing_mu.resize(this->omega.size() * 3 * n_abf, 0.0);
+    std::vector<std::complex<double>> local_static_intraband_wing_mu(as_size(n_abf), 0.0);
 
     const bool use_kblacs = use_matching_kpoint_blacs(nk, kblacs_ctxt_);
     const BlacsCtxtHandler &wing_blacs_h = use_kblacs ? kblacs_ctxt_->blacs_h : blacs_h;
@@ -2302,6 +2463,9 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
                             const std::array<std::complex<double>, 3> diagonal_velocity{
                                 velocity[0](iband, iband), velocity[1](iband, iband),
                                 velocity[2](iband, iband)};
+                            local_static_intraband_wing_mu[as_size(mu)] -=
+                                full_bz_kpoint_weight * minus_fd_derivative
+                                * C_mnk(loc_m, loc_n);
                             accumulate_dynamic_intraband_wing_for_state(
                                 omega, diagonal_velocity, C_mnk(loc_m, loc_n),
                                 minus_fd_derivative, full_bz_kpoint_weight, wing_mu_for_mu);
@@ -2358,8 +2522,17 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
     profiler.start("Comm_wing");
     MPI_Allreduce(MPI_IN_PLACE, local_wing_mu.data(), static_cast<int>(local_wing_mu.size()),
                   MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD);
+    if (fd_reference.enabled)
+        MPI_Allreduce(MPI_IN_PLACE, local_static_intraband_wing_mu.data(), n_abf,
+                      MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD);
     profiler.stop("Comm_wing");
     double dielectric_unit = cal_factor("wing");
+    if (fd_reference.enabled)
+    {
+        this->static_intraband_chi0v_wing_mu_ = std::move(local_static_intraband_wing_mu);
+        for (auto &value : this->static_intraband_chi0v_wing_mu_)
+            value *= dielectric_unit * headwing_spin_prefactor(n_spin, use_soc);
+    }
 
     for (int alpha = 0; alpha != 3; alpha++)
     {
@@ -2742,6 +2915,45 @@ void diele_func::wing_mu_to_lambda(matrix_m<std::complex<double>> &sqrtveig_blac
                                     desc_nabf_nabf_opt.desc, wing_mu_tmp.ptr(), 1, 1,
                                     desc_wing_mu.desc, 0.0, wing_tmp.ptr(), 1, 1,
                                     desc_wing_opt.desc);
+    }
+
+    this->static_intraband_chi0v_wing_.clear();
+    if (!this->static_intraband_chi0v_wing_mu_.empty())
+    {
+        if (this->static_intraband_chi0v_wing_mu_.size() != as_size(n_abf))
+            throw std::logic_error("static intraband auxiliary wing has an invalid size");
+        ArrayDesc desc_static_mu(blacs_h);
+        desc_static_mu.init(n_abf, 1, desc_nabf_nabf_opt.mb(), 1, 0, 0);
+        ArrayDesc desc_static_lambda(blacs_h);
+        desc_static_lambda.init(n_lambda, 1, desc_body.mb(), 1, 0, 0);
+        auto static_mu = init_local_mat<complex<double>>(desc_static_mu, MAJOR::COL);
+        auto static_lambda = init_local_mat<complex<double>>(desc_static_lambda, MAJOR::COL);
+        for (int mu = 0; mu != n_abf; ++mu)
+        {
+            const int loc_mu = desc_static_mu.indx_g2l_r(mu);
+            const int loc_col = desc_static_mu.indx_g2l_c(0);
+            if (loc_mu >= 0 && loc_col >= 0)
+                static_mu(loc_mu, loc_col) = static_intraband_chi0v_wing_mu_[as_size(mu)];
+        }
+        ScalapackConnector::pgemm_f(
+            'C', 'N', n_lambda, 1, n_abf, C_ONE, sqrtveig_blacs.ptr(), 1, 2,
+            desc_nabf_nabf_opt.desc, static_mu.ptr(), 1, 1, desc_static_mu.desc, C_ZERO,
+            static_lambda.ptr(), 1, 1, desc_static_lambda.desc);
+
+        this->static_intraband_chi0v_wing_.assign(as_size(n_lambda), 0.0);
+        const int loc_col = desc_static_lambda.indx_g2l_c(0);
+        if (loc_col >= 0)
+        {
+            for (int iloc = 0; iloc != desc_static_lambda.m_loc(); ++iloc)
+            {
+                const int lambda = desc_static_lambda.indx_l2g_r(iloc);
+                if (lambda >= 0 && lambda < n_lambda)
+                    this->static_intraband_chi0v_wing_[as_size(lambda)] =
+                        static_lambda(iloc, loc_col);
+            }
+        }
+        MPI_Allreduce(MPI_IN_PLACE, this->static_intraband_chi0v_wing_.data(), n_lambda,
+                      MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
     }
 
     if (!this->wing.empty())
@@ -4409,6 +4621,91 @@ std::complex<double> diele_func::compute_rpa_trace_log_average(
     construct_rpa_trace_log_schur(ifreq, desc_body, wing_row_offset);
 
     this->vol_gamma = rpa_headwing_gamma_cell_volume(pbc_, settings.use_2d_dielectric);
+
+    const bool finite_temperature_static =
+        meanfield_df.get_fermi_dirac_reference().enabled && omega.at(as_size(ifreq)) == 0.0;
+    if (finite_temperature_static && settings.use_2d_dielectric)
+        throw std::logic_error(
+            "finite-temperature metallic static Gamma averaging is currently implemented only "
+            "for 3D Coulomb boundary conditions");
+    if (finite_temperature_static)
+    {
+        if (static_intraband_screening_wavevector_squared_ <= 0.0
+            || static_intraband_chi0v_wing_.size() != as_size(n_nonsingular - 1))
+            throw std::logic_error(
+                "finite-temperature metallic static Gamma coefficients are unavailable");
+
+        ArrayDesc desc_static_body(blacs_h);
+        desc_static_body.init(desc_body.m(), 1, desc_body.mb(), 1, 0, 0);
+        auto static_body = init_local_mat<complex<double>>(desc_static_body, MAJOR::COL);
+        auto body_inv_static = init_local_mat<complex<double>>(desc_static_body, MAJOR::COL);
+        const int loc_static_col = desc_static_body.indx_g2l_c(0);
+        if (loc_static_col >= 0)
+        {
+            for (int iloc = 0; iloc != desc_static_body.m_loc(); ++iloc)
+            {
+                const int ibody = desc_static_body.indx_l2g_r(iloc);
+                static_body(iloc, loc_static_col) =
+                    static_intraband_chi0v_wing_.at(as_size(wing_row_offset + ibody));
+            }
+        }
+        ScalapackConnector::pgemm_f(
+            'N', 'N', desc_body.m(), 1, desc_body.n(), C_ONE, body_inv.ptr(), 1, 1,
+            desc_body.desc, static_body.ptr(), 1, 1, desc_static_body.desc, C_ZERO,
+            body_inv_static.ptr(), 1, 1, desc_static_body.desc);
+
+        std::complex<double> static_local_field_local = 0.0;
+        if (loc_static_col >= 0)
+        {
+            for (int iloc = 0; iloc != desc_static_body.m_loc(); ++iloc)
+            {
+                const int ibody = desc_static_body.indx_l2g_r(iloc);
+                const auto static_value =
+                    static_intraband_chi0v_wing_.at(as_size(wing_row_offset + ibody));
+                static_local_field_local +=
+                    std::conj(static_value) * body_inv_static(iloc, loc_static_col);
+            }
+        }
+        std::complex<double> static_local_field = 0.0;
+        MPI_Allreduce(&static_local_field_local, &static_local_field, 1, MPI_DOUBLE_COMPLEX,
+                      MPI_SUM, comm_h.comm);
+        const auto schur_qminus2 =
+            static_intraband_screening_wavevector_squared_ - static_local_field;
+        const double schur_scale = std::max(1.0, std::abs(schur_qminus2));
+        if (schur_qminus2.real() <= 0.0
+            || std::abs(schur_qminus2.imag()) > 1.0e-8 * schur_scale)
+            throw std::runtime_error(
+                "metallic static Gamma Schur 1/q^2 coefficient is not positive real");
+
+        std::array<std::complex<double>, 3> schur_qminus1{};
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            std::complex<double> left = 0.0;
+            std::complex<double> right = 0.0;
+            for (int ibody = 0; ibody != desc_body.m(); ++ibody)
+            {
+                const auto static_value =
+                    static_intraband_chi0v_wing_.at(as_size(wing_row_offset + ibody));
+                left += std::conj(static_value) * bw(ibody, alpha);
+                right += wb(alpha, ibody) * static_value;
+            }
+            schur_qminus1[alpha] = -(left + right);
+        }
+
+        const auto result = compute_metallic_static_3d_rpa_trace_log_average(
+            get_rpa_chi0v_head(ifreq), Lind, trace_body, logdet_body,
+            static_intraband_screening_wavevector_squared_, schur_qminus2, schur_qminus1,
+            qx_leb, qy_leb, qz_leb, qw_leb, q_gamma, vol_gamma);
+        if (debug && comm_h.is_root())
+            global::lib_printf(
+                "Metallic static RPA Gamma avg: kappa2=%.12e schur_qminus2=(%.12e,%.12e) "
+                "result=(%.12e,%.12e)\n",
+                static_intraband_screening_wavevector_squared_, schur_qminus2.real(),
+                schur_qminus2.imag(), result.real(), result.imag());
+        this->Lind.clear();
+        this->body_inv.clear();
+        return result;
+    }
 
     std::vector<double> weights(qw_leb.size());
     for (std::size_t ileb = 0; ileb != qw_leb.size(); ++ileb)
