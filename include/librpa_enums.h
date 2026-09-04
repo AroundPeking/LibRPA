@@ -89,7 +89,7 @@ typedef enum
 } LibrpaParallelRouting;
 
 /** Number of time/frequency grid types available. */
-#define LIBRPA_TFGRID_COUNT 7
+#define LIBRPA_TFGRID_COUNT 8
 
 /**
  * @brief Type of time or frequency grid for integration.
@@ -107,6 +107,7 @@ typedef enum
     LIBRPA_TFGRID_EVEN_SPACED = 4,         ///< Evenly spaced grid
     LIBRPA_TFGRID_EVEN_SPACED_TF = 5,      ///< Evenly spaced in time-frequency
     LIBRPA_TFGRID_SPLIT_GAUSS_LEGENDRE = 6, ///< Finite GL interval plus transformed tail
+    LIBRPA_TFGRID_FD_MATSUBARA = 7,         ///< Finite-beta bosonic Matsubara grid
 } LibrpaTimeFreqGrid;
 
 /**

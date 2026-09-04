@@ -31,6 +31,7 @@ class TFGrids
         //! whether to use time grids, i.e. space-time method
         bool _has_time_grids;
         size_t n_grids;
+        size_t n_time_grids;
         std::vector<double> freq_nodes;
         std::vector<double> freq_weights;
         std::vector<double> time_nodes;
@@ -48,17 +49,18 @@ class TFGrids
         /*! Inverse Cosine transform matrix.
          */
         matrix sintrans_f2t;
-        //! General Fourier transformation matrix. Not implemented, maybe needed to for non-minimax grid approach
-        // ComplexMatrix fourier_t2f;
+        //! Complex finite-beta Fourier transformation matrix (frequency rows, time columns).
+        ComplexMatrix fourier_t2f;
         // ComplexMatrix fourier_f2t;
         //! allocate the pointers of array, e.g. nodes and weights
         void set_freq();
         void set_time();
+        void set_time(size_t n_time);
         //! delete the pointers
         void unset();
     public:
         LibrpaTimeFreqGrid get_grid_type() const { return grid_type; }
-        TFGrids(): n_grids(0) {};
+        TFGrids(): grid_type(LIBRPA_TFGRID_UNSET), n_grids(0), n_time_grids(0) {};
         TFGrids(const unsigned &N);
         // disable copy at present
         TFGrids(const TFGrids &tfg) {};
@@ -68,6 +70,7 @@ class TFGrids
         size_t get_n_grids() const { return n_grids; }
         //! alias to get_n_grids
         size_t size() const { return n_grids; }
+        size_t get_n_time_grids() const { return n_time_grids; }
         const std::vector<double> get_freq_nodes() const { return freq_nodes; }
         const std::vector<double> get_freq_weights() const { return freq_weights; }
         const std::vector<double> get_time_nodes() const { return time_nodes; }
@@ -77,6 +80,7 @@ class TFGrids
         const matrix &get_sintrans_t2f() const { return sintrans_t2f; }
         const matrix &get_costrans_f2t() const { return costrans_f2t; }
         const matrix &get_sintrans_f2t() const { return sintrans_f2t; }
+        const ComplexMatrix &get_fourier_t2f() const { return fourier_t2f; }
         int get_time_index(const double &time) const;
         int get_freq_index(const double &freq) const;
         const std::pair<int, int> get_tf_index(const std::pair<double, double> &tf) const;
@@ -96,6 +100,8 @@ class TFGrids
         void generate_evenspaced(double emin, double interval);
         //! Generate the even-spaced time-frequency grid. @note Currently only for debug use
         void generate_evenspaced_tf(double emin, double eintv, double tmin, double tintv);
+        //! Generate midpoint imaginary-time and bosonic Matsubara grids at finite beta.
+        void generate_finite_beta_matsubara(size_t n_time, double beta_ha_inv);
         //! Generate the minimax time-frequency grid
         double generate_minimax(double emin, double emax, double regulation = 0.0);
         //! Generate Gauss-Chebyshev quadrature of first kind on [0, infty)
