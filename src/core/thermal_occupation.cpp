@@ -116,6 +116,43 @@ double thermal_green_amplitude(const double energy_minus_mu,
     return std::exp(-energy_minus_mu * tau + log_occupation);
 }
 
+FermiDiracReference make_fermi_dirac_reference(const double kbt_ha,
+                                                const double chemical_potential_ha,
+                                                const double max_occupation_per_band,
+                                                const double occupation_tolerance)
+{
+    require_positive_temperature(kbt_ha);
+    if (!std::isfinite(chemical_potential_ha))
+        throw std::invalid_argument("Fermi-Dirac chemical potential must be finite");
+    if (max_occupation_per_band != 1.0 && max_occupation_per_band != 2.0)
+        throw std::invalid_argument("maximum occupation per band must be one or two");
+    if (!std::isfinite(occupation_tolerance) || occupation_tolerance < 0.0)
+        throw std::invalid_argument("occupation tolerance must be nonnegative and finite");
+
+    FermiDiracReference reference;
+    reference.enabled = true;
+    reference.chemical_potential_ha = chemical_potential_ha;
+    reference.kbt_ha = kbt_ha;
+    reference.max_occupation_per_band = max_occupation_per_band;
+    reference.occupation_tolerance = occupation_tolerance;
+    return reference;
+}
+
+void validate_fermi_dirac_chemical_potential(const FermiDiracReference &reference,
+                                              const double meanfield_chemical_potential_ha)
+{
+    if (!reference.enabled) return;
+    if (!std::isfinite(meanfield_chemical_potential_ha))
+        throw std::invalid_argument("mean-field chemical potential must be finite");
+    const double scale =
+        std::max({1.0, std::abs(reference.chemical_potential_ha),
+                  std::abs(meanfield_chemical_potential_ha)});
+    const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() * scale;
+    if (std::abs(reference.chemical_potential_ha - meanfield_chemical_potential_ha)
+        > tolerance)
+        throw std::invalid_argument("Fermi-Dirac and mean-field chemical potentials differ");
+}
+
 ThermalOccupationMetadata parse_thermal_occupation_metadata(std::istream &input)
 {
     std::map<std::string, std::string> fields;

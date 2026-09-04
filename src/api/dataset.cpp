@@ -190,6 +190,8 @@ Dataset::Dataset(MPI_Comm comm, const bool input_blacs_matloc_row_major)
       kfrac_band_list(),
       sinvS(),
       mf(),
+      is_scf_eigocc_set(false),
+      fermi_dirac_reference(),
       velocity_matrix(),
       mf_band(),
       band_data_id(0),

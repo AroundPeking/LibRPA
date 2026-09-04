@@ -46,6 +46,7 @@ foreach(target
     test_io
     test_symmetry_context
     test_task_helper
+    test_thermal_api
     test_thermal_occupation
     test_arbitrary_float
     test_geometry

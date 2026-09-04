@@ -38,6 +38,22 @@ void librpa_set_wg_ekb_efermi(LibrpaHandler* h, int nspins, int nkpts, int nstat
                               const double* wg, const double* ekb, double efermi);
 
 /**
+ * @brief Enable an explicit Fermi-Dirac occupation reference.
+ * @param[in] h                        Handler.
+ * @param[in] kbt_ha                   Positive thermal energy in Hartree.
+ * @param[in] chemical_potential_ha    Chemical potential in Hartree.
+ * @param[in] max_occupation_per_band  Maximum occupation, either one or two.
+ * @param[in] occupation_tolerance     Nonnegative absolute occupation tolerance.
+ */
+void librpa_set_fermi_dirac_reference(LibrpaHandler* h, double kbt_ha,
+                                      double chemical_potential_ha,
+                                      double max_occupation_per_band,
+                                      double occupation_tolerance);
+
+/** @brief Return to the legacy occupation model. */
+void librpa_clear_fermi_dirac_reference(LibrpaHandler* h);
+
+/**
  * @brief Set wavefunction coefficients (real/imag separate arrays).
  * @param[in] h              Handler.
  * @param[in] ispin          Spin index (0-based).

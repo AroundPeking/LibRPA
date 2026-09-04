@@ -167,8 +167,8 @@ points alone are not an acceptance result.
 ## Regression and Failure Policy
 
 - Thermal mode is opt-in and requires valid metadata.
-- Missing, malformed, non-FD, or inconsistent metadata fails before response
-  construction.
+- A missing sidecar leaves the legacy mode active. If the sidecar is present,
+  malformed, non-FD, or inconsistent metadata fails before response construction.
 - Existing runtime defaults and file readers remain compatible.
 - Serial, k-parallel, and symmetry-restored thermal paths share numerical
   helpers and matching tests.

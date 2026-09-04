@@ -168,6 +168,8 @@ int main(int argc, char **argv)
     const string path_stru = driver_params.input_dir + driver_params.fn_stru;
     const string path_bz_sampling = driver_params.input_dir + driver_params.fn_bz_sampling;
     const string path_eigocc_scf = driver_params.input_dir + driver_params.fn_eigocc_scf;
+    const string path_thermal_occupation =
+        driver_params.input_dir + "thermal_occupation_v1.dat";
 
     profiler.start("driver_read_common_input_data", "Driver Read Task-Common Input Data");
     const bool sternheimer_analytic_headwing =
@@ -207,6 +209,13 @@ int main(int argc, char **argv)
         }
         lib_printf_root("\n");
         profiler.stop("driver_bz");
+
+        if (needs_scf_eigenvalues)
+        {
+            profiler.start("driver_thermal_occupation", "Finite-temperature occupations");
+            read_thermal_occupation_reference(path_thermal_occupation);
+            profiler.stop("driver_thermal_occupation");
+        }
 
         profiler.start("driver_basis", "Basis (wave-function and auxiliary)");
         read_basis_wfc_aux(driver_params.input_dir, driver_params.fn_basis,

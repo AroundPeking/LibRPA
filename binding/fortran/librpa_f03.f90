@@ -498,6 +498,8 @@ module librpa_f03
          ! Input
          procedure :: set_scf_dimension => librpa_set_scf_dimension
          procedure :: set_wg_ekb_efermi => librpa_set_wg_ekb_efermi
+         procedure :: set_fermi_dirac_reference => librpa_set_fermi_dirac_reference
+         procedure :: clear_fermi_dirac_reference => librpa_clear_fermi_dirac_reference
          procedure :: set_wfc => librpa_set_wfc
          procedure :: set_wfc_spinor => librpa_set_wfc_spinor
          procedure :: set_ao_basis_wfc => librpa_set_ao_basis_wfc
@@ -567,6 +569,21 @@ module librpa_f03
          real(c_double), dimension(*), intent(in) :: ekb
          real(c_double), value :: efermi
       end subroutine librpa_set_wg_ekb_efermi_c
+
+      subroutine librpa_set_fermi_dirac_reference_c &
+            (h, kbt_ha, chemical_potential_ha, max_occupation_per_band, occupation_tolerance) &
+            bind(c, name="librpa_set_fermi_dirac_reference")
+         import :: c_ptr, c_double
+         type(c_ptr), value :: h
+         real(c_double), value :: kbt_ha, chemical_potential_ha
+         real(c_double), value :: max_occupation_per_band, occupation_tolerance
+      end subroutine librpa_set_fermi_dirac_reference_c
+
+      subroutine librpa_clear_fermi_dirac_reference_c(h) &
+            bind(c, name="librpa_clear_fermi_dirac_reference")
+         import :: c_ptr
+         type(c_ptr), value :: h
+      end subroutine librpa_clear_fermi_dirac_reference_c
 
       subroutine librpa_set_wfc_c(h, ispin, ik, nstates_local, nbasis_local, wfc_real, wfc_imag) &
             bind(c, name="librpa_set_wfc")
@@ -1456,6 +1473,29 @@ contains
          deallocate(wg_c, ekb_c)
       end if
    end subroutine librpa_set_wg_ekb_efermi
+
+   !> @brief Enable an explicit Fermi-Dirac occupation reference.
+   subroutine librpa_set_fermi_dirac_reference(this, kbt_ha, chemical_potential_ha, &
+                                                max_occupation_per_band, occupation_tolerance)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      real(dp), intent(in) :: kbt_ha, chemical_potential_ha
+      real(dp), intent(in) :: max_occupation_per_band, occupation_tolerance
+
+      call librpa_set_fermi_dirac_reference_c( &
+         this%ptr_c_handle, real(kbt_ha, kind=c_double), &
+         real(chemical_potential_ha, kind=c_double), &
+         real(max_occupation_per_band, kind=c_double), &
+         real(occupation_tolerance, kind=c_double))
+   end subroutine librpa_set_fermi_dirac_reference
+
+   !> @brief Return to the legacy occupation model.
+   subroutine librpa_clear_fermi_dirac_reference(this)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+
+      call librpa_clear_fermi_dirac_reference_c(this%ptr_c_handle)
+   end subroutine librpa_clear_fermi_dirac_reference
 
    !> @brief Set the wave-function expansion coefficients
    !>

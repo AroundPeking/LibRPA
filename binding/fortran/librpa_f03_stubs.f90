@@ -309,6 +309,8 @@ module librpa_f03
          ! Input
          procedure :: set_scf_dimension => librpa_set_scf_dimension
          procedure :: set_wg_ekb_efermi => librpa_set_wg_ekb_efermi
+         procedure :: set_fermi_dirac_reference => librpa_set_fermi_dirac_reference
+         procedure :: clear_fermi_dirac_reference => librpa_clear_fermi_dirac_reference
          procedure :: set_wfc => librpa_set_wfc
          procedure :: set_wfc_spinor => librpa_set_wfc_spinor
          procedure :: set_ao_basis_wfc => librpa_set_ao_basis_wfc
@@ -532,6 +534,23 @@ contains
       real(dp), intent(in) :: efermi
       call error_on_call("librpa_set_wg_ekb_efermi")
    end subroutine librpa_set_wg_ekb_efermi
+
+   !> @brief Enable an explicit Fermi-Dirac occupation reference.
+   subroutine librpa_set_fermi_dirac_reference(this, kbt_ha, chemical_potential_ha, &
+                                                max_occupation_per_band, occupation_tolerance)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      real(dp), intent(in) :: kbt_ha, chemical_potential_ha
+      real(dp), intent(in) :: max_occupation_per_band, occupation_tolerance
+      call error_on_call("librpa_set_fermi_dirac_reference")
+   end subroutine librpa_set_fermi_dirac_reference
+
+   !> @brief Return to the legacy occupation model.
+   subroutine librpa_clear_fermi_dirac_reference(this)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      call error_on_call("librpa_clear_fermi_dirac_reference")
+   end subroutine librpa_clear_fermi_dirac_reference
 
    !> @brief Set the wave-function expansion coefficients
    !>

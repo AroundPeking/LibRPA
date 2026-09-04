@@ -18,6 +18,7 @@
 #include "../io/stl_io_helper.h"
 #include "../math/matrix.h"
 #include "../math/vector3_order.h"
+#include "../core/thermal_occupation.h"
 #include "../utils/error.h"
 #include "../utils/profiler.h"
 #include "instance_manager.h"
@@ -151,6 +152,7 @@ void librpa_set_scf_dimension(LibrpaHandler* h, int nspins, int nkpts, int nstat
     profiler.start(tname, LIBRPA_VERBOSE_DEBUG);
 
     auto pds = librpa_int::api::get_dataset_instance(h);
+    pds->is_scf_eigocc_set = false;
 
     auto &meanfield = pds->mf;
     // Local dimensions, currently not used
@@ -212,6 +214,10 @@ void librpa_set_wg_ekb_efermi(LibrpaHandler* h, int nspins, int nkpts, int nstat
     auto pds = librpa_int::api::get_dataset_instance(h);
     auto &meanfield = pds->mf;
 
+    if (pds->fermi_dirac_reference.enabled)
+        librpa_int::validate_fermi_dirac_chemical_potential(
+            pds->fermi_dirac_reference, efermi);
+
     meanfield.get_efermi() = efermi;
     auto& eskb = meanfield.get_eigenvals();
     auto& swg = meanfield.get_weight();
@@ -223,6 +229,7 @@ void librpa_set_wg_ekb_efermi(LibrpaHandler* h, int nspins, int nkpts, int nstat
         // Normalize occupations by the number of k points.
         swg[is] *= (1.0 / nkpts);
     }
+    pds->is_scf_eigocc_set = true;
 
     double emin, emax;
     pds->mf.get_E_min_max(emin, emax);
@@ -238,6 +245,28 @@ void librpa_set_wg_ekb_efermi(LibrpaHandler* h, int nspins, int nkpts, int nstat
     pds->comm_h.barrier();
 
     profiler.stop(tname);
+}
+
+void librpa_set_fermi_dirac_reference(LibrpaHandler* h,
+                                      const double kbt_ha,
+                                      const double chemical_potential_ha,
+                                      const double max_occupation_per_band,
+                                      const double occupation_tolerance)
+{
+    auto pds = librpa_int::api::get_dataset_instance(h);
+    auto reference = librpa_int::make_fermi_dirac_reference(
+        kbt_ha, chemical_potential_ha, max_occupation_per_band, occupation_tolerance);
+    if (pds->is_scf_eigocc_set)
+        librpa_int::validate_fermi_dirac_chemical_potential(reference, pds->mf.get_efermi());
+    pds->fermi_dirac_reference = reference;
+    pds->invalidate_compute_objects();
+}
+
+void librpa_clear_fermi_dirac_reference(LibrpaHandler* h)
+{
+    auto pds = librpa_int::api::get_dataset_instance(h);
+    pds->fermi_dirac_reference = librpa_int::FermiDiracReference{};
+    pds->invalidate_compute_objects();
 }
 
 void librpa_set_wfc(LibrpaHandler* h, int ispin, int ik, int nstates_local, int nbasis_local,
