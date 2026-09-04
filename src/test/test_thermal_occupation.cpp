@@ -122,6 +122,29 @@ void test_occupation_validation_uses_kpoint_and_spin_normalization()
     assert(rejected);
 }
 
+void test_normalized_fermi_dirac_band_weight()
+{
+    const double kbt = 0.0025;
+    const auto reference = make_fermi_dirac_reference(kbt, 0.125, 2.0, 1.0e-12);
+    require_near(normalized_fermi_dirac_band_weight(0.125, reference, 8), 0.125,
+                 1.0e-15);
+    require_near(normalized_fermi_dirac_band_weight(0.125 - 1000.0 * kbt, reference, 8), 0.25,
+                 1.0e-15);
+    require_near(normalized_fermi_dirac_band_weight(0.125 + 1000.0 * kbt, reference, 8), 0.0,
+                 1.0e-15);
+
+    bool rejected = false;
+    try
+    {
+        (void)normalized_fermi_dirac_band_weight(0.125, reference, 0);
+    }
+    catch (const std::invalid_argument&)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
 void test_invalid_temperature_is_rejected()
 {
     for (const double kbt : {0.0,
@@ -149,7 +172,7 @@ int main()
     test_stable_thermal_green_amplitudes();
     test_metadata_parser();
     test_occupation_validation_uses_kpoint_and_spin_normalization();
+    test_normalized_fermi_dirac_band_weight();
     test_invalid_temperature_is_rejected();
     return 0;
 }
-

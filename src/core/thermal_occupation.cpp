@@ -138,6 +138,24 @@ FermiDiracReference make_fermi_dirac_reference(const double kbt_ha,
     return reference;
 }
 
+double normalized_fermi_dirac_band_weight(const double energy_ha,
+                                          const FermiDiracReference &reference,
+                                          const int normalized_kpoint_count)
+{
+    if (!reference.enabled)
+        throw std::invalid_argument("normalized Fermi-Dirac band weight requires a reference");
+    if (normalized_kpoint_count <= 0)
+        throw std::invalid_argument("normalized Fermi-Dirac band weight requires k points");
+    if (reference.max_occupation_per_band != 1.0
+        && reference.max_occupation_per_band != 2.0)
+        throw std::invalid_argument("maximum occupation per band must be one or two");
+
+    return reference.max_occupation_per_band
+           * fermi_dirac_occupation(energy_ha - reference.chemical_potential_ha,
+                                    reference.kbt_ha)
+           / static_cast<double>(normalized_kpoint_count);
+}
+
 void validate_fermi_dirac_chemical_potential(const FermiDiracReference &reference,
                                               const double meanfield_chemical_potential_ha)
 {
