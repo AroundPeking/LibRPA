@@ -5,6 +5,7 @@
 #ifndef TIMEFREQ_H
 #define TIMEFREQ_H
 
+#include <complex>
 #include <string>
 #include <vector>
 
@@ -81,6 +82,11 @@ class TFGrids
         const matrix &get_costrans_f2t() const { return costrans_f2t; }
         const matrix &get_sintrans_f2t() const { return sintrans_f2t; }
         const ComplexMatrix &get_fourier_t2f() const { return fourier_t2f; }
+        //! Time-to-frequency factor for the active grid. Finite-beta grids use
+        //! the complex bosonic Fourier matrix; legacy space-time grids use the
+        //! real cosine transform.
+        std::complex<double> get_time_to_frequency_factor(size_t ifreq,
+                                                          size_t itime) const;
         int get_time_index(const double &time) const;
         int get_freq_index(const double &freq) const;
         const std::pair<int, int> get_tf_index(const std::pair<double, double> &tf) const;
