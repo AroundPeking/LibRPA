@@ -79,6 +79,11 @@ void accumulate_wing_mu_for_pair(const std::vector<double> &omega,
                                  const std::complex<double> &c_mn, double egap, double factor1,
                                  double factor2, std::complex<double> *wing_mu_for_mu,
                                  std::complex<double> *wing_mu_iomega0_for_mu = nullptr);
+void accumulate_dynamic_intraband_wing_for_state(
+    const std::vector<double> &omega,
+    const std::array<std::complex<double>, 3> &diagonal_velocity,
+    std::complex<double> diagonal_auxiliary_vertex, double minus_fermi_dirac_derivative,
+    double kpoint_weight, std::complex<double> *wing_mu_for_mu);
 std::vector<int> headwing_local_kpoints(int n_kpoints,
                                         const KPointBlacsParallelContext *kblacs_ctxt);
 ComplexMatrix rotate_headwing_wfc_to_kstar_member(

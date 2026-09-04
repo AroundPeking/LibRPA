@@ -1846,6 +1846,35 @@ void test_accumulate_wing_mu_for_pair_matches_original_formula()
     }
 }
 
+void test_dynamic_intraband_wing_has_inverse_frequency_and_imaginary_phase()
+{
+    const std::vector<double> omega{0.0, 0.5, 2.0};
+    const std::array<std::complex<double>, 3> velocity{
+        std::complex<double>{1.0, 0.0}, std::complex<double>{-2.0, 0.0},
+        std::complex<double>{0.25, 0.0}};
+    const std::complex<double> auxiliary_vertex{0.7, -0.2};
+    constexpr double minus_fd_derivative = 1.25;
+    constexpr double kpoint_weight = 0.125;
+    std::array<std::complex<double>, 9> accumulated{};
+
+    librpa_int::accumulate_dynamic_intraband_wing_for_state(
+        omega, velocity, auxiliary_vertex, minus_fd_derivative, kpoint_weight,
+        accumulated.data());
+
+    for (int alpha = 0; alpha != 3; ++alpha)
+        assert_complex_close(accumulated[alpha], 0.0, 1.0e-14);
+    for (std::size_t ifreq = 1; ifreq != omega.size(); ++ifreq)
+    {
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            const auto expected = std::complex<double>{0.0, 1.0} * kpoint_weight
+                                  * minus_fd_derivative * auxiliary_vertex * velocity[alpha]
+                                  / omega[ifreq];
+            assert_complex_close(accumulated[ifreq * 3 + alpha], expected, 1.0e-14);
+        }
+    }
+}
+
 SymmetryKStarMember make_headwing_wfc_atom_swap_member(const std::complex<double> &rot_0,
                                                        const std::complex<double> &rot_1)
 {
@@ -2090,6 +2119,80 @@ RI::Tensor<double> make_single_value_tensor(const double value)
     auto data = std::make_shared<std::valarray<double>>(1);
     (*data)[0] = value;
     return RI::Tensor<double>({1UL, 1UL, 1UL}, data);
+}
+
+void test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(
+    const BlacsCtxtHandler &blacs_h)
+{
+#ifdef LIBRPA_USE_LIBRI
+    constexpr double kbt = 0.25;
+    MeanField mf(1, 1, 1, 1);
+    mf.get_efermi() = 0.0;
+    mf.get_eigenvals()[0](0, 0) = 0.0;
+    mf.get_weight()[0](0, 0) = 1.0;
+    mf.set_fermi_dirac_reference(
+        librpa_int::make_fermi_dirac_reference(kbt, 0.0, 2.0, 1.0e-12));
+    auto &wfc = mf.get_eigenvectors()[0][0][0];
+    wfc.create(1, 1);
+    wfc(0, 0) = 1.0;
+
+    librpa_int::velocity_matrix_t velocity;
+    librpa_int::initialize_velocity_matrix(velocity, 1, 1, 1);
+    const std::array<double, 3> diagonal_velocity{1.0, 2.0, 3.0};
+    for (int alpha = 0; alpha != 3; ++alpha)
+        velocity[0][0][alpha](0, 0) = diagonal_velocity[alpha];
+
+    AtomicBasis basis_wfc({1});
+    AtomicBasis basis_abf({1});
+    PeriodicBoundaryData pbc;
+    pbc.set_latvec({1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0});
+    pbc.set_kgrids_kvec(1, 1, 1, {0.0, 0.0, 0.0});
+    const std::vector<Vector3_Order<double>> kfrac{{0.0, 0.0, 0.0}};
+    const std::vector<double> omega{0.0, 0.5, 1.0};
+    const atpair_k_cplx_mat_t empty_vq;
+    librpa_int::Cs_LRI coefficients;
+    coefficients.use_libri = true;
+    coefficients.data_libri[0][{0, {0, 0, 0}}] = make_single_value_tensor(1.0);
+
+    diele_func df(mf, velocity, kfrac, basis_wfc, basis_abf, omega, 1, 1, 1, 1, pbc,
+                  librpa_int::global::mpi_comm_global_h, blacs_h);
+    assert(df.get_meanfield_df().get_fermi_dirac_reference().enabled);
+    auto coefficients_for_transform = coefficients.data_libri;
+    const auto transformed = df.transform_Cs2mnk(0, 0, coefficients_for_transform, 0);
+    const int diagonal_row = transformed.first.indx_g2l_r(0);
+    const int diagonal_col = transformed.first.indx_g2l_c(0);
+    assert(diagonal_row >= 0 && diagonal_col >= 0);
+    assert_complex_close(transformed.second(diagonal_row, diagonal_col), 2.0, 1.0e-12);
+    df.init(0.0, empty_vq);
+    df.cal_head();
+    df.cal_wing(coefficients, 0.0, empty_vq);
+
+    librpa_int::RpaHeadwingSettings settings;
+    const auto static_input = df.get_sternheimer_rpa_headwing_input(0, settings);
+    for (int alpha = 0; alpha != 3; ++alpha)
+        assert_complex_close(static_input.wing_mu(0, alpha), 0.0, 1.0e-12);
+
+    const double transformed_diagonal_vertex = 2.0;
+    const double dielectric_unit = 2.0 * std::sqrt(2.0 * librpa_int::TWO_PI);
+    const double spin_prefactor = 2.0;
+    for (std::size_t ifreq = 1; ifreq != omega.size(); ++ifreq)
+    {
+        const auto input =
+            df.get_sternheimer_rpa_headwing_input(static_cast<int>(ifreq), settings);
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            const auto expected = std::complex<double>{0.0, 1.0} * dielectric_unit
+                                  * spin_prefactor * (1.0 / (4.0 * kbt))
+                                  * transformed_diagonal_vertex * diagonal_velocity[alpha]
+                                  / omega[ifreq];
+            assert_complex_close(input.wing_mu(0, alpha), expected, 1.0e-12);
+        }
+    }
+#else
+    (void)blacs_h;
+#endif
 }
 
 void compare_local_blacs_matrices(
@@ -3315,6 +3418,7 @@ int main(int argc, char *argv[])
         test_velocity_matrix_initialization();
         test_headwing_local_kpoints_prefers_kpoint_blacs_context();
         test_accumulate_wing_mu_for_pair_matches_original_formula();
+        test_dynamic_intraband_wing_has_inverse_frequency_and_imaginary_phase();
         test_headwing_wfc_restore_applies_atom_permutation();
         test_headwing_wfc_restore_applies_time_reversal();
         test_headwing_velocity_restore_uses_inverse_spatial_route();
@@ -3328,6 +3432,7 @@ int main(int argc, char *argv[])
         test_transform_Cs2mnk_can_keep_spin_channels_separate(blacs_h);
         test_head_initialization_does_not_require_coulomb_diagonalization(blacs_h);
         test_finite_temperature_dynamic_intraband_head_is_velocity_weighted(blacs_h);
+        test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(blacs_h);
         test_strict_2d_gamma_quadrature_is_ready_after_wing_initialization(blacs_h);
         test_wq_to_wr_symmetry_reduced_q_matches_full_bz();
         test_wq_to_wr_qmember_diagnostic_keeps_original_full_bz_weight();

@@ -205,6 +205,39 @@ void accumulate_wing_mu_for_pair(const std::vector<double> &omega,
     }
 }
 
+void accumulate_dynamic_intraband_wing_for_state(
+    const std::vector<double> &omega,
+    const std::array<std::complex<double>, 3> &diagonal_velocity,
+    const std::complex<double> diagonal_auxiliary_vertex,
+    const double minus_fermi_dirac_derivative, const double kpoint_weight,
+    std::complex<double> *wing_mu_for_mu)
+{
+    if (!std::isfinite(minus_fermi_dirac_derivative)
+        || minus_fermi_dirac_derivative < 0.0)
+        throw std::invalid_argument(
+            "dynamic intraband wing requires a finite nonnegative -df/de");
+    if (!std::isfinite(kpoint_weight) || kpoint_weight < 0.0)
+        throw std::invalid_argument(
+            "dynamic intraband wing requires a finite nonnegative k-point weight");
+    if (wing_mu_for_mu == nullptr)
+        throw std::invalid_argument("dynamic intraband wing output pointer is null");
+
+    const std::complex<double> imaginary_unit{0.0, 1.0};
+    for (std::size_t iomega = 0; iomega != omega.size(); ++iomega)
+    {
+        if (!std::isfinite(omega[iomega]) || omega[iomega] < 0.0)
+            throw std::invalid_argument(
+                "dynamic intraband wing requires finite nonnegative frequencies");
+        if (omega[iomega] == 0.0) continue;
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            wing_mu_for_mu[iomega * 3 + as_size(alpha)] +=
+                imaginary_unit * kpoint_weight * minus_fermi_dirac_derivative
+                * diagonal_auxiliary_vertex * diagonal_velocity[alpha] / omega[iomega];
+        }
+    }
+}
+
 static void print_wing_mu_k_contribution_gram(
     const char *route, const int ik, const Vector3_Order<double> &kfrac,
     const std::vector<std::complex<double>> &wing_mu_iomega0, const int n_abf,
@@ -1917,6 +1950,8 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
     const bool use_kblacs = use_matching_kpoint_blacs(nk, kblacs_ctxt_);
     const BlacsCtxtHandler &wing_blacs_h = use_kblacs ? kblacs_ctxt_->blacs_h : blacs_h;
     const auto kpoints_local = headwing_local_kpoints(nk, use_kblacs ? kblacs_ctxt_ : nullptr);
+    const auto &fd_reference = meanfield_df.get_fermi_dirac_reference();
+    const double full_bz_kpoint_weight = 1.0 / static_cast<double>(nk);
 
     // IJR distribution to IJ distribution
     ArrayDesc desc_nao_nao(wing_blacs_h);
@@ -1947,6 +1982,26 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
                 auto *wing_mu_for_mu = local_wing_mu.data() + as_size(mu) * this->omega.size() * 3;
                 auto *wing_mu_k_iomega0_for_mu =
                     local_wing_mu_k_iomega0.data() + as_size(ik * n_abf + mu) * 3;
+
+                if (fd_reference.enabled)
+                {
+                    for (int iband = 0; iband != n_states; ++iband)
+                    {
+                        const int loc_m = desc_nband_nband.indx_g2l_r(iband);
+                        const int loc_n = desc_nband_nband.indx_g2l_c(iband);
+                        if (loc_m < 0 || loc_n < 0) continue;
+                        const double minus_fd_derivative = -fermi_dirac_derivative(
+                            eigenvalues[isp](ik, iband)
+                                - fd_reference.chemical_potential_ha,
+                            fd_reference.kbt_ha);
+                        const std::array<std::complex<double>, 3> diagonal_velocity{
+                            velocity[0](iband, iband), velocity[1](iband, iband),
+                            velocity[2](iband, iband)};
+                        accumulate_dynamic_intraband_wing_for_state(
+                            omega, diagonal_velocity, C_mnk(loc_m, loc_n),
+                            minus_fd_derivative, full_bz_kpoint_weight, wing_mu_for_mu);
+                    }
+                }
 
                 for (int iocc = 0; iocc != n_states; iocc++)
                 {
@@ -2058,6 +2113,8 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
     const int n_kpoints_bz = static_cast<int>(ctx.count_kstar_members());
     const double bz_weight_scale_wing =
         static_cast<double>(n_kpoints_ibz) / static_cast<double>(n_kpoints_bz);
+    const double full_bz_kpoint_weight = 1.0 / static_cast<double>(n_kpoints_bz);
+    const auto &fd_reference = meanfield_df.get_fermi_dirac_reference();
     const bool source_rank = wing_blacs_h.myprow == 0 && wing_blacs_h.mypcol == 0;
     if (!has_direct_full_bz_headwing_inputs())
     {
@@ -2124,6 +2181,26 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
                     const auto &eigenvalues = this->meanfield_df.get_eigenvals();
                     const auto &wg = this->meanfield_df.get_weight()[isp];
                     const auto &velocity = velocity_bz[isp];
+
+                    if (fd_reference.enabled)
+                    {
+                        for (int iband = 0; iband != n_states; ++iband)
+                        {
+                            const int loc_m = desc_nband_nband.indx_g2l_r(iband);
+                            const int loc_n = desc_nband_nband.indx_g2l_c(iband);
+                            if (loc_m < 0 || loc_n < 0) continue;
+                            const double minus_fd_derivative = -fermi_dirac_derivative(
+                                eigenvalues[isp](ik_ibz, iband)
+                                    - fd_reference.chemical_potential_ha,
+                                fd_reference.kbt_ha);
+                            const std::array<std::complex<double>, 3> diagonal_velocity{
+                                velocity[0](iband, iband), velocity[1](iband, iband),
+                                velocity[2](iband, iband)};
+                            accumulate_dynamic_intraband_wing_for_state(
+                                omega, diagonal_velocity, C_mnk(loc_m, loc_n),
+                                minus_fd_derivative, full_bz_kpoint_weight, wing_mu_for_mu);
+                        }
+                    }
 
                     for (int iocc = 0; iocc != n_states; iocc++)
                     {
