@@ -98,6 +98,22 @@ double metallic_static_3d_head_only_rpa_cell_average(
 double metallic_static_3d_head_only_wc_cell_average(
     double screening_wavevector_squared, const std::vector<double> &angular_weights,
     const std::vector<double> &qmax, double gamma_cell_volume);
+double metallic_static_3d_physical_q(double internal_q);
+double metallic_static_3d_physical_gamma_cell_volume(double internal_volume);
+struct MetallicStatic3dInverseWeights
+{
+    std::complex<double> inverse_q2 = 0.0;
+    std::array<std::complex<double>, 3> inverse_q1{};
+    matrix_m<std::complex<double>> inverse_regular{3, 3, MAJOR::COL};
+    double bare_qminus2 = 0.0;
+    double volume = 0.0;
+};
+MetallicStatic3dInverseWeights compute_metallic_static_3d_inverse_weights(
+    const matrix_m<std::complex<double>> &regular_schur, std::complex<double> schur_qminus2,
+    const std::array<std::complex<double>, 3> &schur_qminus1, const std::vector<double> &qx,
+    const std::vector<double> &qy, const std::vector<double> &qz,
+    const std::vector<double> &angular_weights, const std::vector<double> &qmax,
+    double gamma_cell_volume, int radial_order = 48);
 std::complex<double> compute_metallic_static_3d_rpa_trace_log_average(
     const matrix_m<std::complex<double>> &regular_chi0v_head,
     const matrix_m<std::complex<double>> &regular_schur,
@@ -418,6 +434,10 @@ public:
     std::complex<double> compute_rpa_trace_log_average(
         matrix_m<std::complex<double>> &response_block, const int ifreq, ArrayDesc &desc_response,
         const RpaHeadwingSettings &settings);
+    bool is_metallic_static_3d_frequency(int ifreq) const;
+    void rewrite_metallic_static_3d_wc(
+        matrix_m<std::complex<double>> &epsilon_block, int ifreq, ArrayDesc &desc_nabf_nabf_opt,
+        const matrix_m<std::complex<double>> &projected_coulomb_sqrt);
     void rewrite_rpa_response(matrix_m<std::complex<double>> &eps_minus_identity_block,
                               const int ifreq, ArrayDesc &desc_nabf_nabf_opt);
     void assign_chi0(matrix_m<std::complex<double>> &chi0_block, ArrayDesc &desc_nabf_nabf_opt);

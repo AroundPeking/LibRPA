@@ -344,6 +344,21 @@ double metallic_static_3d_head_only_wc_cell_average(
         metallic_static_3d_head_only_wc_radial_integral);
 }
 
+double metallic_static_3d_physical_q(const double internal_q)
+{
+    if (!std::isfinite(internal_q) || internal_q < 0.0)
+        throw std::invalid_argument("metallic static 3D internal q must be finite and nonnegative");
+    return TWO_PI * internal_q;
+}
+
+double metallic_static_3d_physical_gamma_cell_volume(const double internal_volume)
+{
+    if (!std::isfinite(internal_volume) || internal_volume <= 0.0)
+        throw std::invalid_argument(
+            "metallic static 3D internal Gamma-cell volume must be finite and positive");
+    return std::pow(TWO_PI, 3) * internal_volume;
+}
+
 static std::pair<std::vector<double>, std::vector<double>> gauss_legendre_unit_interval(
     const int order)
 {
@@ -407,6 +422,75 @@ static std::complex<double> directional_quadratic_form(
     return nx * (nx * tensor(0, 0) + ny * tensor(0, 1) + nz * tensor(0, 2))
            + ny * (nx * tensor(1, 0) + ny * tensor(1, 1) + nz * tensor(1, 2))
            + nz * (nx * tensor(2, 0) + ny * tensor(2, 1) + nz * tensor(2, 2));
+}
+
+MetallicStatic3dInverseWeights compute_metallic_static_3d_inverse_weights(
+    const matrix_m<std::complex<double>> &regular_schur, const std::complex<double> schur_qminus2,
+    const std::array<std::complex<double>, 3> &schur_qminus1, const std::vector<double> &qx,
+    const std::vector<double> &qy, const std::vector<double> &qz,
+    const std::vector<double> &angular_weights, const std::vector<double> &qmax,
+    const double gamma_cell_volume, const int radial_order)
+{
+    if (regular_schur.nr() != 3 || regular_schur.nc() != 3)
+        throw std::invalid_argument("metallic static inverse weights require a 3x3 Schur tensor");
+    if (qx.empty() || qx.size() != qy.size() || qx.size() != qz.size() ||
+        qx.size() != angular_weights.size() || qx.size() != qmax.size())
+        throw std::invalid_argument("metallic static inverse-weight grids are inconsistent");
+    if (!std::isfinite(gamma_cell_volume) || gamma_cell_volume <= 0.0 ||
+        std::abs(schur_qminus2) <= std::numeric_limits<double>::min())
+        throw std::invalid_argument("metallic static inverse-weight coefficients are invalid");
+
+    const auto radial_grid = gauss_legendre_unit_interval(radial_order);
+    const auto &radial_nodes = radial_grid.first;
+    const auto &radial_weights = radial_grid.second;
+    MetallicStatic3dInverseWeights result;
+    result.inverse_regular.zero_out();
+    for (std::size_t idir = 0; idir != qx.size(); ++idir)
+    {
+        const double nx = qx[idir], ny = qy[idir], nz = qz[idir];
+        const double norm_squared = nx * nx + ny * ny + nz * nz;
+        if (!std::isfinite(angular_weights[idir]) || angular_weights[idir] < 0.0 ||
+            !std::isfinite(qmax[idir]) || qmax[idir] <= 0.0 ||
+            std::abs(norm_squared - 1.0) > 1.0e-10)
+            throw std::invalid_argument(
+                "metallic static inverse-weight angular grid contains invalid data");
+
+        const auto schur_regular_direction = directional_quadratic_form(regular_schur, nx, ny, nz);
+        const auto schur_qminus1_direction =
+            nx * schur_qminus1[0] + ny * schur_qminus1[1] + nz * schur_qminus1[2];
+        const double upper_q = qmax[idir];
+        const double angular_weight = angular_weights[idir];
+        result.bare_qminus2 += angular_weight * upper_q / gamma_cell_volume;
+        result.volume += angular_weight * upper_q * upper_q * upper_q / (3.0 * gamma_cell_volume);
+        for (int irad = 0; irad != radial_order; ++irad)
+        {
+            const double q = upper_q * radial_nodes[as_size(irad)];
+            const auto denominator =
+                schur_qminus2 + schur_qminus1_direction * q + schur_regular_direction * q * q;
+            if (std::abs(denominator) <= std::numeric_limits<double>::min())
+                throw std::runtime_error(
+                    "metallic static inverse-weight Schur denominator is singular");
+            const double common =
+                angular_weight * upper_q * radial_weights[as_size(irad)] / gamma_cell_volume;
+            const auto inverse_denominator = common / denominator;
+            const double q2 = q * q;
+            const double q3 = q2 * q;
+            const double q4 = q2 * q2;
+            result.inverse_q2 += inverse_denominator * q2;
+            for (int alpha = 0; alpha != 3; ++alpha)
+            {
+                const double direction_alpha = alpha == 0 ? nx : (alpha == 1 ? ny : nz);
+                result.inverse_q1[as_size(alpha)] += inverse_denominator * q3 * direction_alpha;
+                for (int beta = 0; beta != 3; ++beta)
+                {
+                    const double direction_beta = beta == 0 ? nx : (beta == 1 ? ny : nz);
+                    result.inverse_regular(alpha, beta) +=
+                        inverse_denominator * q4 * direction_alpha * direction_beta;
+                }
+            }
+        }
+    }
+    return result;
 }
 
 std::complex<double> compute_metallic_static_3d_rpa_trace_log_average(
@@ -4436,6 +4520,264 @@ void diele_func::rewrite_strict_2d_wc(matrix_m<std::complex<double>> &chi0_block
     this->body_inv.clear();
 }
 
+bool diele_func::is_metallic_static_3d_frequency(const int ifreq) const
+{
+    return !use_2d_dielectric && meanfield_df.get_fermi_dirac_reference().enabled && ifreq >= 0 &&
+           static_cast<std::size_t>(ifreq) < omega.size() && omega.at(as_size(ifreq)) == 0.0;
+}
+
+void diele_func::rewrite_metallic_static_3d_wc(
+    matrix_m<std::complex<double>> &epsilon_block, const int ifreq, ArrayDesc &desc_nabf_nabf_opt,
+    const matrix_m<std::complex<double>> &projected_coulomb_sqrt)
+{
+    if (!is_metallic_static_3d_frequency(ifreq))
+        throw std::logic_error(
+            "metallic static complete-Wc replacement requires a 3D finite-temperature zero "
+            "frequency");
+    if (n_nonsingular < 2 || static_cast<std::size_t>(desc_nabf_nabf_opt.m()) < n_nonsingular ||
+        static_cast<std::size_t>(desc_nabf_nabf_opt.n()) < n_nonsingular)
+        throw std::logic_error("metallic static complete-Wc Coulomb subspace is inconsistent");
+    if (projected_coulomb_sqrt.nr() != desc_nabf_nabf_opt.m_loc() ||
+        projected_coulomb_sqrt.nc() != desc_nabf_nabf_opt.n_loc())
+        throw std::logic_error(
+            "metallic static projected Coulomb square root has an invalid local shape");
+
+    const int nbody = as_int(n_nonsingular) - 1;
+    if (static_intraband_screening_wavevector_squared_ <= 0.0 ||
+        static_intraband_chi0v_wing_.size() != as_size(nbody))
+        throw std::logic_error(
+            "metallic static complete-Wc intraband coefficients are unavailable");
+
+    auto desc_body = get_body_inv(epsilon_block, desc_nabf_nabf_opt);
+    construct_rpa_trace_log_schur(ifreq, desc_body);
+
+    ArrayDesc desc_static_body(blacs_h);
+    desc_static_body.init(nbody, 1, desc_body.mb(), 1, 0, 0);
+    ArrayDesc desc_static_body_row(blacs_h);
+    desc_static_body_row.init(1, nbody, 1, desc_body.nb(), 0, 0);
+    auto static_body = init_local_mat<complex<double>>(desc_static_body, MAJOR::COL);
+    const int local_static_column = desc_static_body.indx_g2l_c(0);
+    if (local_static_column >= 0)
+    {
+        for (int iloc = 0; iloc != desc_static_body.m_loc(); ++iloc)
+        {
+            const int ibody = desc_static_body.indx_l2g_r(iloc);
+            static_body(iloc, local_static_column) =
+                static_intraband_chi0v_wing_.at(as_size(ibody));
+        }
+    }
+
+    auto body_inv_static = init_local_mat<complex<double>>(desc_static_body, MAJOR::COL);
+    auto static_adjoint_body_inv =
+        init_local_mat<complex<double>>(desc_static_body_row, MAJOR::COL);
+    ScalapackConnector::pgemm_f('N', 'N', nbody, 1, nbody, C_ONE, body_inv.ptr(), 1, 1,
+                                desc_body.desc, static_body.ptr(), 1, 1, desc_static_body.desc,
+                                C_ZERO, body_inv_static.ptr(), 1, 1, desc_static_body.desc);
+    ScalapackConnector::pgemm_f('C', 'N', 1, nbody, nbody, C_ONE, static_body.ptr(), 1, 1,
+                                desc_static_body.desc, body_inv.ptr(), 1, 1, desc_body.desc, C_ZERO,
+                                static_adjoint_body_inv.ptr(), 1, 1, desc_static_body_row.desc);
+
+    std::vector<std::complex<double>> body_inv_static_global(as_size(nbody), 0.0);
+    std::vector<std::complex<double>> static_adjoint_body_inv_global(as_size(nbody), 0.0);
+    if (local_static_column >= 0)
+    {
+        for (int iloc = 0; iloc != desc_static_body.m_loc(); ++iloc)
+        {
+            const int ibody = desc_static_body.indx_l2g_r(iloc);
+            body_inv_static_global.at(as_size(ibody)) = body_inv_static(iloc, local_static_column);
+        }
+    }
+    const int local_static_row = desc_static_body_row.indx_g2l_r(0);
+    if (local_static_row >= 0)
+    {
+        for (int jloc = 0; jloc != desc_static_body_row.n_loc(); ++jloc)
+        {
+            const int jbody = desc_static_body_row.indx_l2g_c(jloc);
+            static_adjoint_body_inv_global.at(as_size(jbody)) =
+                static_adjoint_body_inv(local_static_row, jloc);
+        }
+    }
+    MPI_Allreduce(MPI_IN_PLACE, body_inv_static_global.data(), nbody, MPI_CXX_DOUBLE_COMPLEX,
+                  MPI_SUM, comm_h.comm);
+    MPI_Allreduce(MPI_IN_PLACE, static_adjoint_body_inv_global.data(), nbody,
+                  MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
+
+    std::complex<double> static_local_field = 0.0;
+    for (int ibody = 0; ibody != nbody; ++ibody)
+        static_local_field += std::conj(static_intraband_chi0v_wing_.at(as_size(ibody))) *
+                              body_inv_static_global.at(as_size(ibody));
+    const auto schur_qminus2 = static_intraband_screening_wavevector_squared_ - static_local_field;
+    const double schur_scale = std::max(1.0, std::abs(schur_qminus2));
+    if (schur_qminus2.real() <= 0.0 || std::abs(schur_qminus2.imag()) > 1.0e-8 * schur_scale)
+        throw std::runtime_error(
+            "metallic static complete-Wc Schur 1/q^2 coefficient is not positive real");
+
+    std::array<std::complex<double>, 3> schur_qminus1{};
+    for (int alpha = 0; alpha != 3; ++alpha)
+    {
+        std::complex<double> left = 0.0;
+        std::complex<double> right = 0.0;
+        for (int ibody = 0; ibody != nbody; ++ibody)
+        {
+            const auto static_value = static_intraband_chi0v_wing_.at(as_size(ibody));
+            left += std::conj(static_value) * bw(ibody, alpha);
+            right += wb(alpha, ibody) * static_value;
+        }
+        schur_qminus1[as_size(alpha)] = -(left + right);
+    }
+
+    this->vol_gamma = rpa_headwing_gamma_cell_volume(pbc_, false);
+    std::vector<double> physical_q_gamma(q_gamma.size());
+    std::transform(q_gamma.cbegin(), q_gamma.cend(), physical_q_gamma.begin(),
+                   metallic_static_3d_physical_q);
+    const double physical_gamma_volume = metallic_static_3d_physical_gamma_cell_volume(vol_gamma);
+    const auto inverse_weights = compute_metallic_static_3d_inverse_weights(
+        Lind, schur_qminus2, schur_qminus1, qx_leb, qy_leb, qz_leb, qw_leb, physical_q_gamma,
+        physical_gamma_volume);
+
+    auto regular_coulomb_sqrt = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    ScalapackConnector::pgemr2d_f(nbody, nbody, projected_coulomb_sqrt.ptr(), 2, 2,
+                                  desc_nabf_nabf_opt.desc, regular_coulomb_sqrt.ptr(), 1, 1,
+                                  desc_body.desc, blacs_h.ictxt);
+
+    std::complex<double> head_sqrt_local = 0.0;
+    const int local_head_row = desc_nabf_nabf_opt.indx_g2l_r(0);
+    const int local_head_column = desc_nabf_nabf_opt.indx_g2l_c(0);
+    if (local_head_row >= 0 && local_head_column >= 0)
+        head_sqrt_local = projected_coulomb_sqrt(local_head_row, local_head_column);
+    std::complex<double> head_sqrt = 0.0;
+    MPI_Allreduce(&head_sqrt_local, &head_sqrt, 1, MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
+
+    double maximum_head_body_local = 0.0;
+    double maximum_regular_local = 0.0;
+    for (int iloc = 0; iloc != desc_nabf_nabf_opt.m_loc(); ++iloc)
+    {
+        const int i = desc_nabf_nabf_opt.indx_l2g_r(iloc);
+        for (int jloc = 0; jloc != desc_nabf_nabf_opt.n_loc(); ++jloc)
+        {
+            const int j = desc_nabf_nabf_opt.indx_l2g_c(jloc);
+            const double magnitude = std::abs(projected_coulomb_sqrt(iloc, jloc));
+            if ((i == 0 && j > 0 && j < as_int(n_nonsingular)) ||
+                (j == 0 && i > 0 && i < as_int(n_nonsingular)))
+                maximum_head_body_local = std::max(maximum_head_body_local, magnitude);
+            if (i > 0 && i < as_int(n_nonsingular) && j > 0 && j < as_int(n_nonsingular))
+                maximum_regular_local = std::max(maximum_regular_local, magnitude);
+        }
+    }
+    double maximum_head_body = 0.0;
+    double maximum_regular = 0.0;
+    MPI_Allreduce(&maximum_head_body_local, &maximum_head_body, 1, MPI_DOUBLE, MPI_MAX,
+                  comm_h.comm);
+    MPI_Allreduce(&maximum_regular_local, &maximum_regular, 1, MPI_DOUBLE, MPI_MAX, comm_h.comm);
+    const double coulomb_scale = std::max({1.0, std::abs(head_sqrt), maximum_regular});
+    if (head_sqrt.real() <= 0.0 || std::abs(head_sqrt.imag()) > 1.0e-10 * coulomb_scale)
+        throw std::runtime_error(
+            "metallic static complete-Wc Coulomb head square root is not positive real");
+    if (maximum_head_body > 1.0e-8 * coulomb_scale)
+        throw std::runtime_error(
+            "metallic static complete-Wc projected Coulomb square root mixes head and body");
+
+    const double bare_coulomb_head_average = 2.0 * TWO_PI * inverse_weights.bare_qminus2;
+    const double head_scale = head_sqrt.real() / std::sqrt(bare_coulomb_head_average);
+    const double sqrt_four_pi = std::sqrt(2.0 * TWO_PI);
+
+    auto inverse_body_average = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    for (int iloc = 0; iloc != desc_body.m_loc(); ++iloc)
+    {
+        const int i = desc_body.indx_l2g_r(iloc);
+        for (int jloc = 0; jloc != desc_body.n_loc(); ++jloc)
+        {
+            const int j = desc_body.indx_l2g_c(jloc);
+            auto value = body_inv(iloc, jloc) - (i == j ? 1.0 : 0.0);
+            value += body_inv_static_global.at(as_size(i)) *
+                     static_adjoint_body_inv_global.at(as_size(j)) * inverse_weights.inverse_q2;
+            for (int alpha = 0; alpha != 3; ++alpha)
+            {
+                value += (body_inv_static_global.at(as_size(i)) * wb(alpha, j) +
+                          bw(i, alpha) * static_adjoint_body_inv_global.at(as_size(j))) *
+                         inverse_weights.inverse_q1.at(as_size(alpha));
+                for (int beta = 0; beta != 3; ++beta)
+                    value +=
+                        bw(i, alpha) * wb(beta, j) * inverse_weights.inverse_regular(alpha, beta);
+            }
+            inverse_body_average(iloc, jloc) = value;
+        }
+    }
+
+    auto body_tmp = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    auto wc_body = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    ScalapackConnector::pgemm_f('N', 'N', nbody, nbody, nbody, C_ONE, regular_coulomb_sqrt.ptr(), 1,
+                                1, desc_body.desc, inverse_body_average.ptr(), 1, 1, desc_body.desc,
+                                C_ZERO, body_tmp.ptr(), 1, 1, desc_body.desc);
+    ScalapackConnector::pgemm_f('N', 'N', nbody, nbody, nbody, C_ONE, body_tmp.ptr(), 1, 1,
+                                desc_body.desc, regular_coulomb_sqrt.ptr(), 1, 1, desc_body.desc,
+                                C_ZERO, wc_body.ptr(), 1, 1, desc_body.desc);
+
+    ArrayDesc desc_body_head(blacs_h);
+    desc_body_head.init(nbody, 1, desc_body.mb(), 1, 0, 0);
+    ArrayDesc desc_head_body(blacs_h);
+    desc_head_body.init(1, nbody, 1, desc_body.nb(), 0, 0);
+    auto inverse_body_head = init_local_mat<complex<double>>(desc_body_head, MAJOR::COL);
+    auto inverse_head_body = init_local_mat<complex<double>>(desc_head_body, MAJOR::COL);
+    const int local_body_head_column = desc_body_head.indx_g2l_c(0);
+    if (local_body_head_column >= 0)
+    {
+        for (int iloc = 0; iloc != desc_body_head.m_loc(); ++iloc)
+        {
+            const int i = desc_body_head.indx_l2g_r(iloc);
+            auto value = body_inv_static_global.at(as_size(i)) * inverse_weights.inverse_q2;
+            for (int alpha = 0; alpha != 3; ++alpha)
+                value += bw(i, alpha) * inverse_weights.inverse_q1.at(as_size(alpha));
+            inverse_body_head(iloc, local_body_head_column) = head_scale * sqrt_four_pi * value;
+        }
+    }
+    const int local_head_body_row = desc_head_body.indx_g2l_r(0);
+    if (local_head_body_row >= 0)
+    {
+        for (int jloc = 0; jloc != desc_head_body.n_loc(); ++jloc)
+        {
+            const int j = desc_head_body.indx_l2g_c(jloc);
+            auto value = static_adjoint_body_inv_global.at(as_size(j)) * inverse_weights.inverse_q2;
+            for (int alpha = 0; alpha != 3; ++alpha)
+                value += wb(alpha, j) * inverse_weights.inverse_q1.at(as_size(alpha));
+            inverse_head_body(local_head_body_row, jloc) = head_scale * sqrt_four_pi * value;
+        }
+    }
+
+    auto wc_body_head = init_local_mat<complex<double>>(desc_body_head, MAJOR::COL);
+    auto wc_head_body = init_local_mat<complex<double>>(desc_head_body, MAJOR::COL);
+    ScalapackConnector::pgemm_f('N', 'N', nbody, 1, nbody, C_ONE, regular_coulomb_sqrt.ptr(), 1, 1,
+                                desc_body.desc, inverse_body_head.ptr(), 1, 1, desc_body_head.desc,
+                                C_ZERO, wc_body_head.ptr(), 1, 1, desc_body_head.desc);
+    ScalapackConnector::pgemm_f('N', 'N', 1, nbody, nbody, C_ONE, inverse_head_body.ptr(), 1, 1,
+                                desc_head_body.desc, regular_coulomb_sqrt.ptr(), 1, 1,
+                                desc_body.desc, C_ZERO, wc_head_body.ptr(), 1, 1,
+                                desc_head_body.desc);
+
+    this->chi0 = init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
+    this->chi0.zero_out();
+    ScalapackConnector::pgemr2d_f(nbody, nbody, wc_body.ptr(), 1, 1, desc_body.desc,
+                                  this->chi0.ptr(), 2, 2, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
+    ScalapackConnector::pgemr2d_f(nbody, 1, wc_body_head.ptr(), 1, 1, desc_body_head.desc,
+                                  this->chi0.ptr(), 2, 1, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
+    ScalapackConnector::pgemr2d_f(1, nbody, wc_head_body.ptr(), 1, 1, desc_head_body.desc,
+                                  this->chi0.ptr(), 1, 2, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
+    if (local_head_row >= 0 && local_head_column >= 0)
+        this->chi0(local_head_row, local_head_column) =
+            head_scale * head_scale * 2.0 * TWO_PI *
+            (inverse_weights.inverse_q2 - inverse_weights.bare_qminus2);
+
+    if (debug && comm_h.is_root())
+        global::lib_printf(
+            "Metallic static complete Wc Gamma avg: schur_qminus2=(%.12e,%.12e) "
+            "head_scale=%.12e volume=%.12e\n",
+            schur_qminus2.real(), schur_qminus2.imag(), head_scale, inverse_weights.volume);
+    assign_chi0(epsilon_block, desc_nabf_nabf_opt);
+    this->chi0.clear();
+    this->Lind.clear();
+    this->body_inv.clear();
+}
+
 void diele_func::rewrite_strict_2d_wc_at_q(
     matrix_m<std::complex<double>> &wc_coulomb_basis, const int ifreq,
     ArrayDesc &desc_nabf_nabf_opt, const double qhat_x, const double qhat_y,
@@ -4692,10 +5034,15 @@ std::complex<double> diele_func::compute_rpa_trace_log_average(
             schur_qminus1[alpha] = -(left + right);
         }
 
+        std::vector<double> physical_q_gamma(q_gamma.size());
+        std::transform(q_gamma.cbegin(), q_gamma.cend(), physical_q_gamma.begin(),
+                       metallic_static_3d_physical_q);
+        const double physical_gamma_volume =
+            metallic_static_3d_physical_gamma_cell_volume(vol_gamma);
         const auto result = compute_metallic_static_3d_rpa_trace_log_average(
             get_rpa_chi0v_head(ifreq), Lind, trace_body, logdet_body,
-            static_intraband_screening_wavevector_squared_, schur_qminus2, schur_qminus1,
-            qx_leb, qy_leb, qz_leb, qw_leb, q_gamma, vol_gamma);
+            static_intraband_screening_wavevector_squared_, schur_qminus2, schur_qminus1, qx_leb,
+            qy_leb, qz_leb, qw_leb, physical_q_gamma, physical_gamma_volume);
         if (debug && comm_h.is_root())
             global::lib_printf(
                 "Metallic static RPA Gamma avg: kappa2=%.12e schur_qminus2=(%.12e,%.12e) "

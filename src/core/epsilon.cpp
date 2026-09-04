@@ -299,6 +299,17 @@ bool use_strict_2d_complete_wc_gamma_route(const bool replace_w_head, const int 
            gamma_point && headwing_data_available;
 }
 
+bool use_metallic_static_3d_complete_wc_gamma_route(const bool replace_w_head,
+                                                    const int option_dielect_func,
+                                                    const bool use_2d_dielectric,
+                                                    const bool gamma_point,
+                                                    const bool headwing_data_available,
+                                                    const bool finite_temperature_static)
+{
+    return replace_w_head && option_dielect_func == 3 && !use_2d_dielectric && gamma_point &&
+           headwing_data_available && finite_temperature_static;
+}
+
 using abf_qspace_complex_block_map_t =
     atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old;
 using abf_rspace_complex_block_map_t =
@@ -3600,6 +3611,46 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         // imaginary frequency is not prepared
         if (epsmac_LF_imagfreq.empty() || !is_gamma_point(q)) sqrtveig_blacs.clear();
         const size_t n_nonsingular = n_abf - n_singular;
+        bool has_metallic_static_frequency = false;
+        if (df_headwing != nullptr)
+        {
+            for (const auto &frequency : chi0.tfg.get_freq_nodes())
+            {
+                const int frequency_index = chi0.tfg.get_freq_index(frequency);
+                if (df_headwing->is_metallic_static_3d_frequency(frequency_index))
+                {
+                    has_metallic_static_frequency = true;
+                    break;
+                }
+            }
+        }
+        const bool prepare_metallic_static_3d_complete_wc =
+            use_metallic_static_3d_complete_wc_gamma_route(
+                replace_w_head, option_dielect_func,
+                df_headwing != nullptr && df_headwing->use_2d_dielectric, is_gamma_point(q),
+                !epsmac_LF_imagfreq.empty() && df_headwing != nullptr,
+                has_metallic_static_frequency);
+        matrix_m<std::complex<double>> metallic_static_projected_coulomb_sqrt;
+        if (prepare_metallic_static_3d_complete_wc)
+        {
+            metallic_static_projected_coulomb_sqrt =
+                init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
+            metallic_static_projected_coulomb_sqrt.zero_out();
+            const int n_coulomb = as_int(n_nonsingular);
+            ScalapackConnector::pgemm_f('C', 'N', n_coulomb, n_abf, n_abf, C_ONE,
+                                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
+                                        coulwc_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc, C_ZERO,
+                                        coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc);
+            ScalapackConnector::pgemm_f('N', 'N', n_coulomb, n_coulomb, n_abf, C_ONE,
+                                        coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
+                                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
+                                        C_ZERO, metallic_static_projected_coulomb_sqrt.ptr(), 1, 1,
+                                        desc_nabf_nabf_opt.desc);
+            if (comm_h.is_root())
+                std::cout << "Prepared the truncated-Coulomb square root in the fixed Gamma "
+                             "basis for the metallic static complete-Wc average."
+                          << std::endl;
+        }
         if (is_gamma_point(q) && !omega0_dump_directory.empty())
         {
             print_matrix_mm_file_parallel(omega0_dump_directory + "gamma_coulomb_basis.mtx",
@@ -3694,6 +3745,12 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         for (const auto &freq : chi0.tfg.get_freq_nodes())
         {
             const auto ifreq = chi0.tfg.get_freq_index(freq);
+            const bool metallic_static_3d_complete_wc_gamma =
+                use_metallic_static_3d_complete_wc_gamma_route(
+                    replace_w_head, option_dielect_func,
+                    df_headwing != nullptr && df_headwing->use_2d_dielectric, is_gamma_point(q),
+                    !epsmac_LF_imagfreq.empty() && df_headwing != nullptr,
+                    df_headwing != nullptr && df_headwing->is_metallic_static_3d_frequency(ifreq));
             std::complex<double> finite_q_p_head = std::numeric_limits<double>::quiet_NaN();
             Strict2dBlockMetrics finite_q_p_metrics;
             Strict2dBlockMetrics finite_q_chi0_metrics;
@@ -3918,6 +3975,10 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                     if (strict_2d_complete_wc_gamma)
                         df_headwing->rewrite_strict_2d_wc(chi0_block, ifreq, desc_nabf_nabf_opt,
                                                           coulwc_block);
+                    else if (metallic_static_3d_complete_wc_gamma)
+                        df_headwing->rewrite_metallic_static_3d_wc(
+                            chi0_block, ifreq, desc_nabf_nabf_opt,
+                            metallic_static_projected_coulomb_sqrt);
                     else
                         df_headwing->rewrite_eps(chi0_block, ifreq, desc_nabf_nabf_opt);
 
@@ -4126,13 +4187,13 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                                     desc_nabf_nabf_opt, "", 1e-10);
 
             global::profiler.start("epsilon_to_wc");
-            if (strict_2d_complete_wc_gamma)
+            if (strict_2d_complete_wc_gamma || metallic_static_3d_complete_wc_gamma)
             {
                 if (ifreq == 0 && comm_h.is_root())
-                    std::cout << "Skipping factorized q=0 Coulomb multiplication because the "
-                                 "strict 2D branch already contains the complete Gamma-cell Wc "
-                                 "average."
-                              << std::endl;
+                    std::cout
+                        << "Skipping factorized q=0 Coulomb multiplication because the analytic "
+                           "branch already contains the complete Gamma-cell Wc average."
+                        << std::endl;
             }
             else if (epsmac_LF_imagfreq.size() > 0 && is_gamma_point(q) && option_dielect_func == 3)
             {
