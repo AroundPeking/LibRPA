@@ -1987,7 +1987,7 @@ bool read_thermal_occupation_reference(const std::string &file_path)
             {
                 samples.push_back({
                     eigenvalues[ispin](ik, iband),
-                    meanfield_weights[ispin](ik, iband) * mf.get_n_kpoints(),
+                    meanfield_weights[ispin](ik, iband),
                     kweights[static_cast<std::size_t>(ik)],
                 });
             }
