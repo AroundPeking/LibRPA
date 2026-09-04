@@ -33,6 +33,7 @@ class TFGrids
         bool _has_time_grids;
         size_t n_grids;
         size_t n_time_grids;
+        double finite_beta_ha_inv = 0.0;
         std::vector<double> freq_nodes;
         std::vector<double> freq_weights;
         std::vector<double> time_nodes;
@@ -94,6 +95,13 @@ class TFGrids
         // NOTE:(ZMY) attempt to use a map<double, double> to store,
         //      but will lead to a segfault in chi0tauR calculation, not knowing why
         double find_freq_weight(const double &freq) const;
+        //! Complete frequency prefactor used by the RPA trace-log sum.  For a
+        //! finite-beta grid this is 1/(2*beta) at zero frequency and 1/beta
+        //! for each positive Matsubara frequency.
+        double find_correlation_frequency_weight(double freq) const;
+        //! Weight multiplying A for an omitted asymptotic tail F(i*nu)=A/nu^4.
+        //! first_omitted is the first positive Matsubara index not in the sum.
+        double finite_beta_power4_tail_weight(size_t first_omitted) const;
         void write_cos_sin_trans_matrices(const std::string &filename) const;
 
         //! A wrapper around all grids generators

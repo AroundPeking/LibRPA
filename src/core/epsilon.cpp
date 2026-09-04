@@ -1108,7 +1108,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
         for (const auto &freq : chi0.tfg.get_freq_nodes())
         {
             // const auto ifreq = chi0.tfg.get_freq_index(freq);
-            const double freq_weight = chi0.tfg.find_freq_weight(freq);
+            const double freq_weight = chi0.tfg.find_correlation_frequency_weight(freq);
             double pi_freq_begin = omp_get_wtime();
             chi0_block.zero_out();
             {
@@ -1249,8 +1249,8 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
                 lib_printf("| TIME of DET-freq-q:  %f,  q: ( %f, %f, %f)  TOT: %f  CHI_arr: %f  CHI_comm: %f, CHI_2d: %f, Pi: %f, Det: %f\n",freq, q.x,q.y,q.z,pi_freq_end-pi_freq_begin, chi_arr_time,chi_comm_time,chi_2d_time,pi_end-pi_begin,det_end-pi_end);
                 complex<double> rpa_for_omega_q = complex<double>(trace_pi + ln_det);
                 const auto qweight = chi0.q_weight(q);
-                cRPA_q[q] += rpa_for_omega_q * freq_weight * qweight / TWO_PI;//!check
-                tot_RPA_energy += rpa_for_omega_q * freq_weight * qweight / TWO_PI;
+                cRPA_q[q] += rpa_for_omega_q * freq_weight * qweight;
+                tot_RPA_energy += rpa_for_omega_q * freq_weight * qweight;
             }
         }
     }
@@ -1460,7 +1460,7 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
         for (const auto &freq: chi0.tfg.get_freq_nodes())
         {
             const auto ifreq = chi0.tfg.get_freq_index(freq);
-            const double freq_weight = chi0.tfg.find_freq_weight(freq);
+            const double freq_weight = chi0.tfg.find_correlation_frequency_weight(freq);
             double pi_freq_begin = omp_get_wtime();
             chi0_block.zero_out();
             {
@@ -1649,8 +1649,8 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 }
                 //cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "      lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
                 const auto qweight = chi0.q_weight(q);
-                cRPA_q[q] += rpa_for_omega_q * freq_weight * qweight / TWO_PI;//!check
-                tot_RPA_energy += rpa_for_omega_q * freq_weight * qweight / TWO_PI;
+                cRPA_q[q] += rpa_for_omega_q * freq_weight * qweight;
+                tot_RPA_energy += rpa_for_omega_q * freq_weight * qweight;
             }
         }
     }
@@ -2005,7 +2005,7 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
     for (const auto &freq_q_MuNuchi0 : chi0.get_chi0_q())
     {
         const auto freq = freq_q_MuNuchi0.first;
-        const double freq_weight = chi0.tfg.find_freq_weight(freq);
+        const double freq_weight = chi0.tfg.find_correlation_frequency_weight(freq);
         for (const auto &q_MuNuchi0 : freq_q_MuNuchi0.second)
         {
             double task_begin = omp_get_wtime();
@@ -2100,9 +2100,10 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
             {
                 std::complex<double> rpa_for_omega_q = trace_pi + ln_det;
                 const auto kweight = chi0.q_weight(q);
-                //cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "      lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
-                cRPA_q[q] += rpa_for_omega_q * freq_weight * kweight / TWO_PI;//!check
-                tot_RPA_energy += rpa_for_omega_q * freq_weight * kweight / TWO_PI;
+                // cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "
+                // lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
+                cRPA_q[q] += rpa_for_omega_q * freq_weight * kweight;
+                tot_RPA_energy += rpa_for_omega_q * freq_weight * kweight;
             }
         }
     }
@@ -2233,7 +2234,7 @@ CorrEnergy compute_RPA_correlation(LibrpaParallelRouting routing, const Chi0 &ch
         for (const auto &freq_qpi : pi_freq_q)
         {
             const auto freq = freq_qpi.first;
-            const double freq_weight = chi0.tfg.find_freq_weight(freq);
+            const double freq_weight = chi0.tfg.find_correlation_frequency_weight(freq);
             for (const auto &q_pi : freq_qpi.second)
             {
                 const auto q = q_pi.first;
@@ -2280,9 +2281,10 @@ CorrEnergy compute_RPA_correlation(LibrpaParallelRouting routing, const Chi0 &ch
                 // cout << endl;
                 rpa_for_omega_q = ln_det + trace_pi;
                 const auto kweight = chi0.q_weight(q);
-                // cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "      lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
-                cRPA_q[q] += rpa_for_omega_q * freq_weight * kweight / TWO_PI;
-                tot_RPA_energy += rpa_for_omega_q * freq_weight * kweight / TWO_PI;
+                // cout << " ifreq:" << freq << "      rpa_for_omega_k: " << rpa_for_omega_q << "
+                // lnt_det: " << ln_det << "    trace_pi " << trace_pi << endl;
+                cRPA_q[q] += rpa_for_omega_q * freq_weight * kweight;
+                tot_RPA_energy += rpa_for_omega_q * freq_weight * kweight;
             }
         }
         // lib_printf("Finish EcRPA %4d, size %zu\n", comm_h.myid, pi_freq_q_Mu_Nu.size());
