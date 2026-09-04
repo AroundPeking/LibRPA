@@ -674,6 +674,126 @@ void test_strict_2d_radial_integrals_are_stable_at_zero_and_small_a()
     assert_complex_close(librpa_int::strict_2d_radial_i1(small_a, qmax), expected_i1, 1e-15);
 }
 
+void test_static_intraband_auxiliary_response_is_complete_outer_product()
+{
+    ComplexMatrix response(3, 3);
+    const std::vector<std::complex<double>> first{
+        {1.0, 0.0}, {0.4, -0.2}, {-0.1, 0.3}};
+    const std::vector<std::complex<double>> second{
+        {1.0, 0.0}, {-0.25, 0.1}, {0.6, 0.2}};
+    librpa_int::accumulate_static_intraband_auxiliary_response(first, 1.25, 0.4, response);
+    librpa_int::accumulate_static_intraband_auxiliary_response(second, 0.75, 0.2, response);
+
+    for (int i = 0; i != 3; ++i)
+    {
+        for (int j = 0; j != 3; ++j)
+        {
+            const auto expected = -0.4 * 1.25 * first[i] * std::conj(first[j])
+                                  -0.2 * 0.75 * second[i] * std::conj(second[j]);
+            assert_complex_close(response(i, j), expected, 1.0e-14);
+            assert_complex_close(response(i, j), std::conj(response(j, i)), 1.0e-14);
+        }
+    }
+}
+
+double midpoint_radial_integral(const double qmax, const int intervals,
+                                const std::function<double(double)> &integrand)
+{
+    const double dq = qmax / static_cast<double>(intervals);
+    double value = 0.0;
+    for (int i = 0; i != intervals; ++i)
+        value += integrand((static_cast<double>(i) + 0.5) * dq);
+    return value * dq;
+}
+
+void test_metallic_static_3d_head_only_radial_integrals_match_direct_quadrature()
+{
+    constexpr double screening_wavevector_squared = 0.7;
+    for (const double qmax : {0.1, 0.8, 3.0})
+    {
+        const auto rpa_reference = midpoint_radial_integral(
+            qmax, 200000,
+            [](const double q)
+            {
+                constexpr double kappa_squared = screening_wavevector_squared;
+                const double ratio = kappa_squared / (q * q);
+                return q * q * (-ratio + std::log1p(ratio));
+            });
+        const auto wc_reference = midpoint_radial_integral(
+            qmax, 200000,
+            [](const double q)
+            {
+                constexpr double kappa_squared = screening_wavevector_squared;
+                return -2.0 * librpa_int::TWO_PI * kappa_squared
+                       / (q * q + kappa_squared);
+            });
+        require_double_close(
+            librpa_int::metallic_static_3d_head_only_rpa_radial_integral(
+                screening_wavevector_squared, qmax),
+            rpa_reference, 2.0e-10);
+        require_double_close(
+            librpa_int::metallic_static_3d_head_only_wc_radial_integral(
+                screening_wavevector_squared, qmax),
+            wc_reference, 2.0e-10);
+    }
+
+    constexpr double weak_screening_squared = 1.0e-20;
+    constexpr double qmax = 2.0;
+    const double leading_weak_screening =
+        -librpa_int::PI * std::pow(weak_screening_squared, 1.5) / 3.0;
+    require_double_close(
+        librpa_int::metallic_static_3d_head_only_rpa_radial_integral(
+            weak_screening_squared, qmax),
+        leading_weak_screening, 1.0e-34);
+    require_double_close(
+        librpa_int::metallic_static_3d_head_only_rpa_radial_integral(0.0, qmax), 0.0,
+        1.0e-30);
+    require_double_close(
+        librpa_int::metallic_static_3d_head_only_wc_radial_integral(0.0, qmax), 0.0,
+        1.0e-30);
+}
+
+void test_metallic_static_3d_head_only_cell_average_handles_anisotropic_shape()
+{
+    constexpr double screening_wavevector_squared = 0.45;
+    const std::vector<double> angular_weights{0.7, 1.1, 2.3};
+    const std::vector<double> qmax{0.35, 0.8, 1.25};
+    double gamma_volume = 0.0;
+    double rpa_reference = 0.0;
+    double wc_reference = 0.0;
+    for (std::size_t idir = 0; idir != qmax.size(); ++idir)
+    {
+        gamma_volume += angular_weights[idir] * std::pow(qmax[idir], 3) / 3.0;
+        rpa_reference += angular_weights[idir] * midpoint_radial_integral(
+            qmax[idir], 200000,
+            [](const double q)
+            {
+                constexpr double kappa_squared = screening_wavevector_squared;
+                const double ratio = kappa_squared / (q * q);
+                return q * q * (-ratio + std::log1p(ratio));
+            });
+        wc_reference += angular_weights[idir] * midpoint_radial_integral(
+            qmax[idir], 200000,
+            [](const double q)
+            {
+                constexpr double kappa_squared = screening_wavevector_squared;
+                return -2.0 * librpa_int::TWO_PI * kappa_squared
+                       / (q * q + kappa_squared);
+            });
+    }
+    rpa_reference /= gamma_volume;
+    wc_reference /= gamma_volume;
+
+    require_double_close(
+        librpa_int::metallic_static_3d_head_only_rpa_cell_average(
+            screening_wavevector_squared, angular_weights, qmax, gamma_volume),
+        rpa_reference, 2.0e-10);
+    require_double_close(
+        librpa_int::metallic_static_3d_head_only_wc_cell_average(
+            screening_wavevector_squared, angular_weights, qmax, gamma_volume),
+        wc_reference, 2.0e-10);
+}
+
 void test_strict_2d_inverse_head_average_has_linear_q_screening()
 {
     const std::complex<double> a{1.7, 0.0};
@@ -3385,6 +3505,9 @@ int main(int argc, char *argv[])
         test_strict_2d_gamma_cell_uses_physical_reciprocal_measure();
         test_strict_2d_radial_integrals_match_analytic_values();
         test_strict_2d_radial_integrals_are_stable_at_zero_and_small_a();
+        test_static_intraband_auxiliary_response_is_complete_outer_product();
+        test_metallic_static_3d_head_only_radial_integrals_match_direct_quadrature();
+        test_metallic_static_3d_head_only_cell_average_handles_anisotropic_shape();
         test_strict_2d_inverse_head_average_has_linear_q_screening();
         test_strict_2d_finite_q_reference_matches_head_and_schur_limits();
         test_strict_2d_schur_coefficient_removes_identity();

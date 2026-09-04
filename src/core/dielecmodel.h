@@ -84,6 +84,20 @@ void accumulate_dynamic_intraband_wing_for_state(
     const std::array<std::complex<double>, 3> &diagonal_velocity,
     std::complex<double> diagonal_auxiliary_vertex, double minus_fermi_dirac_derivative,
     double kpoint_weight, std::complex<double> *wing_mu_for_mu);
+void accumulate_static_intraband_auxiliary_response(
+    const std::vector<std::complex<double>> &density_vertices,
+    double minus_fermi_dirac_derivative, double kpoint_weight,
+    ComplexMatrix &static_response);
+double metallic_static_3d_head_only_rpa_radial_integral(double screening_wavevector_squared,
+                                                         double qmax);
+double metallic_static_3d_head_only_wc_radial_integral(double screening_wavevector_squared,
+                                                        double qmax);
+double metallic_static_3d_head_only_rpa_cell_average(
+    double screening_wavevector_squared, const std::vector<double> &angular_weights,
+    const std::vector<double> &qmax, double gamma_cell_volume);
+double metallic_static_3d_head_only_wc_cell_average(
+    double screening_wavevector_squared, const std::vector<double> &angular_weights,
+    const std::vector<double> &qmax, double gamma_cell_volume);
 std::vector<int> headwing_local_kpoints(int n_kpoints,
                                         const KPointBlacsParallelContext *kblacs_ctxt);
 ComplexMatrix rotate_headwing_wfc_to_kstar_member(

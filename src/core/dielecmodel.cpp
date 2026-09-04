@@ -238,6 +238,112 @@ void accumulate_dynamic_intraband_wing_for_state(
     }
 }
 
+void accumulate_static_intraband_auxiliary_response(
+    const std::vector<std::complex<double>> &density_vertices,
+    const double minus_fermi_dirac_derivative, const double kpoint_weight,
+    ComplexMatrix &static_response)
+{
+    if (density_vertices.empty())
+        throw std::invalid_argument("static intraband response requires density vertices");
+    if (static_response.nr != static_cast<int>(density_vertices.size())
+        || static_response.nc != static_cast<int>(density_vertices.size()))
+        throw std::invalid_argument(
+            "static intraband response matrix and density vertices have inconsistent sizes");
+    if (!std::isfinite(minus_fermi_dirac_derivative)
+        || minus_fermi_dirac_derivative < 0.0)
+        throw std::invalid_argument(
+            "static intraband response requires a finite nonnegative -df/de");
+    if (!std::isfinite(kpoint_weight) || kpoint_weight < 0.0)
+        throw std::invalid_argument(
+            "static intraband response requires a finite nonnegative k-point weight");
+
+    const double weight = -kpoint_weight * minus_fermi_dirac_derivative;
+    for (int row = 0; row != static_response.nr; ++row)
+        for (int col = 0; col != static_response.nc; ++col)
+            static_response(row, col) +=
+                weight * density_vertices[row] * std::conj(density_vertices[col]);
+}
+
+static void validate_metallic_static_3d_head_only_radial_inputs(
+    const double screening_wavevector_squared, const double qmax)
+{
+    if (!std::isfinite(screening_wavevector_squared)
+        || screening_wavevector_squared < 0.0 || !std::isfinite(qmax) || qmax < 0.0)
+        throw std::invalid_argument(
+            "metallic static 3D head-only integral requires finite nonnegative inputs");
+}
+
+double metallic_static_3d_head_only_rpa_radial_integral(
+    const double screening_wavevector_squared, const double qmax)
+{
+    validate_metallic_static_3d_head_only_radial_inputs(screening_wavevector_squared, qmax);
+    if (screening_wavevector_squared == 0.0 || qmax == 0.0) return 0.0;
+
+    const double ratio = screening_wavevector_squared / (qmax * qmax);
+    const double log_remainder = ratio < 1.0e-4
+                                     ? ratio * ratio
+                                           * (-0.5 + ratio * (1.0 / 3.0 + ratio * (-0.25)))
+                                     : std::log1p(ratio) - ratio;
+    const double sqrt_ratio = std::sqrt(ratio);
+    const double inverse_tangent = ratio < 1.0
+                                       ? PI / 2.0 - std::atan(sqrt_ratio)
+                                       : std::atan(1.0 / sqrt_ratio);
+    return std::pow(qmax, 3)
+           * (log_remainder - 2.0 * ratio * sqrt_ratio * inverse_tangent) / 3.0;
+}
+
+double metallic_static_3d_head_only_wc_radial_integral(
+    const double screening_wavevector_squared, const double qmax)
+{
+    validate_metallic_static_3d_head_only_radial_inputs(screening_wavevector_squared, qmax);
+    if (screening_wavevector_squared == 0.0 || qmax == 0.0) return 0.0;
+
+    const double screening_wavevector = std::sqrt(screening_wavevector_squared);
+    return -2.0 * TWO_PI * screening_wavevector
+           * std::atan(qmax / screening_wavevector);
+}
+
+template <typename RadialIntegral>
+static double metallic_static_3d_head_only_cell_average(
+    const double screening_wavevector_squared, const std::vector<double> &angular_weights,
+    const std::vector<double> &qmax, const double gamma_cell_volume,
+    const RadialIntegral &radial_integral)
+{
+    if (angular_weights.size() != qmax.size() || angular_weights.empty()
+        || !std::isfinite(gamma_cell_volume) || gamma_cell_volume <= 0.0)
+        throw std::invalid_argument(
+            "metallic static 3D head-only Gamma-cell quadrature is inconsistent");
+
+    double integral = 0.0;
+    for (std::size_t idir = 0; idir != qmax.size(); ++idir)
+    {
+        if (!std::isfinite(angular_weights[idir]) || angular_weights[idir] < 0.0)
+            throw std::invalid_argument(
+                "metallic static 3D head-only angular weights must be finite and nonnegative");
+        integral += angular_weights[idir]
+                    * radial_integral(screening_wavevector_squared, qmax[idir]);
+    }
+    return integral / gamma_cell_volume;
+}
+
+double metallic_static_3d_head_only_rpa_cell_average(
+    const double screening_wavevector_squared, const std::vector<double> &angular_weights,
+    const std::vector<double> &qmax, const double gamma_cell_volume)
+{
+    return metallic_static_3d_head_only_cell_average(
+        screening_wavevector_squared, angular_weights, qmax, gamma_cell_volume,
+        metallic_static_3d_head_only_rpa_radial_integral);
+}
+
+double metallic_static_3d_head_only_wc_cell_average(
+    const double screening_wavevector_squared, const std::vector<double> &angular_weights,
+    const std::vector<double> &qmax, const double gamma_cell_volume)
+{
+    return metallic_static_3d_head_only_cell_average(
+        screening_wavevector_squared, angular_weights, qmax, gamma_cell_volume,
+        metallic_static_3d_head_only_wc_radial_integral);
+}
+
 static void print_wing_mu_k_contribution_gram(
     const char *route, const int ik, const Vector3_Order<double> &kfrac,
     const std::vector<std::complex<double>> &wing_mu_iomega0, const int n_abf,
