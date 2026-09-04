@@ -1376,7 +1376,6 @@ void diele_func::init_wing(double coulomb_eigen_threshold, const atpair_k_cplx_m
         std::cout << "* Success: initalize and calculate lebdev points and q_gamma." << std::endl;
 }
 
-// intraband term is not considered
 void diele_func::cal_head()
 {
     using global::profiler;
@@ -1451,6 +1450,8 @@ void diele_func::cal_head_full_bz()
     std::complex<double> tmp;
     const bool use_kblacs = use_matching_kpoint_blacs(nk, kblacs_ctxt_);
     const auto kpoints = headwing_local_kpoint_roots(nk, kblacs_ctxt_);
+    const auto &fd_reference = meanfield_df.get_fermi_dirac_reference();
+    const double full_bz_kpoint_weight = 1.0 / static_cast<double>(nk);
     std::vector<std::array<std::complex<double>, 9>> head_k_iomega0(as_size(nk));
     for (auto &head_k : head_k_iomega0) head_k.fill({0.0, 0.0});
 
@@ -1461,6 +1462,34 @@ void diele_func::cal_head_full_bz()
         const auto &velocity = this->velocity_[ispin];
         for (const int ik : kpoints)
         {
+            if (fd_reference.enabled)
+            {
+                for (int iband = 0; iband != n_states; ++iband)
+                {
+                    const double minus_fd_derivative = -fermi_dirac_derivative(
+                        eigenvalues(ik, iband) - fd_reference.chemical_potential_ha,
+                        fd_reference.kbt_ha);
+                    for (int alpha = 0; alpha != 3; ++alpha)
+                    {
+                        const auto velocity_alpha = velocity[ik][alpha](iband, iband);
+                        for (int beta = 0; beta != 3; ++beta)
+                        {
+                            const auto velocity_product =
+                                velocity_alpha * std::conj(velocity[ik][beta](iband, iband));
+                            for (std::size_t iomega = 0; iomega != omega.size(); ++iomega)
+                            {
+                                const double bosonic_frequency = omega[iomega];
+                                if (bosonic_frequency <= 0.0) continue;
+                                head.at(iomega)(alpha, beta) +=
+                                    full_bz_kpoint_weight * minus_fd_derivative
+                                    * velocity_product
+                                    / (bosonic_frequency * bosonic_frequency);
+                            }
+                        }
+                    }
+                }
+            }
+
             for (int iocc = 0; iocc != n_states; iocc++)
             {
                 for (int iunocc = 0; iunocc != n_states; iunocc++)
@@ -1529,7 +1558,9 @@ void diele_func::cal_head_symmetric()
     // Expanding each representative to the full BZ therefore scales every member uniformly.
     const std::size_t n_kpoints_bz = ctx.count_kstar_members();
     const double bz_weight_scale = static_cast<double>(nk) / static_cast<double>(n_kpoints_bz);
+    const double full_bz_kpoint_weight = 1.0 / static_cast<double>(n_kpoints_bz);
     const bool use_kblacs = use_matching_kpoint_blacs(nk, kblacs_ctxt_);
+    const auto &fd_reference = meanfield_df.get_fermi_dirac_reference();
 
     // Debug self-verification accumulator: independently accumulate the head
     // using the same per-BZ-k weight on the rotated velocities, then compare.
@@ -1586,6 +1617,37 @@ void diele_func::cal_head_symmetric()
                               ctx, member,
                               {velocity[ik_ibz][0], velocity[ik_ibz][1], velocity[ik_ibz][2]},
                               n_states, member.time_reversal);
+
+                if (fd_reference.enabled)
+                {
+                    for (int iband = 0; iband != n_states; ++iband)
+                    {
+                        const double minus_fd_derivative = -fermi_dirac_derivative(
+                            eigenvalues(ik_ibz, iband)
+                                - fd_reference.chemical_potential_ha,
+                            fd_reference.kbt_ha);
+                        for (int alpha = 0; alpha != 3; ++alpha)
+                        {
+                            const auto velocity_alpha = v_band_bz[alpha](iband, iband);
+                            for (int beta = 0; beta != 3; ++beta)
+                            {
+                                const auto velocity_product =
+                                    velocity_alpha * std::conj(v_band_bz[beta](iband, iband));
+                                for (std::size_t iomega = 0; iomega != omega.size(); ++iomega)
+                                {
+                                    const double bosonic_frequency = omega[iomega];
+                                    if (bosonic_frequency <= 0.0) continue;
+                                    const auto contribution =
+                                        full_bz_kpoint_weight * minus_fd_derivative
+                                        * velocity_product
+                                        / (bosonic_frequency * bosonic_frequency);
+                                    head.at(iomega)(alpha, beta) += contribution;
+                                    if (debug) head_check[iomega][alpha][beta] += contribution;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Sum over band pairs. Eigenvalues are symmetry-invariant, so the
                 // IBZ gap Delta_cv applies to every star member unchanged.

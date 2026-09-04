@@ -2310,6 +2310,62 @@ void test_head_initialization_does_not_require_coulomb_diagonalization(
     assert(df.get_head_vec().size() == 1);
 }
 
+void test_finite_temperature_dynamic_intraband_head_is_velocity_weighted(
+    const BlacsCtxtHandler &blacs_h)
+{
+    constexpr double kbt = 0.25;
+    MeanField mf(1, 1, 1, 1);
+    mf.get_efermi() = 0.0;
+    mf.get_eigenvals()[0](0, 0) = 0.0;
+    mf.get_weight()[0](0, 0) = 1.0;
+    mf.set_fermi_dirac_reference(
+        librpa_int::make_fermi_dirac_reference(kbt, 0.0, 2.0, 1.0e-12));
+
+    librpa_int::velocity_matrix_t velocity;
+    librpa_int::initialize_velocity_matrix(velocity, 1, 1, 1);
+    const std::array<double, 3> diagonal_velocity{1.0, 2.0, 3.0};
+    for (int alpha = 0; alpha != 3; ++alpha)
+        velocity[0][0][alpha](0, 0) = diagonal_velocity[alpha];
+
+    AtomicBasis basis_wfc({1});
+    AtomicBasis basis_abf({1});
+    PeriodicBoundaryData pbc;
+    pbc.set_latvec({1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0});
+    const std::vector<Vector3_Order<double>> kfrac{{0.0, 0.0, 0.0}};
+    const std::vector<double> omega{0.0, 0.5, 1.0};
+    const atpair_k_cplx_mat_t empty_vq;
+
+    diele_func df(mf, velocity, kfrac, basis_wfc, basis_abf, omega, 1, 1, 1, 1, pbc,
+                  librpa_int::global::mpi_comm_global_h, blacs_h);
+    df.init(0.0, empty_vq);
+    df.cal_head();
+
+    const auto static_chi0v_head = df.get_rpa_chi0v_head(0);
+    for (int alpha = 0; alpha != 3; ++alpha)
+        for (int beta = 0; beta != 3; ++beta)
+            assert_complex_close(static_chi0v_head(alpha, beta), 0.0, 1.0e-12);
+
+    for (std::size_t ifreq = 1; ifreq != omega.size(); ++ifreq)
+    {
+        const auto chi0v_head = df.get_rpa_chi0v_head(static_cast<int>(ifreq));
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            for (int beta = 0; beta != 3; ++beta)
+            {
+                const double minus_fd_derivative = 1.0 / (4.0 * kbt);
+                const double expected = -4.0 * librpa_int::TWO_PI
+                                        * minus_fd_derivative
+                                        * diagonal_velocity[alpha]
+                                        * diagonal_velocity[beta]
+                                        / (omega[ifreq] * omega[ifreq]);
+                assert_complex_close(chi0v_head(alpha, beta), expected, 1.0e-12);
+            }
+        }
+    }
+}
+
 void test_strict_2d_gamma_quadrature_is_ready_after_wing_initialization(
     const BlacsCtxtHandler &blacs_h)
 {
@@ -3271,6 +3327,7 @@ int main(int argc, char *argv[])
         test_kblacs_transform_matches_original_transform(blacs_h);
         test_transform_Cs2mnk_can_keep_spin_channels_separate(blacs_h);
         test_head_initialization_does_not_require_coulomb_diagonalization(blacs_h);
+        test_finite_temperature_dynamic_intraband_head_is_velocity_weighted(blacs_h);
         test_strict_2d_gamma_quadrature_is_ready_after_wing_initialization(blacs_h);
         test_wq_to_wr_symmetry_reduced_q_matches_full_bz();
         test_wq_to_wr_qmember_diagnostic_keeps_original_full_bz_weight();
