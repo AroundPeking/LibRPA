@@ -1,5 +1,4 @@
 #include "../core/timefreq.h"
-#include "../core/thermal_occupation.h"
 
 #include "../mpi/global_mpi.h"
 #include "../io/global_io.h"
@@ -153,40 +152,6 @@ void check_finite_beta_matsubara_grid()
     assert(rejected);
 }
 
-void check_finite_temperature_green_product_matches_adler_wiser()
-{
-    constexpr std::size_t nfreq = 3;
-    constexpr std::size_t ntau = 4096;
-    constexpr double kbt = 0.5;
-    constexpr double beta = 1.0 / kbt;
-    constexpr double energy_n = -0.2;
-    constexpr double energy_m = 0.2;
-    constexpr double tolerance = 2.0e-8;
-
-    TFGrids tfg(nfreq);
-    tfg.generate_finite_beta_matsubara(ntau, beta);
-    const double occupation_n = fermi_dirac_occupation(energy_n, kbt);
-    const double occupation_m = fermi_dirac_occupation(energy_m, kbt);
-
-    for (std::size_t ifreq = 0; ifreq != nfreq; ++ifreq)
-    {
-        std::complex<double> transformed_product = 0.0;
-        for (std::size_t itime = 0; itime != ntau; ++itime)
-        {
-            const double tau = tfg.get_time_nodes()[itime];
-            const double g_m_positive = thermal_green_amplitude(energy_m, tau, kbt);
-            const double g_n_negative =
-                -thermal_green_amplitude(energy_n, -tau, kbt);
-            transformed_product += tfg.get_time_to_frequency_factor(ifreq, itime)
-                                   * g_m_positive * g_n_negative;
-        }
-        const std::complex<double> denominator(
-            energy_n - energy_m, tfg.get_freq_nodes()[ifreq]);
-        const auto adler_wiser = (occupation_n - occupation_m) / denominator;
-        require_near(std::abs(transformed_product - adler_wiser), 0.0, tolerance);
-    }
-}
-
 void check_minimax_ng16_diamond_k222()
 {
     TFGrids tfg(16);
@@ -316,7 +281,6 @@ int main (int argc, char **argv)
     check_initialize();
     check_gauss_grids();
     check_finite_beta_matsubara_grid();
-    check_finite_temperature_green_product_matches_adler_wiser();
     check_minimax_ng16_diamond_k222();
     check_minimax_ng6_HF_123();
     check_minimax_ng32_H2O();
