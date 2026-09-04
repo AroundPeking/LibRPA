@@ -53,6 +53,7 @@ foreach(target
     test_si_density_symmetry
     test_task_helper
     test_thermal_api
+    test_thermal_chi0
     test_thermal_occupation
     test_arbitrary_float
     test_geometry
