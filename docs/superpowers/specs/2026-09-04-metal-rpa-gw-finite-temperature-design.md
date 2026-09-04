@@ -48,6 +48,7 @@ chemical_potential_ha <value>
 kbt_ha <value>
 smearing_sigma_ry <value>
 occupation_storage band_out_times_nk
+max_occupation_per_band <value>
 spin_channels <value>
 kpoints_per_spin <value>
 bands <value>
@@ -181,4 +182,3 @@ basis, matching auxiliary basis, empty-state window, and Coulomb settings.
 Convergence axes are k mesh, temperature, time/frequency grid, Gamma treatment,
 and continuation. Report PBE and G0W0 occupied bandwidths, their difference,
 Fermi-level alignment, numerical uncertainty, wall time, and peak memory.
-

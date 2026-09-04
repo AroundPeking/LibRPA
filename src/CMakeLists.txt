@@ -97,8 +97,9 @@ list(APPEND lib_sources
         core/ri.cpp
   core/sternheimer_rpa.cpp
   core/sternheimer_symmetry.cpp
-        core/timefreq.cpp
-        core/utils_atomic_basis_blacs.cpp
+  core/timefreq.cpp
+  core/thermal_occupation.cpp
+  core/utils_atomic_basis_blacs.cpp
         core/utils_complexmatrix.cpp
 
         io/fs.cpp
