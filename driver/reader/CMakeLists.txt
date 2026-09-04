@@ -1,4 +1,5 @@
 add_library(librpa_file_reader
+  ../bz_sampling_utils.cpp
   ../stru_symops_parser.cpp
   file_reader.cpp
   read_data.cpp
