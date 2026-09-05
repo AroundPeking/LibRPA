@@ -472,6 +472,8 @@ void collect_block_from_ALL_IJ_Tensor_sparse_zero_missing(
 {
     (void)major_pv;
     assert(as_size(ad.m()) == atbasis.nb_total && as_size(ad.n()) == atbasis.nb_total);
+    // Block-cyclic layouts can assign an empty block to an otherwise active rank.
+    if (ad.m_loc() == 0 || ad.n_loc() == 0) return;
     matrix_m<Tdst> tmp_loc(mat_lo.nr(), mat_lo.nc(), MAJOR::ROW);
     const size_t cp_size = ad.n_loc() * sizeof(Tdst);
 
