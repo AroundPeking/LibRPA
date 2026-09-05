@@ -24,6 +24,11 @@ macro(config_test_f03 TARGET NUMPROC)
   endif()
 endmacro()
 
+config_test_f03(test_f03_thermal_grid 1)
+add_test(NAME test_f03_thermal_grid_bad_shape
+         COMMAND $<TARGET_FILE:test_f03_thermal_grid> shape)
+set_tests_properties(test_f03_thermal_grid_bad_shape PROPERTIES WILL_FAIL TRUE)
+
 
 if(LIBRPA_USE_LIBRI)
   config_test_f03(test_f03_binding_libri 1)
