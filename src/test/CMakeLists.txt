@@ -110,6 +110,12 @@ target_compile_options(test_sternheimer_symmetry PRIVATE -UNDEBUG)
 target_compile_options(test_symmetry_context PRIVATE -UNDEBUG)
 target_compile_options(test_meanfield PRIVATE -UNDEBUG)
 
+# Internal thermal full-q Wc spacetime transform.
+config_test(test_thermal_wc_spacetime 1)
+add_test(NAME test_thermal_wc_spacetime_mpi2
+  COMMAND mpirun -np 2 $<TARGET_FILE:test_thermal_wc_spacetime>)
+set_tests_properties(test_thermal_wc_spacetime test_thermal_wc_spacetime_mpi2 PROPERTIES
+  TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1;MKL_NUM_THREADS=1")
 # add 4-process tests
 foreach(target
   test_atomic_basis_blacs
@@ -160,3 +166,10 @@ set_tests_properties(test_headwing_descriptor PROPERTIES TIMEOUT 30)
 
 target_compile_definitions(test_si_density_symmetry PRIVATE
   SI_DENSITY_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/si_k444_density_reference.txt")
+if(LIBRPA_USE_LIBRI)
+  config_test(test_thermal_gw_spacetime 1)
+  add_test(NAME test_thermal_gw_spacetime_mpi2
+    COMMAND mpirun -np 2 $<TARGET_FILE:test_thermal_gw_spacetime>)
+  set_tests_properties(test_thermal_gw_spacetime test_thermal_gw_spacetime_mpi2 PROPERTIES
+    ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1;MKL_NUM_THREADS=1")
+endif()
