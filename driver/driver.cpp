@@ -71,6 +71,7 @@ std::string DriverParams::format()
             normal_pair(task),
             normal_pair(constants_choice),
             normal_pair(input_dir),
+            normal_pair(fn_thermal_tau_grid),
             normal_pair(prefix_lri_coeff),
             normal_pair(prefix_lri_coeff_shrink),
             normal_pair(prefix_shrink_sinvS),

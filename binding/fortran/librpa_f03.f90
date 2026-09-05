@@ -505,6 +505,8 @@ module librpa_f03
          procedure :: set_wg_ekb_efermi => librpa_set_wg_ekb_efermi
          procedure :: set_fermi_dirac_reference => librpa_set_fermi_dirac_reference
          procedure :: clear_fermi_dirac_reference => librpa_clear_fermi_dirac_reference
+         procedure :: set_external_thermal_time_grid => librpa_set_external_thermal_time_grid
+         procedure :: clear_external_thermal_time_grid => librpa_clear_external_thermal_time_grid
          procedure :: set_wfc => librpa_set_wfc
          procedure :: set_wfc_spinor => librpa_set_wfc_spinor
          procedure :: set_ao_basis_wfc => librpa_set_ao_basis_wfc
@@ -589,6 +591,22 @@ module librpa_f03
          import :: c_ptr
          type(c_ptr), value :: h
       end subroutine librpa_clear_fermi_dirac_reference_c
+
+      subroutine librpa_set_external_thermal_time_grid_c &
+            (h, beta_ha_inv, wmax_ha, tolerance, nfreq, ntau, times, transform_real, transform_imag) &
+            bind(c, name="librpa_set_external_thermal_time_grid")
+         import :: c_ptr, c_int, c_double
+         type(c_ptr), value :: h
+         real(c_double), value :: beta_ha_inv, wmax_ha, tolerance
+         integer(c_int), value :: nfreq, ntau
+         real(c_double), intent(in) :: times(*), transform_real(*), transform_imag(*)
+      end subroutine librpa_set_external_thermal_time_grid_c
+
+      subroutine librpa_clear_external_thermal_time_grid_c(h) &
+            bind(c, name="librpa_clear_external_thermal_time_grid")
+         import :: c_ptr
+         type(c_ptr), value :: h
+      end subroutine librpa_clear_external_thermal_time_grid_c
 
       subroutine librpa_set_wfc_c(h, ispin, ik, nstates_local, nbasis_local, wfc_real, wfc_imag) &
             bind(c, name="librpa_set_wfc")
@@ -1502,6 +1520,44 @@ contains
 
       call librpa_clear_fermi_dirac_reference_c(this%ptr_c_handle)
    end subroutine librpa_clear_fermi_dirac_reference
+
+   !> @brief Copy a bosonic integral-normalized time transform, shape (ntau,nfreq).
+   !> Times are in inverse Hartree, strictly within (0,beta). The second index
+   !> selects consecutive Matsubara modes, with index 1 denoting zero frequency.
+   !> The convention is exp(+i*nu*tau); beta and wmax must match the FD spectrum.
+   !> This does not provide sparse-frequency sum weights or thermal GW transforms.
+   subroutine librpa_set_external_thermal_time_grid(this, beta_ha_inv, wmax_ha, tolerance, times, transform)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      real(dp), intent(in) :: beta_ha_inv, wmax_ha, tolerance
+      real(dp), intent(in) :: times(:)
+      complex(dp), intent(in) :: transform(:,:)
+      integer(c_int) :: ntau, nfreq
+      real(c_double), allocatable :: times_c(:), transform_real(:,:), transform_imag(:,:)
+
+      ntau = size(times, kind=c_int)
+      nfreq = size(transform, 2, kind=c_int)
+      if (ntau <= 0 .or. nfreq <= 0) error stop "empty external thermal grid"
+      if (size(transform, 1) /= ntau) error stop "external thermal transform must have shape (ntau,nfreq)"
+      if (nfreq > huge(nfreq)/ntau .or. nfreq > huge(nfreq)/nfreq) &
+         error stop "external thermal grid dimensions overflow"
+      allocate(times_c(ntau), transform_real(ntau,nfreq), transform_imag(ntau,nfreq))
+      times_c = real(times, kind=c_double)
+      ! Fortran's first index is contiguous, matching C row-major [nfreq][ntau].
+      transform_real = real(transform, kind=c_double)
+      transform_imag = real(aimag(transform), kind=c_double)
+      call librpa_set_external_thermal_time_grid_c( &
+         this%ptr_c_handle, real(beta_ha_inv, kind=c_double), real(wmax_ha, kind=c_double), &
+         real(tolerance, kind=c_double), nfreq, ntau, times_c, transform_real, transform_imag)
+   end subroutine librpa_set_external_thermal_time_grid
+
+   !> @brief Clear the external time transform, retaining the FD reference.
+   subroutine librpa_clear_external_thermal_time_grid(this)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+
+      call librpa_clear_external_thermal_time_grid_c(this%ptr_c_handle)
+   end subroutine librpa_clear_external_thermal_time_grid
 
    !> @brief Set the wave-function expansion coefficients
    !>

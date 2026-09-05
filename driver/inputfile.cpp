@@ -104,6 +104,7 @@ void parse_inputfile_to_params(const std::string &fn)
         librpa_int::set_aims_constants();
     }
     _parse_string_post(driver_params, input_dir, check_dirpath);
+    _parse_string(driver_params, fn_thermal_tau_grid);
     _parse_double(driver_params, cs_threshold);
     _parse_bool(driver_params, output_energy_qp);
     _parse_int(driver_params, i_state_low);

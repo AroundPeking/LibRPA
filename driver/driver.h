@@ -31,6 +31,17 @@ struct DriverParams
     //! `./`
     std::string input_dir;
 
+    //! External thermal time-grid filename, relative to input_dir.
+    //! Version 1 supplies nonuniform times and an integral-normalized complex
+    //! transform to consecutive bosonic frequencies. Requires task=rpa,
+    //! tfgrids_type=fd_matsubara, matching nfreq/ntau, and FD metadata.
+    //! It does not compress dielectric inversions or the RPA frequency sum.
+    //! @par Default
+    //! empty (disabled)
+    //! @par Status
+    //! Experimental
+    std::string fn_thermal_tau_grid;
+
     //! Verbosity level for driver output.
     //!
     //! It is parsed to the global API function `set_output_level`.

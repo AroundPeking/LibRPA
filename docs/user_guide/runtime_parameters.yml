@@ -59,6 +59,7 @@ blocks:
       - driver.fn_basis_aux
       - driver.fn_basis_aux_shrink
       - driver.fn_eigocc_scf
+      - driver.fn_thermal_tau_grid
       - driver.fn_dielfunc
       - driver.fn_vxc_scf
       - driver.fn_band_kpath_info

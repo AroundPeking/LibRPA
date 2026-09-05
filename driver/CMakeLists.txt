@@ -14,6 +14,7 @@ list(APPEND exe_sources
   read_data.cpp
   reader_eigenvec.cpp
   reader_fermi_surface_payload.cpp
+  reader_thermal_grid.cpp
   reader_basis.cpp
   reader_structure.cpp
   reader_lri.cpp

@@ -9,6 +9,7 @@
 #include "inputfile.h"
 #include "librpa.hpp"
 #include "read_data.h"
+#include "reader_thermal_grid.h"
 #include "task.h"
 
 // Internal headers, used here only for printing formation and some consistency check
@@ -146,6 +147,8 @@ int main(int argc, char **argv)
     parse_inputfile_to_params(input_filename);
     // Early check of task to fail quickly in case
     task_t task = get_task(driver_params.task);
+    if (!driver_params.fn_thermal_tau_grid.empty() && task != task_t::RPA)
+        throw std::runtime_error("fn_thermal_tau_grid currently requires task=rpa");
 
     // Initialize LibRPA global environment and handler
     initialize_librpa();
@@ -215,6 +218,29 @@ int main(int argc, char **argv)
             profiler.start("driver_thermal_occupation", "Finite-temperature occupations");
             read_thermal_occupation_reference(path_thermal_occupation);
             profiler.stop("driver_thermal_occupation");
+
+            if (!driver_params.fn_thermal_tau_grid.empty())
+            {
+                int local_failed = 0, any_failed = 0;
+                try
+                {
+                    load_external_thermal_grid(
+                        driver_params.input_dir + driver_params.fn_thermal_tau_grid, h, opts);
+                }
+                catch (const std::exception &error)
+                {
+                    lib_printf(LIBRPA_VERBOSE_CRITICAL, "%s\n", error.what());
+                    local_failed = 1;
+                }
+                mpi_comm_global_h.allreduce(&local_failed, &any_failed, 1, MPI_MAX);
+                if (any_failed)
+                {
+                    finalize_librpa(false);
+                    return EXIT_FAILURE;
+                }
+                lib_printf_root("External thermal time grid: %s (%d times, %d bosonic modes)\n",
+                                driver_params.fn_thermal_tau_grid.c_str(), opts.ntau, opts.nfreq);
+            }
         }
 
         profiler.start("driver_basis", "Basis (wave-function and auxiliary)");

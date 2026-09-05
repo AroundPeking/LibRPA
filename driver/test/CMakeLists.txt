@@ -74,3 +74,11 @@ if(BUILD_SHARED_LIBS)
 endif()
 add_test(NAME test_reader_fermi_surface_payload
          COMMAND $<TARGET_FILE:test_reader_fermi_surface_payload>)
+
+add_executable(test_reader_thermal_grid test_reader_thermal_grid.cpp
+  ../reader_thermal_grid.cpp ../driver.cpp ../inputfile.cpp ../input_parser.cpp)
+target_link_libraries(test_reader_thermal_grid PRIVATE rpa_lib)
+if(BUILD_SHARED_LIBS)
+  target_link_libraries(test_reader_thermal_grid PRIVATE ${math_libs} ${parallel_libs})
+endif()
+add_test(NAME test_reader_thermal_grid COMMAND $<TARGET_FILE:test_reader_thermal_grid>)

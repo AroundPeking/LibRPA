@@ -917,3 +917,74 @@ Each block record stores:
 The payload is row-major `complex<double>` data for the rectangular block
 described by the row and column range. Multiple files and blocks may contribute
 to the same q-point.
+
+### External thermal time transform v1
+
+This experimental input replaces uniform imaginary-time sampling only. Set
+`fn_thermal_tau_grid` relative to `input_dir` to enable it; the default empty
+filename preserves the previous behavior. The standalone driver currently
+accepts it only for `task=rpa`, with `tfgrids_type=fd_matsubara`, matching
+`nfreq` and `ntau`, and an explicit FD occupation reference. It does not yet
+provide sparse dielectric-inversion frequencies, RPA sum weights, or thermal
+GW transforms.
+
+The whitespace-separated ASCII layout is:
+
+```text
+LIBRPA_THERMAL_TAU_V1
+package_name package_version
+B exp_plus integral
+beta_ha_inverse wmax_ha tolerance
+ntau nfreq
+tau_0
+... (ntau strictly increasing time nodes)
+0
+T_0_0_real T_0_0_imag
+... (ntau complex entries)
+1
+T_1_0_real T_1_0_imag
+... (ntau complex entries, then subsequent frequency rows)
+```
+
+Each row starts with its consecutive nonnegative bosonic index. Version 1
+fixes the convention to
+
+$$
+\nu_n=\frac{2\pi n}{\beta},\qquad
+\chi^0(i\nu_n)=\sum_j T_{nj}\chi^0(\tau_j),\qquad 0<\tau_j<\beta.
+$$
+
+The matrix already includes integral normalization for
+`exp(+i*nu*tau)`; do not multiply it by another time weight. In particular,
+its row sum must reproduce `beta` for the zero-frequency row and zero for
+the other rows, within the API validation tolerance. This necessary check
+does not establish physical accuracy. Duplicate/reordered frequency indices,
+invalid nodes, nonfinite entries, truncated payloads, and trailing data are
+rejected. Every MPI rank must supply identical input.
+
+`wmax_ha` bounds the real excitation spectrum, not the largest Matsubara
+frequency or the plane-wave cutoff. The public API checks it against the
+same-spin SCF energy differences and checks beta against the active FD
+temperature, including after a change in eigenvalues or temperature.
+Different observables such as G, W and Sigma need their own spectral bounds.
+
+With sparse-ir or pydlr installed in the chosen Python environment:
+
+```sh
+python utilities/generate_thermal_tau_grid.py thermal_tau.dat \
+  --method sparse-ir --beta 315.7750248494972 --wmax 15 \
+  --tolerance 1e-8 --nfreq 512
+```
+
+The exporter records the installed package version, validates the constant
+mode, prints the required `ntau`, and refuses to overwrite an existing file.
+The example defines an operator only; it is not a converged Na parameter set.
+Use `--method pydlr` to compare DLR under the same bounds. A tighter requested
+library tolerance need not improve a double-precision fitted transform, so
+independent matrix and observable comparisons remain necessary.
+
+The C/C++ API accepts separate real/imaginary row-major arrays of shape
+`[nfreq][ntau]`. The Fortran binding takes `times(ntau)` and a complex
+`transform(ntau,nfreq)`; the time index is contiguous and no transpose is
+needed. All APIs copy input data. Fortran users can clear the external grid
+without clearing the FD reference using `clear_external_thermal_time_grid`.
