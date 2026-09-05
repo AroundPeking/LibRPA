@@ -755,6 +755,15 @@ Chi0::Chi0(const MeanField &mf_in, const AtomicBasis &atbasis_wfc_in,
       kblacs_ctxt(kblacs_ctxt_in)
 {
     comm_h.check_initialized();
+    if (tfg.get_grid_type() == LIBRPA_TFGRID_FD_MATSUBARA)
+    {
+        const auto &reference = mf.get_fermi_dirac_reference();
+        const double beta_kbt = tfg.get_finite_beta_ha_inv() * reference.kbt_ha;
+        if (!reference.enabled || !std::isfinite(beta_kbt) ||
+            std::abs(beta_kbt - 1.0) > 1e-10)
+            throw LIBRPA_RUNTIME_ERROR(
+                "finite-beta chi0 requires an FD reference at the grid temperature");
+    }
     is_mf_eigvec_k_distributed_ = is_mf_eigvec_k_distributed;
     // Runtime options
     gf_threshold = 1e-9;

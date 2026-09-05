@@ -83,6 +83,7 @@ class TFGrids
         const matrix &get_costrans_f2t() const { return costrans_f2t; }
         const matrix &get_sintrans_f2t() const { return sintrans_f2t; }
         const ComplexMatrix &get_fourier_t2f() const { return fourier_t2f; }
+        double get_finite_beta_ha_inv() const { return finite_beta_ha_inv; }
         //! Time-to-frequency factor for the active grid. Finite-beta grids use
         //! the complex bosonic Fourier matrix; legacy space-time grids use the
         //! real cosine transform.
@@ -116,6 +117,13 @@ class TFGrids
         void generate_evenspaced_tf(double emin, double eintv, double tmin, double tintv);
         //! Generate midpoint imaginary-time and bosonic Matsubara grids at finite beta.
         void generate_finite_beta_matsubara(size_t n_time, double beta_ha_inv);
+        //! Use external imaginary-time nodes and an integral-normalized complex
+        //! transform. Rows are the existing n_grids consecutive bosonic modes
+        //! starting at zero; columns are strictly increasing nodes in (0,beta).
+        //! No uniform-grid Nyquist restriction applies. This does not compress
+        //! the subsequent Matsubara sum or provide a GW inverse transform.
+        void set_finite_beta_time_grid(const std::vector<double> &times,
+                                      double beta_ha_inv, const ComplexMatrix &transform);
         //! Generate the minimax time-frequency grid
         double generate_minimax(double emin, double emax, double regulation = 0.0);
         //! Generate Gauss-Chebyshev quadrature of first kind on [0, infty)

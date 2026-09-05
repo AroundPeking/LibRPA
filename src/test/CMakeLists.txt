@@ -48,6 +48,7 @@ foreach(target
     test_task_helper
     test_thermal_api
     test_thermal_chi0
+    test_external_thermal_grid
     test_thermal_occupation
     test_arbitrary_float
     test_geometry
@@ -75,6 +76,8 @@ foreach(target
 endforeach()
 
 target_sources(test_task_helper PRIVATE ../../driver/tasks/task_helper.cpp)
+target_compile_definitions(test_external_thermal_grid PRIVATE
+  LIBRPA_SPARSE_TAU_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/data/sparse_ir_tau_beta8_wmax2.dat")
 target_sources(test_strict_2d_coulomb_head_metadata
   PRIVATE ../../driver/reader_2d_coulomb_head.cpp)
 # These suites use standard assert() and must remain active in Release builds.

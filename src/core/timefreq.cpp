@@ -7,6 +7,7 @@
 #include <complex>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -257,6 +258,55 @@ void TFGrids::generate_finite_beta_matsubara(const size_t n_time,
                 time_weight
                 * std::exp(imag_unit * freq_nodes[ifreq] * time_nodes[itime]);
         }
+    }
+    grid_type = LIBRPA_TFGRID_FD_MATSUBARA;
+}
+
+void TFGrids::set_finite_beta_time_grid(const std::vector<double> &times, double beta_ha_inv,
+                                        const ComplexMatrix &transform)
+{
+    if (!std::isfinite(beta_ha_inv) || beta_ha_inv <= 0.0)
+        throw LIBRPA_RUNTIME_ERROR("external finite-beta grid requires positive finite beta");
+    if (n_grids == 0 || times.empty() ||
+        n_grids > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        times.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        n_grids > static_cast<std::size_t>(std::numeric_limits<int>::max()) / times.size())
+        throw LIBRPA_RUNTIME_ERROR("external finite-beta grid has invalid dimensions");
+    if (transform.nr != static_cast<int>(n_grids) || transform.nc != static_cast<int>(times.size()))
+        throw LIBRPA_RUNTIME_ERROR("external thermal transform shape must be nfreq by ntau");
+    double previous = 0.0;
+    for (const auto time : times)
+    {
+        if (!std::isfinite(time) || time <= previous || time >= beta_ha_inv)
+            throw LIBRPA_RUNTIME_ERROR(
+                "external thermal times must increase strictly inside (0,beta)");
+        previous = time;
+    }
+    for (int row = 0; row < transform.nr; ++row)
+        for (int col = 0; col < transform.nc; ++col)
+        {
+            const auto value = transform(row, col);
+            if (!std::isfinite(value.real()) || !std::isfinite(value.imag()))
+                throw LIBRPA_RUNTIME_ERROR("external thermal transform contains nonfinite values");
+            if (row == 0 && std::abs(value.imag()) > 1e-12 * std::max(1.0, std::abs(value.real())))
+                throw LIBRPA_RUNTIME_ERROR(
+                    "external zero-frequency integration weights must be real");
+        }
+
+    // Validate and copy before changing state, including when the input aliases this grid.
+    const auto times_copy = times;
+    const ComplexMatrix transform_copy = transform;
+    set_time(times_copy.size());
+    finite_beta_ha_inv = beta_ha_inv;
+    time_nodes = times_copy;
+    fourier_t2f = transform_copy;
+    for (std::size_t j = 0; j < times_copy.size(); ++j)
+        time_weights[j] = transform_copy(0, j).real();
+    const double two_pi = 2.0 * std::acos(-1.0);
+    for (std::size_t l = 0; l < n_grids; ++l)
+    {
+        freq_nodes[l] = two_pi * l / beta_ha_inv;
+        freq_weights[l] = (l == 0 ? 0.5 : 1.0) * two_pi / beta_ha_inv;
     }
     grid_type = LIBRPA_TFGRID_FD_MATSUBARA;
 }
