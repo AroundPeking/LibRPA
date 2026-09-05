@@ -54,6 +54,29 @@ void librpa_set_fermi_dirac_reference(LibrpaHandler* h, double kbt_ha,
 void librpa_clear_fermi_dirac_reference(LibrpaHandler* h);
 
 /**
+ * @brief Supply an external finite-temperature imaginary-time transform.
+ *
+ * All ranks supply identical data after the FD reference and SCF eigenvalues.
+ * Arrays are copied. Transform arrays are row-major [nfreq][ntau], with
+ * integral normalization and the exp(+i*nu*tau) convention. Rows correspond
+ * to consecutive bosonic indices 0..nfreq-1. Times lie strictly in (0,beta).
+ * The spectral bound must cover all same-spin SCF energy differences.
+ * At calculation time opts must select fd_matsubara and matching nfreq/ntau.
+ * This does not supply sparse-frequency summation weights or GW transforms.
+ * Invalid input leaves the previous external grid unchanged.
+ * @param[in] beta_ha_inv Inverse thermal energy, in inverse Hartree.
+ * @param[in] wmax_ha Positive spectral bound, in Hartree.
+ * @param[in] tolerance External approximation tolerance, strictly between 0 and 1.
+ */
+void librpa_set_external_thermal_time_grid(
+    LibrpaHandler* h, double beta_ha_inv, double wmax_ha, double tolerance,
+    int nfreq, int ntau, const double* times, const double* transform_real,
+    const double* transform_imag);
+
+/** @brief Clear external thermal grid input; keep the FD occupation reference. */
+void librpa_clear_external_thermal_time_grid(LibrpaHandler* h);
+
+/**
  * @brief Set wavefunction coefficients (real/imag separate arrays).
  * @param[in] h              Handler.
  * @param[in] ispin          Spin index (0-based).

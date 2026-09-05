@@ -12,6 +12,8 @@ namespace librpa_int
 {
 
 void initialize_ds_tfgrids(Dataset &ds, const LibrpaOptions &opts);
+void validate_external_thermal_time_grid_reference(
+    const Dataset &ds, const ExternalThermalTimeGrid &grid);
 
 // Initialize the global/world BLACS DDLA handle once when GPU ScaLAPACK
 // replacement is requested. This binds each MPI rank to its local GPU before
