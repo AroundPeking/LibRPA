@@ -61,3 +61,16 @@ add_executable(
   ../bz_sampling_utils.cpp
 )
 add_test(NAME test_bz_sampling_utils COMMAND $<TARGET_FILE:test_bz_sampling_utils>)
+
+add_executable(
+  test_reader_fermi_surface_payload
+  test_reader_fermi_surface_payload.cpp
+  ../reader_fermi_surface_payload.cpp
+)
+target_link_libraries(test_reader_fermi_surface_payload PRIVATE rpa_lib)
+target_compile_options(test_reader_fermi_surface_payload PRIVATE -UNDEBUG)
+if(BUILD_SHARED_LIBS)
+  target_link_libraries(test_reader_fermi_surface_payload PRIVATE ${math_libs} ${parallel_libs})
+endif()
+add_test(NAME test_reader_fermi_surface_payload
+         COMMAND $<TARGET_FILE:test_reader_fermi_surface_payload>)

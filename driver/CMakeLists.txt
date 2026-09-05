@@ -13,6 +13,7 @@ list(APPEND exe_sources
   main.cpp
   read_data.cpp
   reader_eigenvec.cpp
+  reader_fermi_surface_payload.cpp
   reader_basis.cpp
   reader_structure.cpp
   reader_lri.cpp
