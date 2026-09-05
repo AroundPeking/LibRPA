@@ -34,6 +34,7 @@ class TFGrids
         size_t n_grids;
         size_t n_time_grids;
         double finite_beta_ha_inv = 0.0;
+        bool sparse_finite_beta_rpa_sum = false;
         std::vector<double> freq_nodes;
         std::vector<double> freq_weights;
         std::vector<double> time_nodes;
@@ -84,6 +85,10 @@ class TFGrids
         const matrix &get_sintrans_f2t() const { return sintrans_f2t; }
         const ComplexMatrix &get_fourier_t2f() const { return fourier_t2f; }
         double get_finite_beta_ha_inv() const { return finite_beta_ha_inv; }
+        bool has_sparse_finite_beta_rpa_sum() const
+        {
+            return grid_type == LIBRPA_TFGRID_FD_MATSUBARA && sparse_finite_beta_rpa_sum;
+        }
         //! Time-to-frequency factor for the active grid. Finite-beta grids use
         //! the complex bosonic Fourier matrix; legacy space-time grids use the
         //! real cosine transform.
@@ -98,7 +103,8 @@ class TFGrids
         double find_freq_weight(const double &freq) const;
         //! Complete frequency prefactor used by the RPA trace-log sum.  For a
         //! finite-beta grid this is 1/(2*beta) at zero frequency and 1/beta
-        //! for each positive Matsubara frequency.
+        //! for each positive Matsubara frequency, unless an external sparse RPA
+        //! quadrature supplies the complete integration weights instead.
         double find_correlation_frequency_weight(double freq) const;
         //! Weight multiplying A for an omitted asymptotic tail F(i*nu)=A/nu^4.
         //! first_omitted is the first positive Matsubara index not in the sum.
@@ -124,6 +130,13 @@ class TFGrids
         //! the subsequent Matsubara sum or provide a GW inverse transform.
         void set_finite_beta_time_grid(const std::vector<double> &times,
                                       double beta_ha_inv, const ComplexMatrix &transform);
+        //! Opt-in sparse bosonic modes and complete RPA trace-log sum weights.
+        //! Weights already include 1/(2 beta) and the infinite-frequency tail;
+        //! the zero-mode weight must be exactly 1/(2 beta). No GW inverse is supplied.
+        void set_finite_beta_rpa_grid(const std::vector<double> &times, double beta_ha_inv,
+                                     const std::vector<int> &indices,
+                                     const std::vector<double> &correlation_weights,
+                                     const ComplexMatrix &transform);
         //! Generate the minimax time-frequency grid
         double generate_minimax(double emin, double emax, double regulation = 0.0);
         //! Generate Gauss-Chebyshev quadrature of first kind on [0, infty)
