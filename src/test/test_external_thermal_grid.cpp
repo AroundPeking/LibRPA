@@ -1,0 +1,275 @@
+#include <mpi.h>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <complex>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "../core/thermal_occupation.h"
+#include "../core/timefreq.h"
+#ifdef LIBRPA_USE_LIBRI
+#include "../api/instance_manager.h"
+#include "librpa.hpp"
+#endif
+
+namespace
+{
+using namespace librpa_int;
+
+struct Fixture
+{
+    double beta, wmax, tolerance;
+    std::vector<double> times;
+    ComplexMatrix transform;
+};
+
+Fixture read_fixture()
+{
+    std::ifstream input(LIBRPA_SPARSE_TAU_FIXTURE);
+    std::string magic, method, version;
+    Fixture fixture;
+    int ntau = 0, nfreq = 0;
+    input >> magic >> method >> version >> fixture.beta >> fixture.wmax >> fixture.tolerance >>
+        ntau >> nfreq;
+    if (!input || magic != "LIBRPA_SPARSE_TAU_TEST_V1" || method != "sparse-ir" || ntau <= 0 ||
+        nfreq != 16)
+        throw std::runtime_error("invalid sparse-time test fixture header");
+    fixture.times.resize(ntau);
+    for (auto &time : fixture.times) input >> time;
+    fixture.transform.create(nfreq, ntau);
+    for (int row = 0; row < nfreq; ++row)
+        for (int col = 0; col < ntau; ++col)
+        {
+            double real = 0.0, imag = 0.0;
+            input >> real >> imag;
+            fixture.transform(row, col) = {real, imag};
+        }
+    if (!input) throw std::runtime_error("truncated sparse-time test fixture");
+    return fixture;
+}
+
+void require_close(std::complex<double> actual, std::complex<double> expected, double tolerance)
+{
+    if (!std::isfinite(actual.real()) || !std::isfinite(actual.imag()) ||
+        std::abs(actual - expected) > tolerance)
+        throw std::runtime_error("external thermal transform differs from its reference");
+}
+
+void check_green_pairs(const Fixture &fixture)
+{
+    TFGrids grid(fixture.transform.nr);
+    grid.set_finite_beta_time_grid(fixture.times, fixture.beta, fixture.transform);
+    if (grid.get_n_grids() <= grid.get_n_time_grids() / 2 + 1)
+        throw std::runtime_error("fixture does not exercise independent time/frequency counts");
+    const double kbt = 1.0 / fixture.beta;
+    for (double gap : {0.0, 1e-7, 0.01, 0.3, 1.9})
+    {
+        const double en = 0.13 - gap / 2.0, em = 0.13 + gap / 2.0;
+        const double fn = fermi_dirac_occupation(en, kbt);
+        const double fm = fermi_dirac_occupation(em, kbt);
+        for (std::size_t l = 0; l < grid.get_n_grids(); ++l)
+        {
+            std::complex<double> actual = 0.0;
+            for (std::size_t j = 0; j < fixture.times.size(); ++j)
+                actual -= grid.get_time_to_frequency_factor(l, j) *
+                          thermal_green_amplitude(em, fixture.times[j], kbt) *
+                          thermal_green_amplitude(en, -fixture.times[j], kbt);
+            const std::complex<double> denominator(-gap, grid.get_freq_nodes()[l]);
+            const auto expected =
+                gap == 0.0 ? std::complex<double>(l == 0 ? fermi_dirac_derivative(en, kbt) : 0.0)
+                           : (fn - fm) / denominator;
+            require_close(actual, expected, 5e-9);
+            require_close(grid.find_correlation_frequency_weight(grid.get_freq_nodes()[l]),
+                          (l == 0 ? 0.5 : 1.0) / fixture.beta, 1e-14);
+        }
+    }
+}
+
+void check_validation(const Fixture &fixture)
+{
+    TFGrids grid(fixture.transform.nr);
+    grid.set_finite_beta_time_grid(fixture.times, fixture.beta, fixture.transform);
+    auto reject = [&](const std::vector<double> &times, double beta, const ComplexMatrix &matrix)
+    {
+        bool rejected = false;
+        try
+        {
+            grid.set_finite_beta_time_grid(times, beta, matrix);
+        }
+        catch (const std::runtime_error &)
+        {
+            rejected = true;
+        }
+        if (!rejected || grid.get_time_nodes() != fixture.times)
+            throw std::runtime_error(
+                "invalid external grid was accepted or changed the active grid");
+        require_close(grid.get_time_to_frequency_factor(0, 0), fixture.transform(0, 0), 0.0);
+    };
+    reject({}, fixture.beta, fixture.transform);
+    reject(fixture.times, -fixture.beta, fixture.transform);
+    reject(fixture.times, std::numeric_limits<double>::infinity(), fixture.transform);
+    auto times = fixture.times;
+    times[0] = 0.0;
+    reject(times, fixture.beta, fixture.transform);
+    times = fixture.times;
+    times[1] = times[0];
+    reject(times, fixture.beta, fixture.transform);
+    times = fixture.times;
+    times.back() = fixture.beta;
+    reject(times, fixture.beta, fixture.transform);
+    times[0] = std::numeric_limits<double>::quiet_NaN();
+    reject(times, fixture.beta, fixture.transform);
+    ComplexMatrix bad = fixture.transform;
+    bad(1, 1) = std::numeric_limits<double>::quiet_NaN();
+    reject(fixture.times, fixture.beta, bad);
+    bad = fixture.transform;
+    bad(0, 0) += std::complex<double>(0.0, 1.0);
+    reject(fixture.times, fixture.beta, bad);
+    ComplexMatrix wrong_shape(1, 1);
+    reject(fixture.times, fixture.beta, wrong_shape);
+    grid.set_finite_beta_time_grid(grid.get_time_nodes(), fixture.beta, grid.get_fourier_t2f());
+    require_close(grid.get_time_to_frequency_factor(0, 0), fixture.transform(0, 0), 0.0);
+    grid.generate_finite_beta_matsubara(64, fixture.beta);
+    require_close(grid.get_time_nodes()[0], fixture.beta / 128.0, 1e-15);
+}
+
+#ifdef LIBRPA_USE_LIBRI
+void check_full_libri_response(const Fixture &fixture)
+{
+    constexpr int nk = 3;
+    const double two_pi = 2.0 * std::acos(-1.0);
+    const double kbt = 1.0 / fixture.beta;
+    librpa::Handler handler(MPI_COMM_WORLD);
+    handler.set_scf_dimension(1, nk, 2, 2);
+    auto ds = librpa_int::api::get_dataset_instance(handler);
+    auto &mf = ds->mf;
+    mf.get_efermi() = 0.0;
+    mf.set_fermi_dirac_reference(make_fermi_dirac_reference(kbt, 0.0, 2.0, 1e-12));
+    ds->basis_wfc.set({2});
+    ds->basis_aux.set({2});
+    ds->pbc.set_latvec({1, 0, 0, 0, 1, 0, 0, 0, 1});
+    std::vector<double> kvecs;
+    for (int ik = 0; ik < nk; ++ik)
+    {
+        const double k = two_pi * ik / nk;
+        kvecs.insert(kvecs.end(), {k, 0.0, 0.0});
+        mf.get_eigenvals()[0](ik, 0) = -0.4 + 0.15 * std::cos(k);
+        mf.get_eigenvals()[0](ik, 1) = 0.5 + 0.1 * std::cos(k);
+        auto &u = mf.get_eigenvectors()[0][0][ik];
+        u.create(2, 2);
+        u(0, 0) = std::cos(0.37);
+        u(0, 1) = std::sin(0.37) * std::polar(1.0, k);
+        u(1, 0) = -std::sin(0.37) * std::polar(1.0, -k);
+        u(1, 1) = std::cos(0.37);
+        for (int n = 0; n < 2; ++n)
+            mf.get_weight()[0](ik, n) =
+                2.0 * fermi_dirac_occupation(mf.get_eigenvals()[0](ik, n), kbt) / nk;
+    }
+    ds->pbc.set_kgrids_kvec(nk, 1, 1, kvecs);
+    TFGrids grid(fixture.transform.nr);
+    grid.set_finite_beta_time_grid(fixture.times, fixture.beta, fixture.transform);
+
+    // For an onsite pair the two atom-centered LRI contributions are each P_mu/2.
+    const double vertices[2][2][2] = {{{1.0, 0.0}, {0.0, 0.0}}, {{0.0, 0.7}, {0.7, 0.2}}};
+    Cs_LRI cs;
+    cs.use_libri = true;
+    if (ds->comm_h.is_root())
+    {
+        auto coefficients = std::make_shared<std::valarray<double>>(8);
+        for (int mu = 0; mu < 2; ++mu)
+            for (int i = 0; i < 2; ++i)
+                for (int j = 0; j < 2; ++j)
+                    (*coefficients)[(mu * 2 + i) * 2 + j] = 0.5 * vertices[mu][i][j];
+        cs.data_libri[0][{0, {0, 0, 0}}] = RI::Tensor<double>({2, 2, 2}, coefficients);
+    }
+    Chi0 chi(mf, ds->basis_wfc, ds->basis_aux, ds->pbc, ds->symmetry_context, grid,
+             ds->scfk_blacs_ctxt, ds->desc_wfc_kb_full, false, false);
+    chi.gf_threshold = 0.0;
+    std::map<Vector3_Order<double>, ComplexMatrix> no_shrink;
+    chi.build(LIBRPA_ROUTING_LIBRI, cs, {{0, 0}}, ds->basis_aux, no_shrink, ds->blacs_h);
+
+    double max_error = 0.0;
+    int checked = 0;
+    for (const auto &[frequency, qblocks] : chi.get_chi0_q())
+        for (const auto &[q, blocks] : qblocks)
+        {
+            const int iq = (static_cast<int>(std::lround(q.x * nk)) % nk + nk) % nk;
+            ComplexMatrix expected(2, 2);
+            for (int ik = 0; ik < nk; ++ik)
+                for (int n = 0; n < 2; ++n)
+                    for (int m = 0; m < 2; ++m)
+                    {
+                        const int ikq = (ik + iq) % nk;
+                        const double en = mf.get_eigenvals()[0](ik, n);
+                        const double em = mf.get_eigenvals()[0](ikq, m);
+                        const auto &un = mf.get_eigenvectors()[0][0][ik];
+                        const auto &um = mf.get_eigenvectors()[0][0][ikq];
+                        std::array<std::complex<double>, 2> vertex{};
+                        for (int mu = 0; mu < 2; ++mu)
+                            for (int i = 0; i < 2; ++i)
+                                for (int j = 0; j < 2; ++j)
+                                    vertex[mu] +=
+                                        std::conj(un(n, i)) * vertices[mu][i][j] * um(m, j);
+                        const std::complex<double> denominator(en - em, frequency);
+                        const std::complex<double> bubble =
+                            std::abs(denominator) < 1e-14 ? fermi_dirac_derivative(en, kbt)
+                                                          : (fermi_dirac_occupation(en, kbt) -
+                                                             fermi_dirac_occupation(em, kbt)) /
+                                                                denominator;
+                        for (int mu = 0; mu < 2; ++mu)
+                            for (int nu = 0; nu < 2; ++nu)
+                                expected(mu, nu) +=
+                                    2.0 / nk * bubble * vertex[mu] * std::conj(vertex[nu]);
+                    }
+            for (const auto &[atom_i, row] : blocks)
+                for (const auto &[atom_j, actual] : row)
+                    for (int mu = 0; mu < 2; ++mu)
+                        for (int nu = 0; nu < 2; ++nu)
+                        {
+                            max_error =
+                                std::max(max_error, std::abs(actual(mu, nu) - expected(mu, nu)));
+                            ++checked;
+                        }
+        }
+    ds->comm_h.allreduce(MPI_IN_PLACE, &max_error, 1, MPI_MAX);
+    ds->comm_h.allreduce(MPI_IN_PLACE, &checked, 1, MPI_SUM);
+    if (ds->comm_h.is_root())
+        std::cout << "Sparse LibRI/Adler-Wiser max error: " << max_error
+                  << "; matrix elements checked: " << checked << std::endl;
+    if (checked < 16 * nk * 4 || max_error > 5e-9)
+        throw std::runtime_error("sparse full LibRI response differs from Adler-Wiser");
+
+    mf.set_fermi_dirac_reference(make_fermi_dirac_reference(2.0 * kbt, 0.0, 2.0, 1e-12));
+    bool rejected = false;
+    try
+    {
+        Chi0 mismatched(mf, ds->basis_wfc, ds->basis_aux, ds->pbc, ds->symmetry_context, grid,
+                        ds->scfk_blacs_ctxt, ds->desc_wfc_kb_full, false, false);
+    }
+    catch (const std::runtime_error &)
+    {
+        rejected = true;
+    }
+    if (!rejected) throw std::runtime_error("chi0 accepted a grid at the wrong FD temperature");
+}
+#endif
+}  // namespace
+
+int main(int argc, char **argv)
+{
+    int provided = 0;
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
+    const auto fixture = read_fixture();
+    check_green_pairs(fixture);
+    check_validation(fixture);
+#ifdef LIBRPA_USE_LIBRI
+    check_full_libri_response(fixture);
+#endif
+    MPI_Finalize();
+}
