@@ -32,10 +32,12 @@ struct DriverParams
     std::string input_dir;
 
     //! External thermal time-grid filename, relative to input_dir.
-    //! Version 1 supplies nonuniform times and an integral-normalized complex
-    //! transform to consecutive bosonic frequencies. Requires task=rpa,
+    //! LIBRPA_THERMAL_TAU_V1 supplies nonuniform times and an integral-normalized
+    //! complex transform to consecutive bosonic frequencies. LIBRPA_THERMAL_RPA_V1
+    //! additionally supplies sparse mode indices and infinite-sum RPA weights.
+    //! Requires task=rpa,
     //! tfgrids_type=fd_matsubara, matching nfreq/ntau, and FD metadata.
-    //! It does not compress dielectric inversions or the RPA frequency sum.
+    //! Only the RPA format compresses dielectric inversions and the frequency sum.
     //! @par Default
     //! empty (disabled)
     //! @par Status

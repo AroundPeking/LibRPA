@@ -125,6 +125,9 @@ void validate_external_thermal_time_grid_reference(
         grid.tolerance <= 0.0 || grid.tolerance >= 1.0)
         throw LIBRPA_RUNTIME_ERROR(
             "external thermal grid requires positive wmax and tolerance in (0,1)");
+    if (!grid.frequency_indices.empty() &&
+        (!std::isfinite(grid.rpa_wmax_ha) || grid.rpa_wmax_ha < grid.wmax_ha))
+        throw LIBRPA_RUNTIME_ERROR("external thermal RPA grid requires finite rpa_wmax >= wmax");
 
     double largest_transition = 0.0;
     for (const auto &energies : ds.mf.get_eigenvals())
@@ -162,7 +165,11 @@ void initialize_ds_tfgrids(Dataset &ds, const LibrpaOptions &opts)
             throw LIBRPA_RUNTIME_ERROR("external thermal grid dimensions differ from nfreq/ntau");
         validate_external_thermal_time_grid_reference(ds, grid);
         ds.tfg.reset(opts.nfreq);
-        ds.tfg.set_finite_beta_time_grid(grid.times, grid.beta_ha_inv, grid.transform);
+        if (grid.frequency_indices.empty())
+            ds.tfg.set_finite_beta_time_grid(grid.times, grid.beta_ha_inv, grid.transform);
+        else
+            ds.tfg.set_finite_beta_rpa_grid(grid.times, grid.beta_ha_inv, grid.frequency_indices,
+                                          grid.correlation_weights, grid.transform);
         global::profiler.stop("initialize_ds_tfgrids");
         return;
     }

@@ -19,13 +19,18 @@ ExternalThermalGrid read_external_thermal_grid(const std::string &path)
     { throw std::runtime_error("external thermal grid " + path + ": " + reason); };
     std::string magic, statistics, sign, normalization;
     ExternalThermalGrid grid;
-    if (!(input >> magic) || magic != "LIBRPA_THERMAL_TAU_V1") fail("unsupported version");
+    if (!(input >> magic) || (magic != "LIBRPA_THERMAL_TAU_V1" && magic != "LIBRPA_THERMAL_RPA_V1"))
+        fail("unsupported version");
+    const bool sparse_rpa = magic == "LIBRPA_THERMAL_RPA_V1";
     if (!(input >> grid.package >> grid.package_version >> statistics >> sign >> normalization))
         fail("truncated provenance/convention header");
     if (statistics != "B" || sign != "exp_plus" || normalization != "integral")
         fail("unsupported statistics/Fourier convention");
-    if (!(input >> grid.beta_ha_inv >> grid.wmax_ha >> grid.tolerance) ||
-        !std::isfinite(grid.beta_ha_inv) || grid.beta_ha_inv <= 0.0 ||
+    if (!(input >> grid.beta_ha_inv >> grid.wmax_ha)) fail("invalid thermal metadata");
+    if (sparse_rpa && (!(input >> grid.rpa_wmax_ha) || !std::isfinite(grid.rpa_wmax_ha) ||
+                       grid.rpa_wmax_ha < grid.wmax_ha))
+        fail("invalid thermal RPA metadata: requires rpa_wmax >= wmax");
+    if (!(input >> grid.tolerance) || !std::isfinite(grid.beta_ha_inv) || grid.beta_ha_inv <= 0.0 ||
         !std::isfinite(grid.wmax_ha) || grid.wmax_ha <= 0.0 || !std::isfinite(grid.tolerance) ||
         grid.tolerance <= 0.0 || grid.tolerance >= 1.0)
         fail("invalid thermal metadata");
@@ -49,10 +54,32 @@ ExternalThermalGrid read_external_thermal_grid(const std::string &path)
     }
     grid.transform_real.resize(entries);
     grid.transform_imag.resize(entries);
+    if (sparse_rpa)
+    {
+        grid.frequency_indices.resize(grid.nfreq);
+        grid.correlation_weights.resize(grid.nfreq);
+    }
+    int previous_index = -1;
     for (int row = 0; row < grid.nfreq; ++row)
     {
         int index = -1;
-        if (!(input >> index) || index != row) fail("nonconsecutive bosonic frequency index");
+        if (!(input >> index)) fail("invalid or truncated bosonic frequency index");
+        if (sparse_rpa)
+        {
+            if ((row == 0 && index != 0) || index <= previous_index)
+                fail("bosonic frequency index must start at zero and increase strictly");
+            previous_index = index;
+            grid.frequency_indices[row] = index;
+            auto &weight = grid.correlation_weights[row];
+            if (!(input >> weight) || !std::isfinite(weight))
+                fail("invalid or truncated correlation weight");
+            const double static_weight = 0.5 / grid.beta_ha_inv;
+            if (row == 0 && (!std::isfinite(static_weight) ||
+                             std::abs(weight - static_weight) / static_weight > 1e-10))
+                fail("static correlation weight must equal 1/(2*beta)");
+        }
+        else if (index != row)
+            fail("nonconsecutive bosonic frequency index");
         for (int col = 0; col < ntau; ++col)
         {
             const int offset = row * ntau + col;
@@ -76,8 +103,15 @@ void load_external_thermal_grid(const std::string &path, librpa::Handler &handle
     const auto grid = read_external_thermal_grid(path);
     if (options.nfreq != grid.nfreq || options.ntau != static_cast<int>(grid.times.size()))
         throw std::runtime_error("external thermal grid dimensions differ from nfreq/ntau");
-    handler.set_external_thermal_time_grid(grid.beta_ha_inv, grid.wmax_ha, grid.tolerance,
-                                           grid.nfreq, options.ntau, grid.times.data(),
-                                           grid.transform_real.data(), grid.transform_imag.data());
+    if (!grid.frequency_indices.empty())
+        handler.set_external_thermal_rpa_grid(
+            grid.beta_ha_inv, grid.wmax_ha, grid.rpa_wmax_ha, grid.tolerance, grid.nfreq,
+            options.ntau, grid.times.data(), grid.frequency_indices.data(),
+            grid.correlation_weights.data(), grid.transform_real.data(),
+            grid.transform_imag.data());
+    else
+        handler.set_external_thermal_time_grid(
+            grid.beta_ha_inv, grid.wmax_ha, grid.tolerance, grid.nfreq, options.ntau,
+            grid.times.data(), grid.transform_real.data(), grid.transform_imag.data());
 }
 }  // namespace driver

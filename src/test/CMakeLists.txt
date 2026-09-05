@@ -50,6 +50,9 @@ foreach(target
     test_thermal_chi0
     test_external_thermal_grid
     test_external_thermal_api
+    test_external_thermal_rpa_grid
+    test_external_thermal_rpa_api
+    test_thermal_gw_transform
     test_thermal_occupation
     test_arbitrary_float
     test_geometry

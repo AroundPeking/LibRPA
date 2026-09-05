@@ -5,6 +5,8 @@ program test_f03_thermal_grid
    type(LibrpaHandler) :: h
    type(LibrpaOptions) :: opts
    integer :: ierr, provided
+   integer :: sparse_indices(2)
+   real(dp) :: correlation_weights(2)
    real(dp) :: energies(2,1,1), occupations(2,1,1), times(3)
    complex(dp) :: transform(3,2)
    real(dp), allocatable :: frequencies(:), weights(:)
@@ -38,6 +40,18 @@ program test_f03_thermal_grid
    ! This API returns quadrature weights; the correlation energy divides by 2*pi.
    if (abs(weights(1) - acos(-1.0_dp)/8.0_dp) > 1e-13_dp) error stop "wrong DC weight"
    if (abs(weights(2) - acos(-1.0_dp)/4.0_dp) > 1e-13_dp) error stop "wrong nonzero weight"
+   times = [0.5_dp, 3.0_dp, 7.0_dp]
+   transform(:,1) = cmplx([1.0_dp, 2.0_dp, 5.0_dp], 0.0_dp, kind=dp)
+   transform(:,2) = cmplx([1.0_dp, -3.0_dp, 2.0_dp], [2.0_dp, -1.0_dp, -1.0_dp], kind=dp)
+   sparse_indices = [0, 7]
+   correlation_weights = [0.0625_dp, -0.25_dp]
+   call h%set_external_thermal_rpa_grid(8.0_dp, 2.0_dp, 4.0_dp, 1e-10_dp, &
+                                      times, sparse_indices, correlation_weights, transform)
+   sparse_indices = 0
+   correlation_weights = 0
+   call h%get_imaginary_frequency_grids(opts, frequencies, weights)
+   if (abs(frequencies(2)-7*acos(-1.0_dp)/4.0_dp) > 1e-13_dp) error stop "lost sparse mode"
+   if (abs(weights(2)+acos(-1.0_dp)/2.0_dp) > 1e-13_dp) error stop "lost signed sparse weight"
    call h%clear_external_thermal_time_grid()
    opts%ntau = 8
    call h%get_imaginary_frequency_grids(opts, frequencies, weights)

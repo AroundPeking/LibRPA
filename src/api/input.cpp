@@ -309,6 +309,50 @@ void librpa_set_external_thermal_time_grid(LibrpaHandler* h, double beta_ha_inv,
     pds->invalidate_compute_objects();
 }
 
+void librpa_set_external_thermal_rpa_grid(
+    LibrpaHandler* h, double beta_ha_inv, double wmax_ha, double rpa_wmax_ha,
+    double tolerance, int nfreq, int ntau, const double* times,
+    const int* frequency_indices, const double* correlation_weights,
+    const double* transform_real, const double* transform_imag)
+{
+    const int max_dimension = std::numeric_limits<int>::max();
+    if (nfreq <= 0 || ntau <= 0 || nfreq > max_dimension / ntau || nfreq > max_dimension / nfreq ||
+        !times || !frequency_indices || !correlation_weights || !transform_real || !transform_imag)
+        throw LIBRPA_RUNTIME_ERROR("invalid external thermal RPA grid dimensions or null arrays");
+    auto pds = librpa_int::api::get_dataset_instance(h);
+    auto grid = std::make_unique<librpa_int::ExternalThermalTimeGrid>();
+    grid->beta_ha_inv = beta_ha_inv;
+    grid->wmax_ha = wmax_ha;
+    grid->rpa_wmax_ha = rpa_wmax_ha;
+    grid->tolerance = tolerance;
+    if (!std::isfinite(rpa_wmax_ha) || rpa_wmax_ha < wmax_ha)
+        throw LIBRPA_RUNTIME_ERROR("external thermal RPA grid requires finite rpa_wmax >= wmax");
+    librpa_int::validate_external_thermal_time_grid_reference(*pds, *grid);
+    grid->times.assign(times, times + ntau);
+    grid->frequency_indices.assign(frequency_indices, frequency_indices + nfreq);
+    grid->correlation_weights.assign(correlation_weights, correlation_weights + nfreq);
+    grid->transform.create(nfreq, ntau);
+    for (int i = 0; i < nfreq * ntau; ++i)
+        grid->transform.c[i] = {transform_real[i], transform_imag[i]};
+    librpa_int::TFGrids validated(nfreq);
+    validated.set_finite_beta_rpa_grid(grid->times, beta_ha_inv, grid->frequency_indices,
+                                     grid->correlation_weights, grid->transform);
+
+    // Test the constant mode separately from the core node/weight validation.
+    for (int row = 0; row < nfreq; ++row)
+    {
+        std::complex<double> integral = 0.0;
+        for (int col = 0; col < ntau; ++col) integral += grid->transform(row, col);
+        const double expected = grid->frequency_indices[row] == 0 ? beta_ha_inv : 0.0;
+        if (!std::isfinite(integral.real()) || !std::isfinite(integral.imag()) ||
+            std::abs(integral - expected) / beta_ha_inv > std::max(1e-10, 10.0 * tolerance))
+            throw LIBRPA_RUNTIME_ERROR(
+                "external thermal transform fails constant-mode normalization");
+    }
+    pds->external_thermal_time_grid = std::move(grid);
+    pds->invalidate_compute_objects();
+}
+
 void librpa_clear_external_thermal_time_grid(LibrpaHandler* h)
 {
     auto pds = librpa_int::api::get_dataset_instance(h);

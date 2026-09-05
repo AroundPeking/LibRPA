@@ -246,6 +246,13 @@ public:
         double beta_ha_inv, double wmax_ha, double tolerance, int nfreq, int ntau,
         const double *times, const double *transform_real, const double *transform_imag);
 
+    /** @brief Copy a sparse thermal RPA quadrature including its tail; see the C API. */
+    void set_external_thermal_rpa_grid(
+        double beta_ha_inv, double wmax_ha, double rpa_wmax_ha, double tolerance,
+        int nfreq, int ntau, const double *times, const int *frequency_indices,
+        const double *correlation_weights, const double *transform_real,
+        const double *transform_imag);
+
     /** @brief Clear the external transform without changing the FD reference. */
     void clear_external_thermal_time_grid();
 

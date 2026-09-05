@@ -82,3 +82,11 @@ if(BUILD_SHARED_LIBS)
   target_link_libraries(test_reader_thermal_grid PRIVATE ${math_libs} ${parallel_libs})
 endif()
 add_test(NAME test_reader_thermal_grid COMMAND $<TARGET_FILE:test_reader_thermal_grid>)
+
+add_executable(test_reader_thermal_rpa_grid test_reader_thermal_rpa_grid.cpp
+  ../reader_thermal_grid.cpp ../driver.cpp ../inputfile.cpp ../input_parser.cpp)
+target_link_libraries(test_reader_thermal_rpa_grid PRIVATE rpa_lib)
+if(BUILD_SHARED_LIBS)
+  target_link_libraries(test_reader_thermal_rpa_grid PRIVATE ${math_libs} ${parallel_libs})
+endif()
+add_test(NAME test_reader_thermal_rpa_grid COMMAND $<TARGET_FILE:test_reader_thermal_rpa_grid>)

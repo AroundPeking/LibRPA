@@ -11,8 +11,11 @@ struct ExternalThermalGrid
 {
     std::string package, package_version;
     double beta_ha_inv = 0.0, wmax_ha = 0.0, tolerance = 0.0;
+    double rpa_wmax_ha = 0.0;
     int nfreq = 0;
     std::vector<double> times, transform_real, transform_imag;
+    std::vector<int> frequency_indices;
+    std::vector<double> correlation_weights;
 };
 
 ExternalThermalGrid read_external_thermal_grid(const std::string &path);

@@ -316,6 +316,7 @@ module librpa_f03
          procedure :: set_fermi_dirac_reference => librpa_set_fermi_dirac_reference
          procedure :: clear_fermi_dirac_reference => librpa_clear_fermi_dirac_reference
          procedure :: set_external_thermal_time_grid => librpa_set_external_thermal_time_grid
+         procedure :: set_external_thermal_rpa_grid => librpa_set_external_thermal_rpa_grid
          procedure :: clear_external_thermal_time_grid => librpa_clear_external_thermal_time_grid
          procedure :: set_wfc => librpa_set_wfc
          procedure :: set_wfc_spinor => librpa_set_wfc_spinor
@@ -571,6 +572,24 @@ contains
       complex(dp), intent(in) :: transform(:,:)
       call error_on_call("librpa_set_external_thermal_time_grid")
    end subroutine librpa_set_external_thermal_time_grid
+
+   !> @brief Copy a sparse thermal RPA quadrature including its tail.
+   !> Transform shape is (ntau,nfreq), with integral normalization and exp(+i*nu*tau).
+   !> frequency_indices are zero-based bosonic indices, strictly increasing from zero.
+   !> Signed correlation_weights include the full sum; the static weight is 1/(2*beta).
+   !> rpa_wmax_ha >= wmax_ha; the latter covers all same-spin SCF energy differences.
+   !> This does not enable thermal GW. The existing clear method clears either grid.
+   subroutine librpa_set_external_thermal_rpa_grid( &
+         this, beta_ha_inv, wmax_ha, rpa_wmax_ha, tolerance, times, &
+         frequency_indices, correlation_weights, transform)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      real(dp), intent(in) :: beta_ha_inv, wmax_ha, rpa_wmax_ha, tolerance
+      real(dp), intent(in) :: times(:), correlation_weights(:)
+      integer, intent(in) :: frequency_indices(:)
+      complex(dp), intent(in) :: transform(:,:)
+      call error_on_call("librpa_set_external_thermal_rpa_grid")
+   end subroutine librpa_set_external_thermal_rpa_grid
 
    !> @brief Clear the external time transform, retaining the FD reference.
    subroutine librpa_clear_external_thermal_time_grid(this)

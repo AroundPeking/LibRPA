@@ -73,6 +73,31 @@ void librpa_set_external_thermal_time_grid(
     int nfreq, int ntau, const double* times, const double* transform_real,
     const double* transform_imag);
 
+/**
+ * @brief Supply an external sparse finite-temperature RPA quadrature.
+ *
+ * All ranks supply identical data after the FD reference and SCF eigenvalues.
+ * Arrays are copied before mutation. Times have length ntau and lie strictly
+ * inside (0,beta). Transform arrays are row-major [nfreq][ntau], with integral
+ * normalization and exp(+i*nu*tau). Each row sums to beta at zero frequency
+ * and to zero otherwise, to the external approximation tolerance.
+ * The nfreq indices start at zero and increase strictly; gaps are allowed.
+ * Correlation weights have length nfreq, may be signed, and represent the full
+ * RPA Matsubara sum including its tail. The static weight must equal 1/(2*beta)
+ * within 1e-10 relative error. No additional tail correction is applied.
+ * wmax_ha covers all same-spin SCF energy differences; rpa_wmax_ha >= wmax_ha
+ * bounds the RPA fit. Both bounds are finite and in Hartree. beta_ha_inv must
+ * match the FD reference; tolerance lies strictly in (0,1).
+ * Calculation opts must select fd_matsubara and matching nfreq/ntau.
+ * This is RPA-only and does not enable thermal GW. Invalid input preserves
+ * the previous external grid. The existing clear function clears either format.
+ */
+void librpa_set_external_thermal_rpa_grid(
+    LibrpaHandler* h, double beta_ha_inv, double wmax_ha, double rpa_wmax_ha,
+    double tolerance, int nfreq, int ntau, const double* times,
+    const int* frequency_indices, const double* correlation_weights,
+    const double* transform_real, const double* transform_imag);
+
 /** @brief Clear external thermal grid input; keep the FD occupation reference. */
 void librpa_clear_external_thermal_time_grid(LibrpaHandler* h);
 

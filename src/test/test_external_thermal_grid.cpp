@@ -141,7 +141,8 @@ void check_validation(const Fixture &fixture)
 }
 
 #ifdef LIBRPA_USE_LIBRI
-void check_full_libri_response(const Fixture &fixture, bool nonlocal_coefficients)
+void check_full_libri_response(const Fixture &fixture, bool nonlocal_coefficients,
+                               bool sparse_frequencies = false)
 {
     constexpr int nk = 3;
     const double two_pi = 2.0 * std::acos(-1.0);
@@ -184,12 +185,32 @@ void check_full_libri_response(const Fixture &fixture, bool nonlocal_coefficient
         transform_real[i] = fixture.transform.c[i].real();
         transform_imag[i] = fixture.transform.c[i].imag();
     }
-    handler.set_external_thermal_time_grid(
-        fixture.beta, fixture.wmax, fixture.tolerance, fixture.transform.nr, fixture.transform.nc,
-        fixture.times.data(), transform_real.data(), transform_imag.data());
+    int nfreq = fixture.transform.nr;
+    if (sparse_frequencies)
+    {
+        const std::vector<int> modes{0, 1, 3, 7, 15};
+        const std::vector<double> weights{0.5 / fixture.beta, 0.2, 0.4, -0.1, 0.6};
+        nfreq = modes.size();
+        std::vector<double> real(nfreq * fixture.transform.nc), imag(real.size());
+        for (int row = 0; row < nfreq; ++row)
+            for (int col = 0; col < fixture.transform.nc; ++col)
+            {
+                real[row * fixture.transform.nc + col] = fixture.transform(modes[row], col).real();
+                imag[row * fixture.transform.nc + col] = fixture.transform(modes[row], col).imag();
+            }
+        handler.set_external_thermal_rpa_grid(fixture.beta, fixture.wmax, 2 * fixture.wmax,
+                                              fixture.tolerance, nfreq, fixture.transform.nc,
+                                              fixture.times.data(), modes.data(), weights.data(),
+                                              real.data(), imag.data());
+    }
+    else
+        handler.set_external_thermal_time_grid(fixture.beta, fixture.wmax, fixture.tolerance,
+                                               fixture.transform.nr, fixture.transform.nc,
+                                               fixture.times.data(), transform_real.data(),
+                                               transform_imag.data());
     librpa::Options options;
     options.tfgrids_type = LIBRPA_TFGRID_FD_MATSUBARA;
-    options.nfreq = fixture.transform.nr;
+    options.nfreq = nfreq;
     options.ntau = fixture.transform.nc;
     initialize_ds_tfgrids(*ds, options);
     const auto &grid = ds->tfg;
@@ -291,7 +312,7 @@ void check_full_libri_response(const Fixture &fixture, bool nonlocal_coefficient
         std::cout << "Sparse LibRI/Adler-Wiser max error: " << max_error
                   << "; matrix elements checked: " << checked
                   << "; nonlocal coefficients: " << nonlocal_coefficients << std::endl;
-    if (checked < 16 * nk * 4 || max_error > 5e-9)
+    if (checked < nfreq * nk * 4 || max_error > 5e-9)
         throw std::runtime_error("sparse full LibRI response differs from Adler-Wiser");
 
     mf.set_fermi_dirac_reference(make_fermi_dirac_reference(2.0 * kbt, 0.0, 2.0, 1e-12));
@@ -320,6 +341,8 @@ int main(int argc, char **argv)
 #ifdef LIBRPA_USE_LIBRI
     check_full_libri_response(fixture, false);
     check_full_libri_response(fixture, true);
+    check_full_libri_response(fixture, false, true);
+    check_full_libri_response(fixture, true, true);
 #endif
     MPI_Finalize();
 }

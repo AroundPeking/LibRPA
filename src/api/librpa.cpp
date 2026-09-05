@@ -170,6 +170,17 @@ void Handler::set_external_thermal_time_grid(
                                           nfreq, ntau, times, transform_real, transform_imag);
 }
 
+void Handler::set_external_thermal_rpa_grid(
+    double beta_ha_inv, double wmax_ha, double rpa_wmax_ha, double tolerance,
+    int nfreq, int ntau, const double *times, const int *frequency_indices,
+    const double *correlation_weights, const double *transform_real,
+    const double *transform_imag)
+{
+    ::librpa_set_external_thermal_rpa_grid(this->h_, beta_ha_inv, wmax_ha, rpa_wmax_ha,
+                                        tolerance, nfreq, ntau, times, frequency_indices,
+                                        correlation_weights, transform_real, transform_imag);
+}
+
 void Handler::clear_external_thermal_time_grid()
 {
     ::librpa_clear_external_thermal_time_grid(this->h_);

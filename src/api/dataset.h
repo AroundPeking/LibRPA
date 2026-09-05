@@ -29,8 +29,11 @@ struct ExternalThermalTimeGrid
 {
     double beta_ha_inv = 0.0;
     double wmax_ha = 0.0;
+    double rpa_wmax_ha = 0.0;
     double tolerance = 0.0;
     std::vector<double> times;
+    std::vector<int> frequency_indices;
+    std::vector<double> correlation_weights;
     ComplexMatrix transform;
 };
 

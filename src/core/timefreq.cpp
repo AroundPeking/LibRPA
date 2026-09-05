@@ -99,6 +99,7 @@ void TFGrids::unset()
     n_grids = 0;
     n_time_grids = 0;
     finite_beta_ha_inv = 0.0;
+    sparse_finite_beta_rpa_sum = false;
     freq_nodes.clear();
     freq_weights.clear();
     time_nodes.clear();
@@ -235,6 +236,7 @@ void TFGrids::generate_finite_beta_matsubara(const size_t n_time,
         throw LIBRPA_RUNTIME_ERROR("finite-beta grid requires positive finite beta");
 
     finite_beta_ha_inv = beta_ha_inv;
+    sparse_finite_beta_rpa_sum = false;
     set_time(n_time);
     const double time_weight = beta_ha_inv / n_time_grids;
     for (size_t itime = 0; itime != n_time_grids; ++itime)
@@ -298,6 +300,7 @@ void TFGrids::set_finite_beta_time_grid(const std::vector<double> &times, double
     const ComplexMatrix transform_copy = transform;
     set_time(times_copy.size());
     finite_beta_ha_inv = beta_ha_inv;
+    sparse_finite_beta_rpa_sum = false;
     time_nodes = times_copy;
     fourier_t2f = transform_copy;
     for (std::size_t j = 0; j < times_copy.size(); ++j)
@@ -309,6 +312,34 @@ void TFGrids::set_finite_beta_time_grid(const std::vector<double> &times, double
         freq_weights[l] = (l == 0 ? 0.5 : 1.0) * two_pi / beta_ha_inv;
     }
     grid_type = LIBRPA_TFGRID_FD_MATSUBARA;
+}
+
+void TFGrids::set_finite_beta_rpa_grid(const std::vector<double> &times, double beta_ha_inv,
+                                       const std::vector<int> &indices,
+                                       const std::vector<double> &correlation_weights,
+                                       const ComplexMatrix &transform)
+{
+    if (!std::isfinite(beta_ha_inv) || beta_ha_inv <= 0.0 || indices.size() != n_grids ||
+        correlation_weights.size() != n_grids || indices.empty() || indices.front() != 0)
+        throw LIBRPA_RUNTIME_ERROR("invalid external sparse RPA grid dimensions or beta");
+    const double two_pi = 2.0 * std::acos(-1.0);
+    for (std::size_t row = 0; row < n_grids; ++row)
+    {
+        if (indices[row] < 0 || (row > 0 && indices[row] <= indices[row - 1]) ||
+            !std::isfinite(two_pi * indices[row] / beta_ha_inv) ||
+            !std::isfinite(two_pi * correlation_weights[row]))
+            throw LIBRPA_RUNTIME_ERROR("sparse RPA requires increasing modes and finite weights");
+    }
+    const double static_normalization = 2.0 * (beta_ha_inv * correlation_weights.front());
+    if (!std::isfinite(static_normalization) || std::abs(static_normalization - 1.0) > 1e-10)
+        throw LIBRPA_RUNTIME_ERROR("sparse RPA static weight must equal 1/(2 beta)");
+    set_finite_beta_time_grid(times, beta_ha_inv, transform);
+    for (std::size_t row = 0; row < n_grids; ++row)
+    {
+        freq_nodes[row] = two_pi * indices[row] / beta_ha_inv;
+        freq_weights[row] = two_pi * correlation_weights[row];
+    }
+    sparse_finite_beta_rpa_sum = true;
 }
 
 double TFGrids::generate_minimax(double emin, double emax, double regulation)
@@ -471,6 +502,8 @@ double TFGrids::find_correlation_frequency_weight(const double freq) const
 
 double TFGrids::finite_beta_power4_tail_weight(const size_t first_omitted) const
 {
+    if (has_sparse_finite_beta_rpa_sum())
+        throw LIBRPA_RUNTIME_ERROR("sparse RPA sum already includes the infinite-frequency tail");
     if (grid_type != LIBRPA_TFGRID_FD_MATSUBARA || !(finite_beta_ha_inv > 0.0))
         throw LIBRPA_RUNTIME_ERROR("power-four Matsubara tail requires a finite-beta grid");
     if (first_omitted == 0)

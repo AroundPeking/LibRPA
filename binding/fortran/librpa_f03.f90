@@ -506,6 +506,7 @@ module librpa_f03
          procedure :: set_fermi_dirac_reference => librpa_set_fermi_dirac_reference
          procedure :: clear_fermi_dirac_reference => librpa_clear_fermi_dirac_reference
          procedure :: set_external_thermal_time_grid => librpa_set_external_thermal_time_grid
+         procedure :: set_external_thermal_rpa_grid => librpa_set_external_thermal_rpa_grid
          procedure :: clear_external_thermal_time_grid => librpa_clear_external_thermal_time_grid
          procedure :: set_wfc => librpa_set_wfc
          procedure :: set_wfc_spinor => librpa_set_wfc_spinor
@@ -601,6 +602,19 @@ module librpa_f03
          integer(c_int), value :: nfreq, ntau
          real(c_double), intent(in) :: times(*), transform_real(*), transform_imag(*)
       end subroutine librpa_set_external_thermal_time_grid_c
+
+      subroutine librpa_set_external_thermal_rpa_grid_c &
+            (h, beta_ha_inv, wmax_ha, rpa_wmax_ha, tolerance, nfreq, ntau, times, &
+             frequency_indices, correlation_weights, transform_real, transform_imag) &
+            bind(c, name="librpa_set_external_thermal_rpa_grid")
+         import :: c_ptr, c_int, c_double
+         type(c_ptr), value :: h
+         real(c_double), value :: beta_ha_inv, wmax_ha, rpa_wmax_ha, tolerance
+         integer(c_int), value :: nfreq, ntau
+         integer(c_int), intent(in) :: frequency_indices(*)
+         real(c_double), intent(in) :: times(*), correlation_weights(*)
+         real(c_double), intent(in) :: transform_real(*), transform_imag(*)
+      end subroutine librpa_set_external_thermal_rpa_grid_c
 
       subroutine librpa_clear_external_thermal_time_grid_c(h) &
             bind(c, name="librpa_clear_external_thermal_time_grid")
@@ -1550,6 +1564,47 @@ contains
          this%ptr_c_handle, real(beta_ha_inv, kind=c_double), real(wmax_ha, kind=c_double), &
          real(tolerance, kind=c_double), nfreq, ntau, times_c, transform_real, transform_imag)
    end subroutine librpa_set_external_thermal_time_grid
+
+   !> @brief Copy a sparse thermal RPA quadrature including its tail.
+   !> Transform shape is (ntau,nfreq), with integral normalization and exp(+i*nu*tau).
+   !> frequency_indices are zero-based bosonic indices, strictly increasing from zero.
+   !> Signed correlation_weights include the full sum; the static weight is 1/(2*beta).
+   !> rpa_wmax_ha >= wmax_ha; the latter covers all same-spin SCF energy differences.
+   !> This does not enable thermal GW. The existing clear method clears either grid.
+   subroutine librpa_set_external_thermal_rpa_grid( &
+         this, beta_ha_inv, wmax_ha, rpa_wmax_ha, tolerance, times, &
+         frequency_indices, correlation_weights, transform)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      real(dp), intent(in) :: beta_ha_inv, wmax_ha, rpa_wmax_ha, tolerance
+      real(dp), intent(in) :: times(:), correlation_weights(:)
+      integer, intent(in) :: frequency_indices(:)
+      complex(dp), intent(in) :: transform(:,:)
+      integer(c_int) :: ntau, nfreq
+      integer(c_int), allocatable :: indices_c(:)
+      real(c_double), allocatable :: times_c(:), weights_c(:), transform_real(:,:), transform_imag(:,:)
+
+      ntau = size(times, kind=c_int)
+      nfreq = size(frequency_indices, kind=c_int)
+      if (ntau <= 0 .or. nfreq <= 0) error stop "empty external thermal RPA grid"
+      if (size(correlation_weights) /= nfreq) error stop "external thermal RPA weight count differs from nfreq"
+      if (size(transform, 1) /= ntau .or. size(transform, 2) /= nfreq) &
+         error stop "external thermal RPA transform must have shape (ntau,nfreq)"
+      if (nfreq > huge(nfreq)/ntau .or. nfreq > huge(nfreq)/nfreq) &
+         error stop "external thermal RPA grid dimensions overflow"
+      allocate(times_c(ntau), indices_c(nfreq), weights_c(nfreq), &
+               transform_real(ntau,nfreq), transform_imag(ntau,nfreq))
+      times_c = real(times, kind=c_double)
+      indices_c = int(frequency_indices, kind=c_int)
+      weights_c = real(correlation_weights, kind=c_double)
+      ! Fortran's first index is contiguous, matching C row-major [nfreq][ntau].
+      transform_real = real(transform, kind=c_double)
+      transform_imag = real(aimag(transform), kind=c_double)
+      call librpa_set_external_thermal_rpa_grid_c( &
+         this%ptr_c_handle, real(beta_ha_inv, kind=c_double), real(wmax_ha, kind=c_double), &
+         real(rpa_wmax_ha, kind=c_double), real(tolerance, kind=c_double), nfreq, ntau, &
+         times_c, indices_c, weights_c, transform_real, transform_imag)
+   end subroutine librpa_set_external_thermal_rpa_grid
 
    !> @brief Clear the external time transform, retaining the FD reference.
    subroutine librpa_clear_external_thermal_time_grid(this)

@@ -98,6 +98,7 @@ list(APPEND lib_sources
   core/sternheimer_rpa.cpp
   core/sternheimer_symmetry.cpp
   core/timefreq.cpp
+  core/thermal_gw_transform.cpp
   core/thermal_occupation.cpp
   core/utils_atomic_basis_blacs.cpp
         core/utils_complexmatrix.cpp
