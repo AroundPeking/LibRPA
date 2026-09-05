@@ -1,21 +1,64 @@
-#include "librpa.hpp"
-
-#include "../api/instance_manager.h"
-#include "../api/dataset_helper.h"
-#include "librpa_options.h"
+#include <mpi.h>
 
 #include <cassert>
 #include <cmath>
-#include <mpi.h>
 #include <stdexcept>
+#include <string>
+
+#include "../api/dataset_helper.h"
+#include "../api/instance_manager.h"
+#include "librpa.hpp"
+#include "librpa_options.h"
 
 namespace
 {
-bool near(const double lhs, const double rhs)
+bool near(const double lhs, const double rhs) { return std::abs(lhs - rhs) < 1.0e-15; }
+
+void require_thermal_gw_rejection(const bool thermal_reference, const bool thermal_grid)
 {
-    return std::abs(lhs - rhs) < 1.0e-15;
+    librpa::Handler handler(MPI_COMM_WORLD);
+    if (thermal_reference) handler.set_fermi_dirac_reference(0.0025, 0.125, 2.0, 1.0e-12);
+    const auto dataset = librpa_int::api::get_dataset_instance(handler);
+    dataset->is_band_calc_done = true;
+    librpa::Options options;
+    options.tfgrids_type = thermal_grid ? LIBRPA_TFGRID_FD_MATSUBARA : LIBRPA_TFGRID_MINIMAX;
+    // The unsupported task must fail before grid validation or dataset mutation.
+    options.nfreq = 0;
+    bool rejected = false;
+    try
+    {
+        handler.build_g0w0_sigma(options);
+    }
+    catch (const std::runtime_error &error)
+    {
+        const std::string message = error.what();
+        rejected = message.find("Finite-temperature GW is not yet supported") != std::string::npos;
+    }
+    if (!rejected || !dataset->is_band_calc_done)
+        throw std::runtime_error("missing fail-fast thermal GW protection");
 }
+
+void require_legacy_gw_grid_validation()
+{
+    librpa::Handler handler(MPI_COMM_WORLD);
+    librpa::Options options;
+    options.tfgrids_type = LIBRPA_TFGRID_MINIMAX;
+    options.nfreq = 0;
+    bool reached_grid_validation = false;
+    try
+    {
+        handler.build_g0w0_sigma(options);
+    }
+    catch (const std::runtime_error &error)
+    {
+        const std::string message = error.what();
+        reached_grid_validation =
+            message.find("number of frequency points must be positive") != std::string::npos;
+    }
+    if (!reached_grid_validation)
+        throw std::runtime_error("legacy GW no longer reaches normal grid validation");
 }
+}  // namespace
 
 int main(int argc, char **argv)
 {
@@ -111,6 +154,11 @@ int main(int argc, char **argv)
         }
         assert(rejected);
     }
+
+    require_thermal_gw_rejection(true, true);
+    require_thermal_gw_rejection(true, false);
+    require_thermal_gw_rejection(false, true);
+    require_legacy_gw_grid_validation();
 
     MPI_Finalize();
     return 0;
