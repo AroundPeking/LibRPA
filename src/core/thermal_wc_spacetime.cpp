@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <vector>
 
 #include "../utils/constants.h"
 #include "epsilon.h"
@@ -119,6 +121,58 @@ void validate_samples(const WcFrequency& wc, const PeriodicBoundaryData& pbc,
         }
     }
 }
+
+constexpr std::size_t MAX_DENSE_ENTRIES =
+    std::min(std::size_t(std::numeric_limits<int>::max()),
+             std::numeric_limits<std::size_t>::max() / sizeof(cplxdb));
+
+void validate_dense_dimensions(std::size_t rows, std::size_t cols)
+{
+    // ComplexMatrix forms its storage size and all element indices in int arithmetic.
+    if (rows == 0 || cols == 0 || rows > MAX_DENSE_ENTRIES || cols > MAX_DENSE_ENTRIES ||
+        rows > MAX_DENSE_ENTRIES / cols)
+        throw std::overflow_error("thermal Wc dense dimensions must fit positive int storage");
+}
+
+struct SpatialBatch
+{
+    std::size_t r_count;
+    std::size_t elements;
+};
+
+SpatialBatch choose_spatial_batch(std::size_t nq, std::size_t nr, std::size_t nb, std::size_t nt,
+                                  std::size_t elements)
+{
+    validate_dense_dimensions(nq, 1);
+    validate_dense_dimensions(nr, 1);
+    validate_dense_dimensions(nb, 1);
+    validate_dense_dimensions(nt, 1);
+    constexpr std::size_t MAX_R_COUNT = 64;
+    constexpr std::size_t TARGET_ENTRIES = 8 * 1024 * 1024 / sizeof(cplxdb);
+    const auto max_grid = std::max(nb, nt);
+    auto r_count =
+        std::min({MAX_R_COUNT, nr, MAX_DENSE_ENTRIES / nq, MAX_DENSE_ENTRIES / max_grid});
+    for (;; --r_count)
+    {
+        const auto phase_entries = r_count * nq;
+        // Count phase + qpack + spatial result + B input + B output together.
+        // Each product fits int; their sum uses wider arithmetic for large grids.
+        const std::uint64_t entries_per_element =
+            std::uint64_t(nq) + r_count + r_count * nb + r_count * nt;
+        const auto budget_elements =
+            phase_entries < TARGET_ENTRIES
+                ? std::size_t((TARGET_ENTRIES - phase_entries) / entries_per_element)
+                : 0;
+        if (budget_elements != 0 || r_count == 1)
+        {
+            // If a single R/element exceeds 8 MiB, use that unavoidable minimum.
+            // The int-storage limits remain mandatory even in this fallback.
+            return {r_count, std::min({std::max<std::size_t>(1, elements), MAX_DENSE_ENTRIES / nq,
+                                       MAX_DENSE_ENTRIES / (r_count * max_grid),
+                                       std::max<std::size_t>(1, budget_elements)})};
+        }
+    }
+}
 }  // namespace
 
 std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
@@ -158,47 +212,68 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
             for (const auto& r : pbc.Rlist)
                 result[time].emplace(r, Matz(layout.nr(), layout.nc(), layout.major()));
 
-        // Only one R and a bounded element batch are flattened, never all Wc matrices.
-        // The two dense buffers target 1 MiB total (or one column for a larger source grid).
-        constexpr std::size_t MAX_BATCH_BYTES = 1024 * 1024;
-        constexpr std::size_t MAX_BATCH_ELEMENTS = 4096;
-        const auto bytes_per_element = sizeof(cplxdb) * (frequencies.size() + times.size());
-        const auto batch_size = std::max<std::size_t>(
-            1, std::min({MAX_BATCH_ELEMENTS, MAX_BATCH_BYTES / bytes_per_element,
-                         std::size_t(std::numeric_limits<int>::max()) /
-                             std::max(frequencies.size(), times.size())}));
-        std::vector<cplxdb> phases(qlist.size());
-        for (const auto& r : pbc.Rlist)
+        // Full Wc input/output stays resident. The O(NB*Nq) pointer index is separate
+        // metadata, not part of the 8 MiB numerical work-buffer target below.
+        std::vector<const Matz*> indexed_samples;
+        if (frequencies.size() > std::numeric_limits<std::size_t>::max() / qlist.size() ||
+            frequencies.size() * qlist.size() > indexed_samples.max_size())
+            throw std::overflow_error("thermal Wc frequency/q pointer index is too large");
+        indexed_samples.reserve(frequencies.size() * qlist.size());
+        for (double frequency : frequencies)
         {
-            const auto cartesian_r = r * pbc.latvec;
-            if (!finite(cartesian_r))
-                throw std::overflow_error("thermal Wc lattice translation is nonfinite");
-            for (std::size_t q = 0; q < qlist.size(); ++q)
+            const auto& qmap = Wc_freq_q.at(frequency);
+            for (const auto& q : qlist) indexed_samples.push_back(&qmap.at(q));
+        }
+
+        const auto batch = choose_spatial_batch(qlist.size(), pbc.Rlist.size(), frequencies.size(),
+                                                times.size(), size);
+        for (std::size_t r_offset = 0; r_offset < pbc.Rlist.size(); r_offset += batch.r_count)
+        {
+            const auto r_count = std::min(batch.r_count, pbc.Rlist.size() - r_offset);
+            validate_dense_dimensions(r_count, qlist.size());
+            ComplexMatrix phases(static_cast<int>(r_count), static_cast<int>(qlist.size()));
+            for (std::size_t ir = 0; ir < r_count; ++ir)
             {
-                const double angle = -TWO_PI * (qlist[q] * cartesian_r);
-                if (!std::isfinite(angle))
-                    throw std::overflow_error("thermal Wc spatial phase is nonfinite");
-                phases[q] = cplxdb(std::cos(angle), std::sin(angle)) / double(qlist.size());
+                const auto cartesian_r = pbc.Rlist[r_offset + ir] * pbc.latvec;
+                if (!finite(cartesian_r))
+                    throw std::overflow_error("thermal Wc lattice translation is nonfinite");
+                for (std::size_t q = 0; q < qlist.size(); ++q)
+                {
+                    const double angle = -TWO_PI * (qlist[q] * cartesian_r);
+                    if (!std::isfinite(angle))
+                        throw std::overflow_error("thermal Wc spatial phase is nonfinite");
+                    phases(ir, q) = cplxdb(std::cos(angle), std::sin(angle)) / double(qlist.size());
+                }
             }
-            // Zero-size ranks retain shaped outputs and enter all collectives, but the
-            // transform helper rejects empty batches, so do not call it on those ranks.
-            for (std::size_t offset = 0; offset < size; offset += batch_size)
+            // Empty owners still validate every R/phase and join the final collective,
+            // but never call either spatial GEMM or the B helper with empty storage.
+            for (std::size_t offset = 0; offset < size; offset += batch.elements)
             {
-                const int count = static_cast<int>(std::min(batch_size, size - offset));
-                ComplexMatrix samples(static_cast<int>(frequencies.size()), count);
+                const auto count = std::min(batch.elements, size - offset);
+                validate_dense_dimensions(qlist.size(), count);
+                validate_dense_dimensions(r_count, count);
+                const auto columns = r_count * count;
+                validate_dense_dimensions(frequencies.size(), columns);
+                validate_dense_dimensions(times.size(), columns);
+                ComplexMatrix qpack(static_cast<int>(qlist.size()), static_cast<int>(count));
+                ComplexMatrix samples(static_cast<int>(frequencies.size()),
+                                      static_cast<int>(columns));
                 for (std::size_t m = 0; m < frequencies.size(); ++m)
                 {
-                    const auto& qmap = Wc_freq_q.at(frequencies[m]);
                     for (std::size_t q = 0; q < qlist.size(); ++q)
-                    {
-                        const auto* values = qmap.at(qlist[q]).ptr() + offset;
-                        for (int k = 0; k < count; ++k) samples(m, k) += phases[q] * values[k];
-                    }
+                        std::copy_n(indexed_samples[m * qlist.size() + q]->ptr() + offset, count,
+                                    qpack.c + q * count);
+                    const auto spatial = phases * qpack;
+                    // B columns enumerate (R, flat local entry), without changing ROW/COL
+                    // semantics or completing any complex entries by conjugation.
+                    std::copy_n(spatial.c, columns, samples.c + m * columns);
                 }
                 const auto transformed = transform.apply_bosonic_frequency_to_time(samples);
                 for (std::size_t j = 0; j < times.size(); ++j)
-                    std::copy_n(transformed.c + j * count, count,
-                                result.at(times[j]).at(r).ptr() + offset);
+                    for (std::size_t ir = 0; ir < r_count; ++ir)
+                        std::copy_n(
+                            transformed.c + j * columns + ir * count, count,
+                            result.at(times[j]).at(pbc.Rlist[r_offset + ir]).ptr() + offset);
             }
         }
     }
