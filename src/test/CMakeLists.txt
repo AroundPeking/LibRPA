@@ -53,6 +53,7 @@ foreach(target
     test_external_thermal_rpa_grid
     test_external_thermal_rpa_api
     test_thermal_gw_transform
+    test_thermal_gw_screening
     test_thermal_occupation
     test_arbitrary_float
     test_geometry
