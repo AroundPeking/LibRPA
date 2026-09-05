@@ -84,14 +84,7 @@ ComplexMatrix apply(const ComplexMatrix &coefficients, const ComplexMatrix &samp
     if (samples.nr != coefficients.nc)
         throw std::invalid_argument("thermal GW sample rows do not match the source grid");
     validate_dimensions(coefficients.nr, samples.nc);
-    ComplexMatrix result(coefficients.nr, samples.nc);
-    for (int row = 0; row < result.nr; ++row)
-        for (int source = 0; source < coefficients.nc; ++source)
-        {
-            const auto factor = coefficients(row, source);
-            for (int col = 0; col < result.nc; ++col)
-                result(row, col) += factor * samples(source, col);
-        }
+    ComplexMatrix result = coefficients * samples;
     for (int k = 0; k < result.size; ++k)
         if (!finite(result.c[k]))
             throw std::overflow_error("thermal GW transform produced a nonfinite result");

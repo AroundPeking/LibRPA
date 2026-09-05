@@ -173,6 +173,64 @@ void check_owned_external_operators()
         close(samples.c[k], original_samples.c[k], 0.0, "apply modified caller input");
 }
 
+void check_rectangular_batches()
+{
+    const std::vector<double> times{0.2, 0.7, 1.6};
+    const std::vector<int> bosons{2, 0, -3, -1, 1}, fermions{3, -1, 0, -4};
+    ComplexMatrix b(3, 5), f(4, 3);
+    for (int row = 0; row < b.nr; ++row)
+        for (int source = 0; source < b.nc; ++source)
+            b(row, source) = {0.13 + 0.04 * row - 0.07 * source,
+                              -0.05 + 0.03 * row * source + 0.02 * source};
+    for (int row = 0; row < f.nr; ++row)
+        for (int source = 0; source < f.nc; ++source)
+            f(row, source) = {-0.21 + 0.09 * row + 0.06 * source,
+                              0.17 - 0.02 * row * source - 0.04 * source};
+    const ThermalGWTransform transform(2.7, times, bosons, fermions, b, f);
+    for (int columns : {1, 2, 7, 32})
+    {
+        ComplexMatrix frequency_samples(b.nc, columns), time_samples(f.nc, columns);
+        for (int row = 0; row < frequency_samples.nr; ++row)
+            for (int col = 0; col < columns; ++col)
+                frequency_samples(row, col) = {0.4 + 0.11 * row - 0.019 * col,
+                                               -0.3 + 0.09 * row * row + 0.013 * row * col};
+        for (int row = 0; row < time_samples.nr; ++row)
+            for (int col = 0; col < columns; ++col)
+                time_samples(row, col) = {-0.7 + 0.17 * row + 0.023 * row * col,
+                                          0.2 - 0.07 * row + 0.011 * col * col};
+        const ComplexMatrix original_frequency = frequency_samples, original_time = time_samples;
+        const auto time = transform.apply_bosonic_frequency_to_time(frequency_samples);
+        const auto frequency = transform.apply_fermionic_time_to_frequency(time_samples);
+        require(time.nr == b.nr && time.nc == columns && frequency.nr == f.nr &&
+                    frequency.nc == columns,
+                "rectangular B/F batch shape changed");
+        // Independent scalar sums: neither operator nor samples may be conjugated or projected.
+        for (int row = 0; row < time.nr; ++row)
+            for (int col = 0; col < columns; ++col)
+            {
+                Complex expected = 0.0;
+                for (int source = 0; source < b.nc; ++source)
+                    expected += b(row, source) * frequency_samples(source, col);
+                close(time(row, col), expected, 2e-14, "rectangular B scalar reference");
+            }
+        for (int row = 0; row < frequency.nr; ++row)
+            for (int col = 0; col < columns; ++col)
+            {
+                Complex expected = 0.0;
+                for (int source = 0; source < f.nc; ++source)
+                    expected += f(row, source) * time_samples(source, col);
+                close(frequency(row, col), expected, 2e-14, "rectangular F scalar reference");
+            }
+        for (int k = 0; k < frequency_samples.size; ++k)
+            close(frequency_samples.c[k], original_frequency.c[k], 0.0, "B changed samples");
+        for (int k = 0; k < time_samples.size; ++k)
+            close(time_samples.c[k], original_time.c[k], 0.0, "F changed samples");
+    }
+    require(transform.get_times() == times && transform.get_bosonic_indices() == bosons &&
+                transform.get_fermionic_indices() == fermions,
+            "rectangular B/F changed signed metadata order");
+}
+
 Complex pole_w_frequency(double nu, double positive_pole, double negative_pole, Complex residue)
 {
     return residue * (1.0 / (I * nu - positive_pole) - 1.0 / (I * nu + negative_pole));
@@ -414,6 +472,62 @@ void check_rejections()
     bad_sample.size = 2;
 }
 
+void check_batch_rejections()
+{
+    const ThermalGWTransform transform(2.7, {0.2, 0.7, 1.6}, {2, 0, -3, -1, 1}, {3, -1, 0, -4},
+                                       ComplexMatrix(3, 5), ComplexMatrix(4, 3));
+    for (bool bosonic : {true, false})
+    {
+        const int rows = bosonic ? 5 : 3;
+        const auto apply_samples = [&](const ComplexMatrix &samples)
+        {
+            if (bosonic)
+                transform.apply_bosonic_frequency_to_time(samples);
+            else
+                transform.apply_fermionic_time_to_frequency(samples);
+        };
+        reject([&] { apply_samples(ComplexMatrix(rows - 1, 7)); });
+        reject([&] { apply_samples(ComplexMatrix(rows, 0)); });
+        reject([&] { apply_samples(ComplexMatrix()); });
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        const double inf = std::numeric_limits<double>::infinity();
+        for (Complex value :
+             {Complex(nan, 0.0), Complex(0.0, nan), Complex(inf, 0.0), Complex(0.0, -inf)})
+        {
+            ComplexMatrix samples(rows, 7);
+            samples(rows - 1, 6) = value;
+            reject([&] { apply_samples(samples); });
+        }
+        ComplexMatrix inconsistent(rows, 7);
+        --inconsistent.size;
+        reject([&] { apply_samples(inconsistent); });
+        ComplexMatrix null_storage;
+        null_storage.nr = rows;
+        null_storage.nc = 7;
+        null_storage.size = rows * 7;
+        reject([&] { apply_samples(null_storage); });
+        null_storage.nr = -rows;
+        reject([&] { apply_samples(null_storage); });
+        null_storage.nr = rows;
+        null_storage.nc = -7;
+        reject([&] { apply_samples(null_storage); });
+        null_storage.nc = std::numeric_limits<int>::max();
+        reject([&] { apply_samples(null_storage); });
+    }
+
+    // Each input fits int storage, but the 65536 x 32768 output does not.
+    const auto many_times = midpoints(1.0, 65536);
+    std::vector<int> many_fermions(65536);
+    for (int n = 0; n < 65536; ++n) many_fermions[n] = n;
+    const ThermalGWTransform wide_b(1.0, many_times, {0}, {0}, ComplexMatrix(65536, 1),
+                                    ComplexMatrix(1, 65536));
+    const ThermalGWTransform wide_f(1.0, {0.5}, {0}, many_fermions, ComplexMatrix(1, 1),
+                                    ComplexMatrix(65536, 1));
+    const ComplexMatrix wide_samples(1, 32768);
+    reject([&] { wide_b.apply_bosonic_frequency_to_time(wide_samples); });
+    reject([&] { wide_f.apply_fermionic_time_to_frequency(wide_samples); });
+}
+
 void check_extreme_indices_and_overflow()
 {
     const int low = std::numeric_limits<int>::min(), high = std::numeric_limits<int>::max();
@@ -444,6 +558,42 @@ void check_extreme_indices_and_overflow()
         }
     require(rejected == 2, "nonfinite output from finite input must throw overflow_error");
 }
+
+void check_rectangular_output_overflow()
+{
+    for (bool bosonic : {true, false})
+        for (bool imaginary : {true, false})
+        {
+            ComplexMatrix b(3, 5), f(4, 3), samples(bosonic ? 5 : 3, 7);
+            auto &coefficients = bosonic ? b : f;
+            const double large = 0.75 * std::numeric_limits<double>::max();
+            const Complex value = imaginary ? Complex(0.0, large) : Complex(large, 0.0);
+            // Individual products are finite; their sum overflows only in the last output entry.
+            for (int source : {coefficients.nc - 2, coefficients.nc - 1})
+            {
+                coefficients(coefficients.nr - 1, source) = value;
+                samples(source, samples.nc - 1) = 1.0;
+            }
+            const ThermalGWTransform transform(2.7, {0.2, 0.7, 1.6}, {2, 0, -3, -1, 1},
+                                               {3, -1, 0, -4}, b, f);
+            bool rejected = false;
+            try
+            {
+                if (bosonic)
+                    transform.apply_bosonic_frequency_to_time(samples);
+                else
+                    transform.apply_fermionic_time_to_frequency(samples);
+            }
+            catch (const std::overflow_error &exception)
+            {
+                require(std::string(exception.what()) ==
+                            "thermal GW transform produced a nonfinite result",
+                        "rectangular output overflow diagnostic changed");
+                rejected = true;
+            }
+            require(rejected, "rectangular output overflow must throw overflow_error");
+        }
+}
 }  // namespace
 
 int main()
@@ -452,12 +602,15 @@ int main()
     const std::vector<std::pair<std::string, std::function<void()>>> tests{
         {"signed complex modes and zero mode", check_signed_complex_modes},
         {"owned external rectangular operators", check_owned_external_operators},
+        {"rectangular B/F batches vs scalar reference", check_rectangular_batches},
         {"independent thermal single-pole W", check_single_pole_w},
         {"independent fermionic Sigma poles", check_fermionic_sigma},
         {"composed W and G*W vs analytic/direct Sigma", check_composed_sigma},
         {"negative branches and endpoint limits", check_branches_and_endpoints},
         {"metadata/shape/nonfinite rejections", check_rejections},
-        {"extreme signed indices and output overflow", check_extreme_indices_and_overflow}};
+        {"batch storage/nonfinite/output-dimension rejections", check_batch_rejections},
+        {"extreme signed indices and output overflow", check_extreme_indices_and_overflow},
+        {"rectangular real/imaginary output overflow", check_rectangular_output_overflow}};
     int failures = 0;
     for (const auto &[name, test] : tests) try
         {

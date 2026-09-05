@@ -5,6 +5,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <valarray>
@@ -46,11 +47,11 @@ ThermalGWTransform make_transform()
     return ThermalGWTransform(2.7, {0.2, 0.7, 1.6}, {2, 0, -3, -1, 1}, {-2, 0}, b, f);
 }
 
-PeriodicBoundaryData make_pbc(bool gamma = false)
+PeriodicBoundaryData make_pbc(int nx, int ny, int nz)
 {
     PeriodicBoundaryData pbc;
     pbc.set_latvec({2.0, 0.5, 0.25, 0.0, 3.0, 0.75, 0.0, 0.0, 4.0});
-    pbc.set_period(gamma ? 1 : 3, gamma ? 1 : 2, gamma ? 1 : 2);
+    pbc.set_period(nx, ny, nz);
     pbc.klist_full.clear();
     for (int x = 0; x < pbc.period.x; ++x)
         for (int y = 0; y < pbc.period.y; ++y)
@@ -70,8 +71,13 @@ PeriodicBoundaryData make_pbc(bool gamma = false)
     return pbc;
 }
 
+PeriodicBoundaryData make_pbc(bool gamma = false)
+{
+    return make_pbc(gamma ? 1 : 3, gamma ? 1 : 2, gamma ? 1 : 2);
+}
+
 WcFrequency make_samples(const PeriodicBoundaryData& pbc, const ThermalGWTransform& transform,
-                         int rank, int rows, int cols, MAJOR major)
+                         int rank, int rows, int cols, MAJOR major, bool nonseparable = false)
 {
     WcFrequency wc;
     const auto frequencies = transform.get_bosonic_frequencies_ha();
@@ -81,10 +87,23 @@ WcFrequency make_samples(const PeriodicBoundaryData& pbc, const ThermalGWTransfo
             Matz matrix(rows, cols, major);
             for (int row = 0; row < rows; ++row)
                 for (int col = 0; col < cols; ++col)
+                {
                     matrix(row, col) =
                         Complex(0.4 + 0.7 * m - 0.23 * q + 0.011 * row - 0.019 * col + rank,
                                 -0.3 + 0.09 * m * m + 0.17 * q + 0.007 * row + 0.013 * col * col -
                                     0.4 * rank);
+                    if (nonseparable)
+                    {
+                        // Bounded q/mode/element cross terms retain element differences at
+                        // nonzero R; purely additive fixture terms can cancel there.
+                        const double phase = 0.013 * (q + 1) * (m + 1) * (row + 1) +
+                                             0.017 * (q + 2) * (m + 2) * (col + 1);
+                        matrix(row, col) +=
+                            Complex(0.37 * std::sin(phase),
+                                    0.29 * std::cos(0.83 * phase +
+                                                    0.011 * (q + 1) * (m + 2) * (row + col + 1)));
+                    }
+                }
             wc[frequencies[m]].emplace(pbc.klist_full[q], std::move(matrix));
         }
     return wc;
@@ -131,10 +150,16 @@ void unchanged(const WcFrequency& wc, const std::vector<MatrixSnapshot>& before)
 
 void check_sum(const WcTime& output, const WcFrequency& input, const PeriodicBoundaryData& pbc,
                const ThermalGWTransform& transform, int rows, int cols, MAJOR major,
-               bool quadrature = false)
+               bool quadrature = false, const std::vector<std::size_t>& selected_elements = {})
 {
     const auto& times = transform.get_times();
     const auto frequencies = transform.get_bosonic_frequencies_ha();
+    auto elements = selected_elements;
+    if (elements.empty())
+    {
+        elements.resize(std::size_t(rows) * cols);
+        std::iota(elements.begin(), elements.end(), std::size_t(0));
+    }
     require(output.size() == times.size(), "time keys missing (thermal Wc not implemented)");
     for (std::size_t j = 0; j < times.size(); ++j)
     {
@@ -146,51 +171,95 @@ void check_sum(const WcTime& output, const WcFrequency& input, const PeriodicBou
             require(actual.nr() == rows && actual.nc() == cols && actual.major() == major &&
                         actual.size() == std::size_t(rows) * cols,
                     "local dimensions or storage order changed");
-            for (int row = 0; row < rows; ++row)
-                for (int col = 0; col < cols; ++col)
+            if (actual.size() == 0) continue;
+            std::vector<Complex> phases;
+            for (const auto& q : pbc.klist_full)
+            {
+                const auto& a = pbc.latvec;
+                const double dot = q.x * (r.x * a.e11 + r.y * a.e21 + r.z * a.e31) +
+                                   q.y * (r.x * a.e12 + r.y * a.e22 + r.z * a.e32) +
+                                   q.z * (r.x * a.e13 + r.y * a.e23 + r.z * a.e33);
+                phases.push_back(std::exp(Complex(0.0, -2.0 * PI * dot)) /
+                                 double(pbc.klist_full.size()));
+            }
+            for (const auto element : elements)
+            {
+                require(element < actual.size(), "oracle element is outside the local matrix");
+                const int row = major == ROW ? element / cols : element % rows;
+                const int col = major == ROW ? element % cols : element / rows;
+                Complex expected = 0.0;
+                // Independent old sum: complete q sum for each caller-ordered signed mode,
+                // followed by explicit B arithmetic. No production GEMM or apply helper.
+                for (std::size_t m = 0; m < frequencies.size(); ++m)
                 {
-                    Complex expected = 0.0;
-                    // Independent scalar oracle: q outermost, then caller-ordered signed modes.
-                    for (const auto& q : pbc.klist_full)
-                    {
-                        const auto& a = pbc.latvec;
-                        const double dot = q.x * (r.x * a.e11 + r.y * a.e21 + r.z * a.e31) +
-                                           q.y * (r.x * a.e12 + r.y * a.e22 + r.z * a.e32) +
-                                           q.z * (r.x * a.e13 + r.y * a.e23 + r.z * a.e33);
-                        const auto phase = std::exp(Complex(0.0, -2.0 * PI * dot));
-                        for (std::size_t m = 0; m < frequencies.size(); ++m)
-                        {
-                            const auto b =
-                                quadrature ? std::exp(Complex(0.0, -frequencies[m] * times[j])) /
-                                                 transform.get_beta_ha_inv()
-                                           : bosonic_coefficient(j, m);
-                            expected += b * phase * input.at(frequencies[m]).at(q)(row, col) /
-                                        double(pbc.klist_full.size());
-                        }
-                    }
-                    close(actual(row, col), expected);
+                    Complex spatial = 0.0;
+                    const auto& qmap = input.at(frequencies[m]);
+                    for (std::size_t q = 0; q < pbc.klist_full.size(); ++q)
+                        spatial += phases[q] * qmap.at(pbc.klist_full[q])(row, col);
+                    const auto b = quadrature ? std::exp(Complex(0.0, -frequencies[m] * times[j])) /
+                                                    transform.get_beta_ha_inv()
+                                              : bosonic_coefficient(j, m);
+                    expected += b * spatial;
                 }
+                close(actual(row, col), expected);
+            }
         }
     }
 }
 
 void check_success(const MpiCommHandler& comm, MAJOR major, int rows = 2, int cols = 3,
-                   bool gamma = false, bool quadrature = false)
+                   const PeriodicBoundaryData& pbc = make_pbc(), bool quadrature = false,
+                   const std::vector<std::size_t>& selected_elements = {})
 {
-    const auto pbc = make_pbc(gamma);
     const auto transform =
         quadrature ? ThermalGWTransform::from_quadrature(2.7, {0.2, 0.7, 1.6}, {0.4, 0.8, 1.5},
                                                          {2, 0, -3, -1, 1}, {-2, 0})
                    : make_transform();
-    const auto wc = make_samples(pbc, transform, comm.myid, rows, cols, major);
+    const auto wc =
+        make_samples(pbc, transform, comm.myid, rows, cols, major, !selected_elements.empty());
     const auto before = snapshot(wc);
     auto output = thermal_Wc_freq_q_to_tau_R(comm, wc, pbc, transform);
-    check_sum(output, wc, pbc, transform, rows, cols, major, quadrature);
+    check_sum(output, wc, pbc, transform, rows, cols, major, quadrature, selected_elements);
+    if (!selected_elements.empty() && rows != 0 && cols != 0)
+    {
+        // Negative control: the oracle must detect broadcasting (0,0) into the final
+        // element of the final R tile, even when other selected elements are correct.
+        auto& last = output.at(transform.get_times().front()).at(pbc.Rlist.back());
+        const auto tail = selected_elements.back();
+        const auto saved = last.ptr()[tail];
+        last.ptr()[tail] = last(0, 0);
+        bool rejected = false;
+        try
+        {
+            check_sum(output, wc, pbc, transform, rows, cols, major, quadrature, {tail});
+        }
+        catch (const std::runtime_error&)
+        {
+            rejected = true;
+        }
+        last.ptr()[tail] = saved;
+        require(rejected, "boundary oracle did not detect the final R/element broadcast");
+    }
     // Output must own its storage, including the singleton-Gamma path.
     for (auto& [time, rmap] : output)
         for (auto& [r, matrix] : rmap)
             if (matrix.size()) matrix(0, 0) += Complex(99.0, -77.0);
     unchanged(wc, before);
+}
+
+void check_batch_boundaries(const MpiCommHandler& comm, MAJOR major, bool empty_owner = false)
+{
+    auto pbc = make_pbc(5, 13, 1);
+    // Permute q and R independently, crossing the 64-R tile with a one-R tail.
+    std::rotate(pbc.klist_full.begin(), pbc.klist_full.begin() + 7, pbc.klist_full.end());
+    std::rotate(pbc.Rlist.begin(), pbc.Rlist.begin() + 19, pbc.Rlist.end());
+    // With 65 q, 5 B modes and 3 times, an 8 MiB/64-R slab holds 811 entries.
+    // 17*97 = 1649 covers two complete element batches and a 27-entry tail.
+    const std::vector<std::size_t> elements{0, 1, 810, 811, 812, 1621, 1622, 1623, 1647, 1648};
+    const bool empty = empty_owner && comm.myid == comm.nprocs - 1;
+    const int rows = empty && major == ROW ? 0 : 17;
+    const int cols = empty && major == COL ? 0 : 97;
+    check_success(comm, major, rows, cols, pbc, false, elements);
 }
 
 using Mutation = std::function<void(WcFrequency&, PeriodicBoundaryData&)>;
@@ -216,15 +285,17 @@ void check_rejection(const MpiCommHandler& comm, const Mutation& mutate, bool em
     require(count == comm.nprocs, "malformed rank-local input was not rejected on EVERY rank");
 }
 
-void check_overflow(const MpiCommHandler& comm, bool spatial)
+void check_overflow(const MpiCommHandler& comm, bool spatial, bool empty_rank = false)
 {
     auto pbc = make_pbc(!spatial);
     ComplexMatrix b(1, 1), f(1, 1);
     b(0, 0) = spatial ? 1.0 : std::numeric_limits<double>::max();
     const ThermalGWTransform transform(2.0, {1.0}, {0}, {0}, b, f);
-    auto wc = make_samples(pbc, transform, comm.myid, 1, 1, ROW);
+    const bool empty = empty_rank && comm.myid == comm.nprocs - 1;
+    auto wc = make_samples(pbc, transform, comm.myid, empty ? 0 : 1, 1, ROW);
     for (auto& [frequency, qmap] : wc)
-        for (auto& [q, matrix] : qmap) matrix(0, 0) = comm.myid == comm.nprocs - 1 ? 2.0 : 0.0;
+        for (auto& [q, matrix] : qmap)
+            if (matrix.size()) matrix(0, 0) = comm.myid == comm.nprocs - 1 ? 2.0 : 0.0;
     if (spatial && comm.myid == comm.nprocs - 1)
     {
         pbc.latvec.e11 = std::numeric_limits<double>::max();
@@ -261,10 +332,19 @@ int main(int argc, char** argv)
         {"different local shapes with common storage order",
          [&] { check_success(comm, COL, 2 + comm.myid, 3); }},
         {"singleton Gamma still applies B and owns storage",
-         [&] { check_success(comm, COL, 3, 3, true); }},
+         [&] { check_success(comm, COL, 3, 3, make_pbc(true)); }},
         {"quadrature beta normalization and signed phases",
-         [&] { check_success(comm, ROW, 2, 3, false, true); }},
+         [&] { check_success(comm, ROW, 2, 3, make_pbc(), true); }},
         {"multiple bounded element batches", [&] { check_success(comm, COL, 65, 129); }},
+        {"exactly 64 R with full-element scalar oracle",
+         [&] { check_success(comm, ROW, 2, 3, make_pbc(4, 4, 4)); }},
+        {"non-Hermitian square matrices across R tiles",
+         [&] { check_success(comm, COL, 3, 3, make_pbc(5, 13, 1)); }},
+        {"65 R and multiple element tails ROW", [&] { check_batch_boundaries(comm, ROW); }},
+        {"65 R and multiple element tails COL", [&] { check_batch_boundaries(comm, COL); }},
+        {"tiled transform with zero-row owner", [&] { check_batch_boundaries(comm, ROW, true); }},
+        {"tiled transform with zero-column owner",
+         [&] { check_batch_boundaries(comm, COL, true); }},
         {"zero local rows retain keys",
          [&] { check_success(comm, ROW, comm.myid == comm.nprocs - 1 ? 0 : 2, 3); }},
         {"zero local columns retain keys",
@@ -308,7 +388,9 @@ int main(int argc, char** argv)
                      true);
          }},
         {"rank-local time arithmetic overflow", [&] { check_overflow(comm, false); }},
-        {"rank-local spatial arithmetic overflow", [&] { check_overflow(comm, true); }}};
+        {"rank-local spatial arithmetic overflow", [&] { check_overflow(comm, true); }},
+        {"empty owner still rejects spatial arithmetic overflow",
+         [&] { check_overflow(comm, true, true); }}};
 
     const double inf = std::numeric_limits<double>::infinity();
     const double nan = std::numeric_limits<double>::quiet_NaN();
