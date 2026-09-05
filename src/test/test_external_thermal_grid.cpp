@@ -141,7 +141,7 @@ void check_validation(const Fixture &fixture)
 }
 
 #ifdef LIBRPA_USE_LIBRI
-void check_full_libri_response(const Fixture &fixture)
+void check_full_libri_response(const Fixture &fixture, bool nonlocal_coefficients)
 {
     constexpr int nk = 3;
     const double two_pi = 2.0 * std::acos(-1.0);
@@ -196,6 +196,9 @@ void check_full_libri_response(const Fixture &fixture)
 
     // For an onsite pair the two atom-centered LRI contributions are each P_mu/2.
     const double vertices[2][2][2] = {{{1.0, 0.0}, {0.0, 0.0}}, {{0.0, 0.7}, {0.7, 0.2}}};
+    const double neighbor_coefficients[2][2][2][2] = {
+        {{{0.08, 0.03}, {-0.02, 0.05}}, {{-0.03, 0.07}, {0.04, 0.02}}},
+        {{{-0.02, 0.06}, {0.01, 0.04}}, {{0.05, -0.03}, {0.02, -0.01}}}};
     Cs_LRI cs;
     cs.use_libri = true;
     if (ds->comm_h.is_root())
@@ -206,6 +209,18 @@ void check_full_libri_response(const Fixture &fixture)
                 for (int j = 0; j < 2; ++j)
                     (*coefficients)[(mu * 2 + i) * 2 + j] = 0.5 * vertices[mu][i][j];
         cs.data_libri[0][{0, {0, 0, 0}}] = RI::Tensor<double>({2, 2, 2}, coefficients);
+        if (nonlocal_coefficients)
+            for (int side = 0; side < 2; ++side)
+            {
+                auto neighbor = std::make_shared<std::valarray<double>>(8);
+                for (int mu = 0; mu < 2; ++mu)
+                    for (int i = 0; i < 2; ++i)
+                        for (int j = 0; j < 2; ++j)
+                            (*neighbor)[(mu * 2 + i) * 2 + j] =
+                                neighbor_coefficients[side][mu][i][j];
+                cs.data_libri[0][{0, {side == 0 ? 1 : -1, 0, 0}}] =
+                    RI::Tensor<double>({2, 2, 2}, neighbor);
+            }
     }
     Chi0 chi(mf, ds->basis_wfc, ds->basis_aux, ds->pbc, ds->symmetry_context, grid,
              ds->scfk_blacs_ctxt, ds->desc_wfc_kb_full, false, false);
@@ -233,8 +248,22 @@ void check_full_libri_response(const Fixture &fixture)
                         for (int mu = 0; mu < 2; ++mu)
                             for (int i = 0; i < 2; ++i)
                                 for (int j = 0; j < 2; ++j)
-                                    vertex[mu] +=
-                                        std::conj(un(n, i)) * vertices[mu][i][j] * um(m, j);
+                                {
+                                    std::complex<double> pair_vertex = vertices[mu][i][j];
+                                    if (nonlocal_coefficients)
+                                        for (int side = 0; side < 2; ++side)
+                                        {
+                                            const int r = side == 0 ? 1 : -1;
+                                            // The two LRI centers contribute C_ij(R)e^(ik'R)
+                                            // and C_ji(R)e^(-ikR), respectively.
+                                            pair_vertex +=
+                                                neighbor_coefficients[side][mu][i][j] *
+                                                    std::polar(1.0, two_pi * ikq * r / nk) +
+                                                neighbor_coefficients[side][mu][j][i] *
+                                                    std::polar(1.0, -two_pi * ik * r / nk);
+                                        }
+                                    vertex[mu] += std::conj(un(n, i)) * pair_vertex * um(m, j);
+                                }
                         const std::complex<double> denominator(en - em, frequency);
                         const std::complex<double> bubble =
                             std::abs(denominator) < 1e-14 ? fermi_dirac_derivative(en, kbt)
@@ -260,7 +289,8 @@ void check_full_libri_response(const Fixture &fixture)
     ds->comm_h.allreduce(MPI_IN_PLACE, &checked, 1, MPI_SUM);
     if (ds->comm_h.is_root())
         std::cout << "Sparse LibRI/Adler-Wiser max error: " << max_error
-                  << "; matrix elements checked: " << checked << std::endl;
+                  << "; matrix elements checked: " << checked
+                  << "; nonlocal coefficients: " << nonlocal_coefficients << std::endl;
     if (checked < 16 * nk * 4 || max_error > 5e-9)
         throw std::runtime_error("sparse full LibRI response differs from Adler-Wiser");
 
@@ -288,7 +318,8 @@ int main(int argc, char **argv)
     check_green_pairs(fixture);
     check_validation(fixture);
 #ifdef LIBRPA_USE_LIBRI
-    check_full_libri_response(fixture);
+    check_full_libri_response(fixture, false);
+    check_full_libri_response(fixture, true);
 #endif
     MPI_Finalize();
 }
