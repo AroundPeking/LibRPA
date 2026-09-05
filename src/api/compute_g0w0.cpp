@@ -675,6 +675,14 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
 
     auto pds = librpa_int::api::get_dataset_instance(h);
     const auto &opts = *p_opts;
+    if (opts.tfgrids_type == LIBRPA_TFGRID_FD_MATSUBARA ||
+        pds->mf.get_fermi_dirac_reference().enabled)
+    {
+        throw LIBRPA_RUNTIME_ERROR(
+            "Finite-temperature GW is not yet supported: the bosonic Wc "
+            "frequency-to-time and fermionic Sigma_c time-to-frequency transforms "
+            "are not implemented. Finite-temperature chi0 and RPA remain available.");
+    }
     const bool debug = global::should_output(LIBRPA_VERBOSE_DEBUG);
     pds->is_band_calc_done = false;
     initialize_ds_global_ddla(*pds, opts);
