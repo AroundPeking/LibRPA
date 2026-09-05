@@ -1244,6 +1244,190 @@ static void build_gf_libri_kblacs_para(
 }
 #endif
 
+ThermalSigcRspace G0W0::build_thermal_spacetime(
+    const AtomicBasis &atbasis_abf, const Cs_LRI &lri_cs,
+    const std::map<double, std::map<Vector3_Order<double>, Matz>> &wc_freq_q,
+    const ArrayDesc &ad_wc, const ThermalGWTransform &transform) const
+{
+#ifndef LIBRPA_USE_LIBRI
+    throw std::runtime_error("thermal spacetime requires LibRI");
+#else
+    // Keep all preflight failures collective before entering LibRI/BLACS exchanges.
+    const auto collective_check = [&](const auto &check)
+    {
+        std::string message;
+        try
+        {
+            check();
+        }
+        catch (const std::exception &error)
+        {
+            message = error.what();
+        }
+        int failed = !message.empty();
+        MPI_Allreduce(MPI_IN_PLACE, &failed, 1, MPI_INT, MPI_MAX, comm_h.comm);
+        if (failed)
+            throw std::runtime_error("thermal spacetime: " +
+                                     (message.empty() ? "invalid input on another rank" : message));
+    };
+    collective_check(
+        [&]
+        {
+            const auto &fd = mf.get_fermi_dirac_reference();
+            if (!fd.enabled || !std::isfinite(transform.get_beta_ha_inv() * fd.kbt_ha) ||
+                std::abs(transform.get_beta_ha_inv() * fd.kbt_ha - 1) > 1e-10)
+                throw std::invalid_argument("FD beta mismatch");
+            validate_fermi_dirac_chemical_potential(fd, mf.get_efermi());
+            if (use_symmetry_context || mf.get_n_spinor() != 1 || is_eigvec_k_distributed_)
+                throw std::invalid_argument(
+                    "reference requires scalar spin, replicated SCF and no symmetry");
+            if (pbc.klist != pbc.klist_full || pbc.kfrac_list != pbc.kfrac_list_full ||
+                mf.get_n_kpoints() != pbc.get_n_cells_bvk() ||
+                pbc.kfrac_list.size() != static_cast<std::size_t>(mf.get_n_kpoints()))
+                throw std::invalid_argument("reference requires the full SCF k grid");
+            if (!ad_wc.initialized() || !ad_wc.is_row_consec() || !ad_wc.is_col_consec())
+                throw std::invalid_argument("Wc requires an initialized consecutive descriptor");
+            int relation = MPI_UNEQUAL;
+            MPI_Comm_compare(ad_wc.comm(), comm_h.comm, &relation);
+            if ((relation != MPI_IDENT && relation != MPI_CONGRUENT) ||
+                ad_wc.m() != atbasis_abf.nb_total || ad_wc.n() != atbasis_abf.nb_total ||
+                atbasis_abf.n_atoms != atbasis_wfc.n_atoms ||
+                atbasis_wfc.nb_total != mf.get_n_aos())
+                throw std::invalid_argument("Wc descriptor/basis mismatch");
+            for (double threshold : {libri_threshold_C, libri_threshold_Wc, libri_threshold_G})
+                if (!std::isfinite(threshold) || threshold < 0)
+                    throw std::invalid_argument("invalid LibRI threshold");
+            for (const auto &[freq, qmap] : wc_freq_q)
+                for (const auto &[q, block] : qmap)
+                    if (block.nr() != ad_wc.m_loc() || block.nc() != ad_wc.n_loc())
+                        throw std::invalid_argument("local Wc shape differs from descriptor");
+            for (int spin = 0; spin < mf.get_n_spins(); ++spin)
+            {
+                const auto &energies = mf.get_eigenvals().at(spin);
+                if (energies.nr != mf.get_n_kpoints() || energies.nc != mf.get_n_bands() ||
+                    energies.size != std::size_t(energies.nr) * energies.nc || !energies.c)
+                    throw std::invalid_argument("invalid SCF energy storage");
+                for (int k = 0; k < mf.get_n_kpoints(); ++k)
+                {
+                    const auto &wfc = mf.get_eigenvectors().at(spin).at(0).at(k);
+                    if (wfc.nr != mf.get_n_bands() || wfc.nc != mf.get_n_aos() ||
+                        std::size_t(wfc.size) != std::size_t(wfc.nr) * wfc.nc || !wfc.c)
+                        throw std::invalid_argument("invalid replicated SCF storage");
+                    for (int i = 0; i < wfc.size; ++i)
+                        if (!std::isfinite(wfc.c[i].real()) || !std::isfinite(wfc.c[i].imag()))
+                            throw std::invalid_argument("nonfinite SCF eigenvector");
+                    for (int band = 0; band < mf.get_n_bands(); ++band)
+                        if (!std::isfinite(mf.get_eigenvals().at(spin)(k, band)))
+                            throw std::invalid_argument("nonfinite SCF energy");
+                }
+            }
+            for (const auto &[i, jrmap] : lri_cs.data_libri)
+                for (const auto &[jr, c] : jrmap)
+                {
+                    if (i < 0 || jr.first < 0 || i >= atbasis_wfc.n_atoms ||
+                        jr.first >= atbasis_wfc.n_atoms || c.shape.size() != 3 ||
+                        c.shape[0] != atbasis_abf.get_atom_nb(i) ||
+                        c.shape[1] != atbasis_wfc.get_atom_nb(i) ||
+                        c.shape[2] != atbasis_wfc.get_atom_nb(jr.first) || !c.data ||
+                        c.data->size() != c.get_shape_all())
+                        throw std::invalid_argument("invalid LRI coefficient shape");
+                    for (std::size_t n = 0; n < c.get_shape_all(); ++n)
+                        if (!std::isfinite(c.ptr()[n]))
+                            throw std::invalid_argument("nonfinite LRI coefficient");
+                }
+        });
+
+    auto wc_tau_r = thermal_Wc_freq_q_to_tau_R(comm_h, wc_freq_q, pbc, transform);
+    const auto distribution =
+        get_balanced_ap_distribution_for_consec_descriptor(atbasis_abf, atbasis_abf, ad_wc);
+    const auto major = wc_tau_r.begin()->second.begin()->second.major();
+    IndexScheduler sched_wc;
+    sched_wc.init(distribution, atbasis_abf, atbasis_abf, ad_wc, major == MAJOR::ROW);
+    using TensorMap =
+        std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<cplxdb>>>;
+    RI::GW<int, int, 3, cplxdb> gw_libri;
+    std::map<int, std::array<double, 3>> atoms_pos;
+    for (int i = 0; i < atbasis_wfc.n_atoms; ++i) atoms_pos[i] = {0, 0, 0};
+    libri_set_parallel(gw_libri, comm_h.comm, atoms_pos, pbc.latvec_array, pbc.period_array,
+                       atbasis_wfc.get_atom_nb_map<int>());
+    gw_libri.set_symmetry(false, {});
+    TensorMap cs;
+    for (const auto &[i, jrmap] : lri_cs.data_libri)
+        for (const auto &[jr, c] : jrmap) cs[i][jr] = RI::Global_Func::convert<cplxdb>(c);
+    gw_libri.set_Cs(cs, libri_threshold_C);
+    const auto pairs = generate_atom_pair_from_nat(atbasis_wfc.n_atoms, true);
+    const auto ijrs =
+        dispatch_vector_prod(pairs, pbc.Rlist, comm_h.myid, comm_h.nprocs, true, false);
+    const auto f = transform.copy_fermionic_time_to_frequency();
+    const auto frequencies = transform.get_fermionic_frequencies_ha();
+    ThermalSigcRspace result{transform.get_beta_ha_inv(), transform.get_fermionic_indices(), {}};
+    for (std::size_t itau = 0; itau < transform.get_times().size(); ++itau)
+    {
+        const double tau = transform.get_times()[itau];
+        TensorMap ws;
+        for (auto &[r, mat] : wc_tau_r.at(tau))
+        {
+            auto blocks = get_ap_map_from_blacs_dist_scheduler(mat, sched_wc, atbasis_abf,
+                                                               atbasis_abf, ad_wc);
+            for (auto &[ij, block] : blocks)
+            {
+                if (block.is_col_major()) block.swap_to_row_major();
+                ws[as_int(ij.first)][{as_int(ij.second), {r.x, r.y, r.z}}] = RI::Tensor<cplxdb>(
+                    {atbasis_abf.get_atom_nb(ij.first), atbasis_abf.get_atom_nb(ij.second)},
+                    block.sptr());
+            }
+        }
+        wc_tau_r.erase(tau);
+        gw_libri.set_Ws(ws, libri_threshold_Wc);
+        for (int spin = 0; spin < mf.get_n_spins(); ++spin)
+        {
+            std::map<double, TensorMap> gs;
+            collective_check(
+                [&]
+                {
+                    build_gf_libri_kserial(mf, atbasis_wfc, spin, 0, 0, pbc, symmetry_context,
+                                           false, pbc.kfrac_list, {tau}, ijrs, gs);
+                });
+            gw_libri.set_Gs(gs.at(tau), libri_threshold_G);
+            gw_libri.cal_Sigmas();
+            gw_libri.free_Gs();
+            // G_lib already contains the GW sign. F contains the full integral weight.
+            collective_check(
+                [&]
+                {
+                    for (const auto &[i, jrmap] : gw_libri.Sigmas)
+                        for (const auto &[jr, sigma] : jrmap)
+                        {
+                            const int j = jr.first;
+                            const Vector3_Order<int> r{jr.second[0], jr.second[1], jr.second[2]};
+                            const auto ni = atbasis_wfc.get_atom_nb(i),
+                                       nj = atbasis_wfc.get_atom_nb(j);
+                            for (std::size_t n = 0; n < frequencies.size(); ++n)
+                            {
+                                auto &rmap = result.blocks[spin][frequencies[n]][{i, j}];
+                                auto entry = rmap.find(r);
+                                if (entry == rmap.end())
+                                    entry = rmap.emplace(r, Matz(ni, nj, MAJOR::ROW)).first;
+                                auto &out = entry->second;
+                                for (std::size_t a = 0; a < ni; ++a)
+                                    for (std::size_t b = 0; b < nj; ++b)
+                                    {
+                                        out(a, b) += f(n, itau) * sigma(a, b);
+                                        if (!std::isfinite(out(a, b).real()) ||
+                                            !std::isfinite(out(a, b).imag()))
+                                            throw std::overflow_error("nonfinite thermal Sigma");
+                                    }
+                            }
+                        }
+                });
+            gw_libri.Sigmas.clear();
+        }
+        gw_libri.free_Ws();
+    }
+    return result;
+#endif
+}
+
 void G0W0::build_spacetime(
     const LibrpaParallelRouting parallel_routing, const AtomicBasis &atbasis_abf,
     const Cs_LRI &LRI_Cs, std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,

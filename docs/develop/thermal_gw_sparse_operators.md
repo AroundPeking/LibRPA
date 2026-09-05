@@ -3,6 +3,39 @@
 This is an internal numerical-validation and input-integration stage. The public
 finite-temperature GW guard remains enabled. The exporter can now be loaded by
 the experimental `fn_thermal_gw_grid` driver input, as independent metadata only.
+
+## Internal Spacetime Data Flow
+
+`G0W0::build_thermal_spacetime` now joins the independent operators to the
+actual distributed W buffers, AO Green builder, and complex LibRI GW contraction.
+It accepts explicit complete signed-frequency/full-q Wc matrices. The internal
+`thermal_Wc_freq_q_to_tau_R` routine preserves all ordered complex matrix entries,
+uses `exp(-i*2*pi*q*(R*latvec))/Nq`, and applies rectangular B in the supplied
+signed-label order. The coefficients already include inverse-temperature
+normalization; neither a zero-mode half weight nor a conjugate completion is used.
+
+IndexScheduler collects full auxiliary-basis atom-pair W blocks from the global
+consecutive BLACS descriptor. LibRI receives complex W and only positive-time
+G on the independent GW times. The current `G_lib = -G_standard` convention
+gives `Sigma_c = G_lib*Wc`; F is then accumulated directly without an extra
+minus, one-half, or legacy sine/cosine transform. An uninitialized response
+TFGrids object is valid for this internal calculation.
+
+The returned `ThermalSigcRspace` owns beta, ordered signed fermionic labels, and
+rank-local AO/R Sigma matrices. Missing local blocks represent zero contribution;
+the ordinary distributed sum is needed for global matrices. It deliberately does
+not populate the legacy GW caches, restart files, KS rotation, or analytic
+continuation. The public thermal GW guard remains unchanged.
+
+This initial CPU reference requires scalar spin, replicated full-k SCF data,
+no symmetry restoration, uncompressed matching LRI data and a global W descriptor.
+Physical metadata must be identical across ranks. It validates local inputs
+collectively, including empty matrix owners; B batches skip zero local columns
+without skipping collectives. Its bounded temporary buffers do not bound the
+complete input/output W storage. Spatial summation is explicit, not an FFT or
+a production-performance claim. General distributed SCF, shrink, q-star restore,
+the actual signed material screening pipeline, metallic Gamma replacement,
+restart/KS/continuation and spectral-bound convergence still need acceptance.
 Do not interpret an operator test as a Na quasiparticle or bandwidth result.
 
 ## Independent Grids

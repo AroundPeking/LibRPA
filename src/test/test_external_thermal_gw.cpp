@@ -20,6 +20,9 @@
 #include <map>
 #include <utility>
 
+#include "../core/gw.h"
+#include "../io/global_io.h"
+#include "../mpi/global_mpi.h"
 #include "RI/physics/GW.h"
 #endif
 
@@ -489,6 +492,7 @@ void check_libri_contraction(const Fixture& fixture, const ThermalGWTransform& t
             }
     }
     const auto sigma = transform.apply_fermionic_time_to_frequency(sigma_tau);
+    ComplexMatrix sigma_expected(sigma.nr, sigma.nc);
     for (int row = 0; row < sigma.nr; ++row)
         for (int i = 0; i < 2; ++i)
             for (int j = 0; j < 2; ++j)
@@ -506,6 +510,7 @@ void check_libri_contraction(const Fixture& fixture, const ThermalGWTransform& t
                                         (cs[nu][j][l] + cs[nu][l][j]) * u[k][band] *
                                         std::conj(u[l][band]) * auxiliary[mu][nu] *
                                         sigma_closed_form(model, omega, energies[band], beta);
+                sigma_expected(row, 2 * i + j) = expected;
                 frequency_error.add(sigma(row, 2 * i + j), expected, wmax);
             }
     std::cout << "LibRI::GW::cal_Sigmas: one atom, 2 AO, 2 auxiliary, " << w_tau.nr
@@ -514,6 +519,82 @@ void check_libri_contraction(const Fixture& fixture, const ThermalGWTransform& t
                             "LibRI vs explicit Cs*G*W*Cs");
     time_error.check(MODEL_TOLERANCE, "LibRI Sigma(tau) vs exact time");
     frequency_error.check(MODEL_TOLERANCE, "B -> LibRI cal_Sigmas -> F vs closed-form Sigma");
+
+    int rank = 0, size = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    librpa_int::PeriodicBoundaryData pbc;
+    pbc.set_latvec({1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0});
+    pbc.set_kgrids_kvec(1, 1, 1, {0.0, 0.0, 0.0});
+    const librpa_int::AtomicBasis ao(std::vector<std::size_t>{2});
+    const librpa_int::AtomicBasis abf(std::vector<std::size_t>{2});
+    librpa_int::MeanField mf(1, 1, 2, 2);
+    const double chemical_potential = 0.15 * fixture.g_wmax;
+    const auto fd =
+        librpa_int::make_fermi_dirac_reference(1.0 / beta, chemical_potential, 2.0, 1e-12);
+    mf.get_efermi() = chemical_potential;
+    mf.set_fermi_dirac_reference(fd);
+    auto& eigenvectors = mf.get_eigenvectors()[0][0][0];
+    eigenvectors.create(2, 2);
+    for (int band = 0; band < 2; ++band)
+    {
+        const double energy = energies[band] + chemical_potential;
+        mf.get_eigenvals()[0](0, band) = energy;
+        mf.get_weight()[0](0, band) = librpa_int::normalized_fermi_dirac_band_weight(energy, fd, 1);
+        // MeanField stores (band, AO): transpose u without conjugating it.
+        for (int i = 0; i < 2; ++i) eigenvectors(band, i) = u[i][band];
+    }
+    librpa_int::KPointBlacsParallelContext context({1, size}, MPI_COMM_WORLD, 1);
+    const auto desc = context.create_array_desc(2, 2);
+    const librpa_int::TFGrids response_grid;  // No legacy time/frequency grid is initialized.
+    const librpa_int::SymmetryContext symmetry;
+    const librpa_int::G0W0 production_gw(mf, ao, pbc, symmetry, response_grid, context, context,
+                                         desc, false, false);
+    librpa_int::Cs_LRI lri_cs;
+    lri_cs.use_libri = true;
+    if (rank == 0)
+    {
+        RI::Tensor<double> tensor({2, 2, 2});
+        for (int mu = 0; mu < 2; ++mu)
+            for (int i = 0; i < 2; ++i)
+                for (int k = 0; k < 2; ++k) tensor(mu, i, k) = cs[mu][i][k];
+        lri_cs.data_libri[0][{0, origin}] = std::move(tensor);
+    }
+    std::map<double, std::map<librpa_int::Vector3_Order<double>, librpa_int::Matz>> wc;
+    const auto bosonic_frequencies = transform.get_bosonic_frequencies_ha();
+    for (int row = 0; row < w_samples.nr; ++row)
+    {
+        librpa_int::Matz block(desc.m_loc(), desc.n_loc(), librpa_int::MAJOR::ROW);
+        for (int i = 0; i < desc.m_loc(); ++i)
+            for (int j = 0; j < desc.n_loc(); ++j)
+                block(i, j) = w_samples(row, 2 * desc.indx_l2g_r(i) + desc.indx_l2g_c(j));
+        wc[bosonic_frequencies[row]][pbc.klist_full.at(0)] = std::move(block);
+    }
+    const auto result = production_gw.build_thermal_spacetime(abf, lri_cs, wc, desc, transform);
+    require(
+        result.beta_ha_inv == beta && result.fermionic_indices == transform.get_fermionic_indices(),
+        "internal G0W0 changed beta or signed fermionic label order");
+    require(!production_gw.is_rspace_built() && production_gw.sigc_kspace_source().empty() &&
+                production_gw.sigc_is_ik_f_KS.empty() && production_gw.sigc_diag_is_ik_f_KS.empty(),
+            "internal thermal G0W0 changed legacy GW state");
+    require(
+        result.blocks.size() == 1 && result.blocks.at(0).size() == result.fermionic_indices.size(),
+        "internal G0W0 returned unexpected spin/frequency blocks");
+    ErrorMetric production_frequency_error;
+    const auto fermionic_frequencies = transform.get_fermionic_frequencies_ha();
+    for (int row = 0; row < sigma_expected.nr; ++row)
+    {
+        const auto& pairs = result.blocks.at(0).at(fermionic_frequencies[row]);
+        require(pairs.size() == 1 && pairs.at({0, 0}).size() == 1,
+                "one-atom internal G0W0 returned unexpected AO pair/R blocks");
+        const auto& block = pairs.at({0, 0}).at({0, 0, 0});
+        require(block.nr() == 2 && block.nc() == 2, "internal G0W0 Sigma must be 2 AO by 2 AO");
+        for (int i = 0; i < 2; ++i)
+            for (int j = 0; j < 2; ++j)
+                production_frequency_error.add(block(i, j), sigma_expected(row, 2 * i + j), wmax);
+    }
+    production_frequency_error.check(
+        MODEL_TOLERANCE, "internal G0W0 W(q,i*nu) -> B -> Green/LibRI -> F vs closed-form Sigma");
 }
 #endif
 
@@ -543,12 +624,15 @@ ThermalGWTransform reordered_transform(const Fixture& fixture)
 int main(int argc, char** argv)
 {
 #ifdef LIBRPA_USE_LIBRI
-    MPI_Init(&argc, &argv);
+    int provided = 0;
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
 #endif
     int status = 0;
     try
     {
 #ifdef LIBRPA_USE_LIBRI
+        librpa_int::global::init_global_mpi(MPI_COMM_WORLD);
+        librpa_int::global::init_global_io();
         int ranks = 0;
         MPI_Comm_size(MPI_COMM_WORLD, &ranks);
         require(ranks == 1, "bounded external GW integration test requires one MPI rank");
@@ -581,6 +665,8 @@ int main(int argc, char** argv)
         status = 1;
     }
 #ifdef LIBRPA_USE_LIBRI
+    librpa_int::global::finalize_global_io();
+    librpa_int::global::finalize_global_mpi();
     MPI_Finalize();
 #endif
     return status;

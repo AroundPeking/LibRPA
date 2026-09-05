@@ -101,6 +101,12 @@ target_compile_options(test_sternheimer_rpa PRIVATE -UNDEBUG)
 target_compile_options(test_sternheimer_symmetry PRIVATE -UNDEBUG)
 target_compile_options(test_symmetry_context PRIVATE -UNDEBUG)
 
+# Internal thermal full-q Wc spacetime transform.
+config_test(test_thermal_wc_spacetime 1)
+add_test(NAME test_thermal_wc_spacetime_mpi2
+  COMMAND mpirun -np 2 $<TARGET_FILE:test_thermal_wc_spacetime>)
+set_tests_properties(test_thermal_wc_spacetime test_thermal_wc_spacetime_mpi2 PROPERTIES
+  TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1;MKL_NUM_THREADS=1")
 # add 4-process tests
 foreach(target
   test_atomic_basis_blacs
@@ -120,3 +126,11 @@ if(LIBRPA_USE_LIBRI AND _LIBRPA_USE_BUNDLED_LIBCOMM)
 endif()
 
 # TODO(minye): make use of GTest
+
+if(LIBRPA_USE_LIBRI)
+  config_test(test_thermal_gw_spacetime 1)
+  add_test(NAME test_thermal_gw_spacetime_mpi2
+    COMMAND mpirun -np 2 $<TARGET_FILE:test_thermal_gw_spacetime>)
+  set_tests_properties(test_thermal_gw_spacetime test_thermal_gw_spacetime_mpi2 PROPERTIES
+    ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1;MKL_NUM_THREADS=1")
+endif()

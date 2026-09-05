@@ -14,6 +14,7 @@
 #include "qpoint_view.h"
 #include "ri.h"
 #include "symmetry_context.h"
+#include "thermal_gw_transform.h"
 
 namespace librpa_int
 {
@@ -139,6 +140,15 @@ void unfold_Wc_freq_q_blacs(std::map<double, std::map<Vector3_Order<double>, Mat
                             const BlacsCtxtHandler &blacs_h,
                             const librpa_int::ArrayDesc &desc_small,
                             const librpa_int::ArrayDesc &desc_full);
+
+//! Internal thermal transform of FULL ordered complex local matrices. Every rank supplies every
+//! signed physical frequency from transform and every pbc.klist_full q, including zero-size ranks.
+//! Applies exp(-i*2*pi*q*(R*latvec))/Nq then B (already normalized); no symmetry completion or
+//! real projection. Preserves inputs and local shape/storage order; failures are collective.
+std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
+    const MpiCommHandler &comm_h,
+    const std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
+    const PeriodicBoundaryData &pbc, const ThermalGWTransform &transform);
 
 //! Fourier transform screened Coulomb in q-space to R-space, but still in frequency domain
 std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(

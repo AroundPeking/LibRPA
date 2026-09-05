@@ -14,10 +14,24 @@
 #include "qpoint_view.h"
 #include "ri.h"
 #include "symmetry_context.h"
+#include "thermal_gw_transform.h"
 #include "timefreq.h"
 
 namespace librpa_int
 {
+
+/** Internal thermal result, separate from legacy restart/KS frequency metadata.
+ * Blocks are additive rank-local partial sums of ordered AO matrices, indexed
+ * [spin][frequency][pair][R]. The same block may have contributions on several
+ * ranks; global matrices require MPI_SUM, not selection of one owner.
+ * This scalar-spin reference path does not yet produce QPEs or band tables.
+ */
+struct ThermalSigcRspace
+{
+    double beta_ha_inv;
+    std::vector<int> fermionic_indices;
+    std::map<int, std::map<double, ap_p_map<std::map<Vector3_Order<int>, Matz>>>> blocks;
+};
 
 bool disable_sigc_rspace_symmetry_diagnostic_requested(const char *value);
 bool should_use_sigc_rspace_symmetry(bool symmetry_available, bool band_space_complete,
@@ -134,6 +148,16 @@ public:
 
     //! Read real-space imaginary-frequency correlation self-energy matrices from disk
     void read_sigc(const std::string &input_dir);
+
+    /** Internal full-q/signed-frequency path; leaves legacy GW state untouched.
+     * Requires scalar spin, replicated full SCF k grid, no symmetry/shrink and
+     * a global BLACS Wc descriptor. Inputs are preserved. No head/wing generation,
+     * continuation or restart. Identical physical metadata is required on all ranks.
+     */
+    ThermalSigcRspace build_thermal_spacetime(
+        const AtomicBasis &atbasis_abf, const Cs_LRI &lri_cs,
+        const std::map<double, std::map<Vector3_Order<double>, Matz>> &wc_freq_q,
+        const ArrayDesc &ad_wc, const ThermalGWTransform &transform) const;
 
     //! Build the real-space correlation self-energy matrix on imaginary frequencies with space-time
     //! method using LibRI
