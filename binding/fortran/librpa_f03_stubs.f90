@@ -318,6 +318,8 @@ module librpa_f03
          procedure :: set_external_thermal_time_grid => librpa_set_external_thermal_time_grid
          procedure :: set_external_thermal_rpa_grid => librpa_set_external_thermal_rpa_grid
          procedure :: clear_external_thermal_time_grid => librpa_clear_external_thermal_time_grid
+         procedure :: set_external_thermal_gw_grid => librpa_set_external_thermal_gw_grid
+         procedure :: clear_external_thermal_gw_grid => librpa_clear_external_thermal_gw_grid
          procedure :: set_wfc => librpa_set_wfc
          procedure :: set_wfc_spinor => librpa_set_wfc_spinor
          procedure :: set_ao_basis_wfc => librpa_set_ao_basis_wfc
@@ -597,6 +599,30 @@ contains
       class(LibrpaHandler), intent(inout) :: this
       call error_on_call("librpa_clear_external_thermal_time_grid")
    end subroutine librpa_clear_external_thermal_time_grid
+
+   !> @brief Copy independent complex GW operators (does not enable thermal GW).
+   !> Fortran B shape is (nboson,ntau); F shape is (ntau,nfermion).
+   !> These match C row-major B[ntau][nboson] and F[nfermion][ntau].
+   !> Signed integer labels m and n are passed unchanged, NOT shifted by one:
+   !> nu=2*pi*m/beta, omega=(2*n+1)*pi/beta. See the C API for validation.
+   subroutine librpa_set_external_thermal_gw_grid( &
+         this, beta_ha_inv, g_wmax_ha, w_wmax_ha, sigma_wmax_ha, tolerance, &
+         times, bosonic_indices, fermionic_indices, b, f)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      real(dp), intent(in) :: beta_ha_inv, g_wmax_ha, w_wmax_ha, sigma_wmax_ha, tolerance
+      real(dp), intent(in) :: times(:)
+      integer, intent(in) :: bosonic_indices(:), fermionic_indices(:)
+      complex(dp), intent(in) :: b(:,:), f(:,:)
+      call error_on_call("librpa_set_external_thermal_gw_grid")
+   end subroutine librpa_set_external_thermal_gw_grid
+
+   !> @brief Clear GW operators, retaining the response grid and FD reference.
+   subroutine librpa_clear_external_thermal_gw_grid(this)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      call error_on_call("librpa_clear_external_thermal_gw_grid")
+   end subroutine librpa_clear_external_thermal_gw_grid
 
    !> @brief Set the wave-function expansion coefficients
    !>

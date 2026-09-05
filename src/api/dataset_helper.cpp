@@ -151,11 +151,44 @@ void validate_external_thermal_time_grid_reference(
             "external thermal grid wmax does not cover the SCF transition range");
 }
 
+void validate_external_thermal_gw_grid_reference(const Dataset &ds,
+                                                 const ExternalThermalGWGrid &grid)
+{
+    const auto &reference = ds.mf.get_fermi_dirac_reference();
+    if (!ds.is_scf_eigocc_set || !reference.enabled)
+        throw LIBRPA_RUNTIME_ERROR(
+            "external thermal GW grid requires SCF eigenvalues and an FD reference");
+    const double beta_kbt = grid.transform.get_beta_ha_inv() * reference.kbt_ha;
+    if (!std::isfinite(beta_kbt) || std::abs(beta_kbt - 1.0) > 1e-10)
+        throw LIBRPA_RUNTIME_ERROR("external thermal GW grid beta differs from the FD reference");
+    validate_fermi_dirac_chemical_potential(reference, ds.mf.get_efermi());
+    for (const auto &energies : ds.mf.get_eigenvals())
+    {
+        if (energies.size <= 0)
+            throw LIBRPA_RUNTIME_ERROR("external thermal GW grid requires nonempty SCF energies");
+        for (std::size_t i = 0; i < energies.size; ++i)
+        {
+            const double xi = energies.c[i] - reference.chemical_potential_ha;
+            if (!std::isfinite(energies.c[i]) || !std::isfinite(xi))
+                throw LIBRPA_RUNTIME_ERROR("external thermal GW grid found nonfinite SCF energies");
+            if (std::abs(xi) > grid.g_wmax_ha * (1.0 + 64 * std::numeric_limits<double>::epsilon()))
+                throw LIBRPA_RUNTIME_ERROR(
+                    "external thermal GW grid g_wmax does not cover abs(epsilon-mu)");
+        }
+    }
+}
+
 void initialize_ds_tfgrids(Dataset &ds, const LibrpaOptions &opts)
 {
     global::profiler.start("initialize_ds_tfgrids");
     if (opts.nfreq <= 0)
         throw LIBRPA_RUNTIME_ERROR("number of frequency points must be positive");
+    if (ds.external_thermal_gw_grid)
+    {
+        if (opts.tfgrids_type != LIBRPA_TFGRID_FD_MATSUBARA)
+            throw LIBRPA_RUNTIME_ERROR("external thermal GW grid requires tfgrids_type = fd_matsubara");
+        validate_external_thermal_gw_grid_reference(ds, *ds.external_thermal_gw_grid);
+    }
     if (ds.external_thermal_time_grid)
     {
         const auto &grid = *ds.external_thermal_time_grid;

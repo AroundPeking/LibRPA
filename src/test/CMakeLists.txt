@@ -52,6 +52,7 @@ foreach(target
     test_external_thermal_api
     test_external_thermal_rpa_grid
     test_external_thermal_rpa_api
+    test_external_thermal_gw_api
     test_thermal_gw_transform
     test_thermal_gw_screening
     test_thermal_occupation
@@ -91,6 +92,7 @@ target_compile_options(test_external_thermal_gw PRIVATE -UNDEBUG)
 set_tests_properties(test_external_thermal_gw PROPERTIES
   ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1;MKL_NUM_THREADS=1")
 add_test(NAME test_rpa_logdet_mpi2 COMMAND mpirun -np 2 $<TARGET_FILE:test_rpa_logdet>)
+add_test(NAME test_external_thermal_gw_api_mpi2 COMMAND mpirun -np 2 $<TARGET_FILE:test_external_thermal_gw_api>)
 add_test(NAME test_rpa_logdet_mpi4 COMMAND mpirun -np 4 $<TARGET_FILE:test_rpa_logdet>)
 target_sources(test_strict_2d_coulomb_head_metadata
   PRIVATE ../../driver/reader_2d_coulomb_head.cpp)

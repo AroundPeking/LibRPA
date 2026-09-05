@@ -16,6 +16,7 @@
 #include "../core/pbc.h"
 #include "../core/ri.h"
 #include "../core/timefreq.h"
+#include "../core/thermal_gw_transform.h"
 #include "../math/matrix_m.h"
 #include "../math/symmetry.h"
 #include "../mpi/base_blacs.h"
@@ -35,6 +36,15 @@ struct ExternalThermalTimeGrid
     std::vector<int> frequency_indices;
     std::vector<double> correlation_weights;
     ComplexMatrix transform;
+};
+
+struct ExternalThermalGWGrid
+{
+    double g_wmax_ha;
+    double w_wmax_ha;
+    double sigma_wmax_ha;
+    double tolerance;
+    ThermalGWTransform transform;
 };
 
 /*!
@@ -124,6 +134,8 @@ public:
     TFGrids tfg;
     //! Optional external input retained across calculation-grid initialization.
     std::unique_ptr<ExternalThermalTimeGrid> external_thermal_time_grid;
+    //! Independent owned GW input; never changes the response/RPA grid.
+    std::unique_ptr<ExternalThermalGWGrid> external_thermal_gw_grid;
     //! Real-space RI coefficient tensors (local RI)
     Cs_LRI cs_data;
     //! Real-space RI coefficient tensors (local RI) of shrinked auxiliary basis

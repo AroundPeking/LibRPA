@@ -44,6 +44,18 @@ struct DriverParams
     //! Experimental
     std::string fn_thermal_tau_grid;
 
+    //! External LIBRPA_THERMAL_GW_V1 operator filename, relative to input_dir.
+    //! Loads independent complex bosonic inverse and fermionic integral operators
+    //! as metadata only; does not enable finite-temperature GW execution.
+    //! Requires task=rpa or g0w0, tfgrids_type=fd_matsubara, SCF eigenvalues and
+    //! an explicit FD reference. File dimensions are independent of nfreq/ntau.
+    //! Does not change fn_thermal_tau_grid or its RPA-only restrictions.
+    //! @par Default
+    //! empty (disabled)
+    //! @par Status
+    //! Experimental
+    std::string fn_thermal_gw_grid;
+
     //! Verbosity level for driver output.
     //!
     //! It is parsed to the global API function `set_output_level`.

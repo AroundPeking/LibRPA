@@ -4,12 +4,14 @@
 
 // Standard headers
 #include <array>
+#include <algorithm>
 #include <complex>
 #include <cmath>
 #include <cstring>
 #include <map>
 #include <limits>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <valarray>
@@ -233,6 +235,7 @@ void librpa_set_wg_ekb_efermi(LibrpaHandler* h, int nspins, int nkpts, int nstat
         swg[is] *= (1.0 / nkpts);
     }
     pds->is_scf_eigocc_set = true;
+    if (pds->external_thermal_gw_grid) pds->invalidate_compute_objects();
 
     double emin, emax;
     pds->mf.get_E_min_max(emin, emax);
@@ -357,6 +360,76 @@ void librpa_clear_external_thermal_time_grid(LibrpaHandler* h)
 {
     auto pds = librpa_int::api::get_dataset_instance(h);
     pds->external_thermal_time_grid.reset();
+    pds->invalidate_compute_objects();
+}
+
+void librpa_set_external_thermal_gw_grid(LibrpaHandler* h, double beta_ha_inv, double g_wmax_ha,
+                                         double w_wmax_ha, double sigma_wmax_ha, double tolerance,
+                                         int ntau, int nboson, int nfermion, const double* times,
+                                         const int* bosonic_indices, const int* fermionic_indices,
+                                         const double* b_real, const double* b_imag,
+                                         const double* f_real, const double* f_imag)
+{
+    using namespace librpa_int;
+    const int max_dimension = std::numeric_limits<int>::max();
+    if (ntau <= 0 || nboson <= 0 || nfermion <= 0 || nboson > max_dimension / ntau ||
+        nfermion > max_dimension / ntau || !times || !bosonic_indices || !fermionic_indices ||
+        !b_real || !b_imag || !f_real || !f_imag)
+        throw LIBRPA_RUNTIME_ERROR("invalid external thermal GW grid dimensions or null arrays");
+    for (double bound : {g_wmax_ha, w_wmax_ha, sigma_wmax_ha})
+        if (!std::isfinite(bound) || bound <= 0.0)
+            throw LIBRPA_RUNTIME_ERROR(
+                "external thermal GW grid requires positive finite spectral bounds");
+    const double support_sum = g_wmax_ha + w_wmax_ha;
+    if (!std::isfinite(support_sum) ||
+        sigma_wmax_ha < support_sum * (1.0 - 64 * std::numeric_limits<double>::epsilon()))
+        throw LIBRPA_RUNTIME_ERROR(
+            "external thermal GW grid requires sigma_wmax >= g_wmax + w_wmax");
+    if (!std::isfinite(tolerance) || tolerance <= 0.0 || tolerance >= 1.0)
+        throw LIBRPA_RUNTIME_ERROR("external thermal GW grid tolerance must be in (0,1)");
+    if (!std::isfinite(beta_ha_inv * sigma_wmax_ha))
+        throw LIBRPA_RUNTIME_ERROR("external thermal GW grid requires finite beta*sigma_wmax");
+    auto pds = api::get_dataset_instance(h);
+    const std::vector<int> bosons(bosonic_indices, bosonic_indices + nboson);
+    const std::vector<int> fermions(fermionic_indices, fermionic_indices + nfermion);
+    // Use wider integers for partner arithmetic, including INT_MIN.
+    const std::set<long long> b_labels(bosons.begin(), bosons.end());
+    const std::set<long long> f_labels(fermions.begin(), fermions.end());
+    if (!b_labels.count(0))
+        throw LIBRPA_RUNTIME_ERROR("external thermal GW grid requires the bosonic zero mode");
+    for (auto label : b_labels)
+        if (!b_labels.count(-label))
+            throw LIBRPA_RUNTIME_ERROR(
+                "external thermal GW grid requires paired signed bosonic labels");
+    for (auto label : f_labels)
+        if (!f_labels.count(-label - 1))
+            throw LIBRPA_RUNTIME_ERROR(
+                "external thermal GW grid requires paired signed fermionic labels");
+    ComplexMatrix b(ntau, nboson), f(nfermion, ntau);
+    for (int i = 0; i < b.size; ++i) b.c[i] = {b_real[i], b_imag[i]};
+    for (int i = 0; i < f.size; ++i) f.c[i] = {f_real[i], f_imag[i]};
+    auto grid = std::make_unique<ExternalThermalGWGrid>(ExternalThermalGWGrid{
+        g_wmax_ha, w_wmax_ha, sigma_wmax_ha, tolerance,
+        ThermalGWTransform(beta_ha_inv, std::vector<double>(times, times + ntau), bosons, fermions,
+                           b, f)});
+    validate_external_thermal_gw_grid_reference(*pds, *grid);
+    const int zero_column = std::find(bosons.begin(), bosons.end(), 0) - bosons.begin();
+    for (int j = 0; j < ntau; ++j)
+    {
+        const auto static_mode = beta_ha_inv * b(j, zero_column);
+        if (!std::isfinite(static_mode.real()) || !std::isfinite(static_mode.imag()) ||
+            std::abs(static_mode - 1.0) > 1e-10)
+            throw LIBRPA_RUNTIME_ERROR(
+                "external thermal GW B fails static normalization beta*B_zero=1");
+    }
+    pds->external_thermal_gw_grid = std::move(grid);
+    pds->invalidate_compute_objects();
+}
+
+void librpa_clear_external_thermal_gw_grid(LibrpaHandler* h)
+{
+    auto pds = librpa_int::api::get_dataset_instance(h);
+    pds->external_thermal_gw_grid.reset();
     pds->invalidate_compute_objects();
 }
 

@@ -508,6 +508,8 @@ module librpa_f03
          procedure :: set_external_thermal_time_grid => librpa_set_external_thermal_time_grid
          procedure :: set_external_thermal_rpa_grid => librpa_set_external_thermal_rpa_grid
          procedure :: clear_external_thermal_time_grid => librpa_clear_external_thermal_time_grid
+         procedure :: set_external_thermal_gw_grid => librpa_set_external_thermal_gw_grid
+         procedure :: clear_external_thermal_gw_grid => librpa_clear_external_thermal_gw_grid
          procedure :: set_wfc => librpa_set_wfc
          procedure :: set_wfc_spinor => librpa_set_wfc_spinor
          procedure :: set_ao_basis_wfc => librpa_set_ao_basis_wfc
@@ -621,6 +623,24 @@ module librpa_f03
          import :: c_ptr
          type(c_ptr), value :: h
       end subroutine librpa_clear_external_thermal_time_grid_c
+
+      subroutine librpa_set_external_thermal_gw_grid_c &
+            (h, beta_ha_inv, g_wmax_ha, w_wmax_ha, sigma_wmax_ha, tolerance, ntau, nboson, nfermion, &
+             times, bosonic_indices, fermionic_indices, b_real, b_imag, f_real, f_imag) &
+            bind(c, name="librpa_set_external_thermal_gw_grid")
+         import :: c_ptr, c_int, c_double
+         type(c_ptr), value :: h
+         real(c_double), value :: beta_ha_inv, g_wmax_ha, w_wmax_ha, sigma_wmax_ha, tolerance
+         integer(c_int), value :: ntau, nboson, nfermion
+         integer(c_int), intent(in) :: bosonic_indices(*), fermionic_indices(*)
+         real(c_double), intent(in) :: times(*), b_real(*), b_imag(*), f_real(*), f_imag(*)
+      end subroutine librpa_set_external_thermal_gw_grid_c
+
+      subroutine librpa_clear_external_thermal_gw_grid_c(h) &
+            bind(c, name="librpa_clear_external_thermal_gw_grid")
+         import :: c_ptr
+         type(c_ptr), value :: h
+      end subroutine librpa_clear_external_thermal_gw_grid_c
 
       subroutine librpa_set_wfc_c(h, ispin, ik, nstates_local, nbasis_local, wfc_real, wfc_imag) &
             bind(c, name="librpa_set_wfc")
@@ -1613,6 +1633,56 @@ contains
 
       call librpa_clear_external_thermal_time_grid_c(this%ptr_c_handle)
    end subroutine librpa_clear_external_thermal_time_grid
+
+   !> @brief Copy independent complex GW operators (does not enable thermal GW).
+   !> Fortran B shape is (nboson,ntau); F shape is (ntau,nfermion).
+   !> These match C row-major B[ntau][nboson] and F[nfermion][ntau].
+   !> Signed integer labels m and n are passed unchanged, NOT shifted by one:
+   !> nu=2*pi*m/beta, omega=(2*n+1)*pi/beta. See the C API for validation.
+   subroutine librpa_set_external_thermal_gw_grid( &
+         this, beta_ha_inv, g_wmax_ha, w_wmax_ha, sigma_wmax_ha, tolerance, &
+         times, bosonic_indices, fermionic_indices, b, f)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      real(dp), intent(in) :: beta_ha_inv, g_wmax_ha, w_wmax_ha, sigma_wmax_ha, tolerance
+      real(dp), intent(in) :: times(:)
+      integer, intent(in) :: bosonic_indices(:), fermionic_indices(:)
+      complex(dp), intent(in) :: b(:,:), f(:,:)
+      integer(c_int) :: ntau, nboson, nfermion
+      integer(c_int), allocatable :: bosons_c(:), fermions_c(:)
+      real(c_double), allocatable :: times_c(:), br(:,:), bi(:,:), fr(:,:), fi(:,:)
+
+      ntau = size(times, kind=c_int)
+      nboson = size(bosonic_indices, kind=c_int)
+      nfermion = size(fermionic_indices, kind=c_int)
+      if (ntau <= 0 .or. nboson <= 0 .or. nfermion <= 0) error stop "empty external thermal GW grid"
+      if (size(b, 1) /= nboson .or. size(b, 2) /= ntau) &
+         error stop "external thermal GW B must have shape (nboson,ntau)"
+      if (size(f, 1) /= ntau .or. size(f, 2) /= nfermion) &
+         error stop "external thermal GW F must have shape (ntau,nfermion)"
+      if (nboson > huge(nboson)/ntau .or. nfermion > huge(nfermion)/ntau) &
+         error stop "external thermal GW dimensions overflow"
+      allocate(times_c(ntau), bosons_c(nboson), fermions_c(nfermion), &
+               br(nboson,ntau), bi(nboson,ntau), fr(ntau,nfermion), fi(ntau,nfermion))
+      times_c = real(times, kind=c_double)
+      bosons_c = int(bosonic_indices, kind=c_int)
+      fermions_c = int(fermionic_indices, kind=c_int)
+      br = real(b, kind=c_double)
+      bi = real(aimag(b), kind=c_double)
+      fr = real(f, kind=c_double)
+      fi = real(aimag(f), kind=c_double)
+      call librpa_set_external_thermal_gw_grid_c( &
+         this%ptr_c_handle, real(beta_ha_inv, kind=c_double), real(g_wmax_ha, kind=c_double), &
+         real(w_wmax_ha, kind=c_double), real(sigma_wmax_ha, kind=c_double), real(tolerance, kind=c_double), &
+         ntau, nboson, nfermion, times_c, bosons_c, fermions_c, br, bi, fr, fi)
+   end subroutine librpa_set_external_thermal_gw_grid
+
+   !> @brief Clear GW operators, retaining the response grid and FD reference.
+   subroutine librpa_clear_external_thermal_gw_grid(this)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      call librpa_clear_external_thermal_gw_grid_c(this%ptr_c_handle)
+   end subroutine librpa_clear_external_thermal_gw_grid
 
    !> @brief Set the wave-function expansion coefficients
    !>

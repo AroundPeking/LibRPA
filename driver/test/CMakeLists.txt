@@ -90,3 +90,24 @@ if(BUILD_SHARED_LIBS)
   target_link_libraries(test_reader_thermal_rpa_grid PRIVATE ${math_libs} ${parallel_libs})
 endif()
 add_test(NAME test_reader_thermal_rpa_grid COMMAND $<TARGET_FILE:test_reader_thermal_rpa_grid>)
+
+add_executable(test_reader_thermal_gw_grid test_reader_thermal_gw_grid.cpp
+  ../reader_thermal_gw_grid.cpp ../driver.cpp ../inputfile.cpp ../input_parser.cpp)
+target_link_libraries(test_reader_thermal_gw_grid PRIVATE rpa_lib)
+if(BUILD_SHARED_LIBS)
+  target_link_libraries(test_reader_thermal_gw_grid PRIVATE ${math_libs} ${parallel_libs})
+endif()
+add_test(NAME test_reader_thermal_gw_grid COMMAND $<TARGET_FILE:test_reader_thermal_gw_grid>
+  ${PROJECT_SOURCE_DIR}/src/test/data/sparse_ir_gw_beta8_g1_w2.dat)
+add_test(NAME test_reader_thermal_gw_grid_mpi2
+  COMMAND mpirun -np 2 $<TARGET_FILE:test_reader_thermal_gw_grid> --rank-local-failure)
+set_tests_properties(test_reader_thermal_gw_grid_mpi2 PROPERTIES PROCESSORS 2 TIMEOUT 60)
+
+foreach(case missing malformed)
+  add_test(NAME test_driver_thermal_gw_${case}_mpi2
+    COMMAND ${CMAKE_COMMAND}
+      -DRPA_EXE=$<TARGET_FILE:rpa_exe> -DMPIEXEC=${MPIEXEC_EXECUTABLE}
+      -DCASE=${case} -DWORK_ROOT=${CMAKE_CURRENT_BINARY_DIR}/thermal_gw_failure
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/test_thermal_gw_failure.cmake)
+  set_tests_properties(test_driver_thermal_gw_${case}_mpi2 PROPERTIES PROCESSORS 2 TIMEOUT 45)
+endforeach()

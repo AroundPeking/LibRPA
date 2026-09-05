@@ -70,6 +70,13 @@ static std::string check_dirpath(const std::string &dirpath)
 static void validate_input_parameters()
 {
     const auto &params = driver::driver_params;
+    if (!params.fn_thermal_gw_grid.empty())
+    {
+        if (params.task != "rpa" && params.task != "g0w0")
+            throw std::runtime_error("fn_thermal_gw_grid requires task=rpa or g0w0 (metadata only)");
+        if (driver::opts.tfgrids_type != LIBRPA_TFGRID_FD_MATSUBARA)
+            throw std::runtime_error("fn_thermal_gw_grid requires tfgrids_type=fd_matsubara");
+    }
     if (params.output_gw_spec_func)
     {
         if (params.sf_omega_step <= 0.0)
@@ -105,6 +112,7 @@ void parse_inputfile_to_params(const std::string &fn)
     }
     _parse_string_post(driver_params, input_dir, check_dirpath);
     _parse_string(driver_params, fn_thermal_tau_grid);
+    _parse_string(driver_params, fn_thermal_gw_grid);
     _parse_double(driver_params, cs_threshold);
     _parse_bool(driver_params, output_energy_qp);
     _parse_int(driver_params, i_state_low);

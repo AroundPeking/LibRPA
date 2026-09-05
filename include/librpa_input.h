@@ -102,6 +102,39 @@ void librpa_set_external_thermal_rpa_grid(
 void librpa_clear_external_thermal_time_grid(LibrpaHandler* h);
 
 /**
+ * @brief Copy independent finite-temperature GW operators (experimental input only).
+ *
+ * This does NOT enable thermal GW execution. All arrays are copied. SCF energies
+ * and an FD reference must already be set; beta (Ha^-1) must match 1/kBT.
+ * Positive finite bounds in Ha cover G: abs(epsilon-mu), the Wc spectrum,
+ * and Sigma: sigma_wmax >= g_wmax + w_wmax (up to roundoff). W/Sigma spectral
+ * convergence and approximation accuracy remain the caller's responsibility.
+ * Beta, its inverse and beta*sigma_wmax must be finite.
+ * Tolerance is the external basis truncation tolerance, strictly in (0,1).
+ *
+ * Times increase strictly in (0,beta). Unique signed integer labels retain
+ * caller order: nu_m=2*pi*m/beta, omega_n=(2*n+1)*pi/beta. Bosonic labels must
+ * include zero and both m,-m; fermionic labels must include both n,-n-1.
+ * B[ntau][nboson] and F[nfermion][ntau] are row-major complex arrays supplied
+ * as separate real/imaginary parts. B maps Wc(i*nu) to Wc(tau) with exp(-i*nu*tau);
+ * F maps Sigma(tau) to Sigma(i*omega) with exp(+i*omega*tau). Coefficients
+ * include all normalization; beta*B[:,m=0] must equal 1 within 1e-10. There is
+ * no RPA static half weight, real projection or negative-mode completion.
+ * Dimensions are independent of response/RPA opts.nfreq/ntau. All ranks must
+ * supply identical metadata. Input is revalidated against the FD/SCF reference
+ * when calculation grids are initialized; stale metadata must be replaced or
+ * cleared. Invalid input leaves previously stored data and computed state intact.
+ */
+void librpa_set_external_thermal_gw_grid(
+    LibrpaHandler* h, double beta_ha_inv, double g_wmax_ha, double w_wmax_ha,
+    double sigma_wmax_ha, double tolerance, int ntau, int nboson, int nfermion,
+    const double* times, const int* bosonic_indices, const int* fermionic_indices,
+    const double* b_real, const double* b_imag, const double* f_real, const double* f_imag);
+
+/** @brief Clear GW operators only; keep the independent response grid and FD reference. */
+void librpa_clear_external_thermal_gw_grid(LibrpaHandler* h);
+
+/**
  * @brief Set wavefunction coefficients (real/imag separate arrays).
  * @param[in] h              Handler.
  * @param[in] ispin          Spin index (0-based).

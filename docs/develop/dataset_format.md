@@ -988,3 +988,77 @@ The C/C++ API accepts separate real/imaginary row-major arrays of shape
 `transform(ntau,nfreq)`; the time index is contiguous and no transpose is
 needed. All APIs copy input data. Fortran users can clear the external grid
 without clearing the FD reference using `clear_external_thermal_time_grid`.
+
+### External thermal GW operators v1
+
+`fn_thermal_gw_grid` is an optional filename relative to `input_dir`, empty
+by default. It loads **metadata only**, for `task=rpa` or `task=g0w0`, with
+`tfgrids_type=fd_matsubara`. It does not enable thermal GW execution or
+remove the existing public finite-temperature GW guard. It does not change
+the RPA-only restrictions of `fn_thermal_tau_grid`; specifying both filenames
+therefore still requires `task=rpa`.
+
+The strict whitespace-separated ASCII layout, as emitted by
+`utilities/generate_thermal_gw_grid.py`, is:
+
+```text
+LIBRPA_THERMAL_GW_V1
+package_name package_version
+Ha Ha^-1
+B exp_minus inverse F exp_plus integral
+beta g_wmax w_wmax sigma_wmax tolerance
+ntau nboson nfermion
+tau_0 ... tau_(ntau-1)
+m_0 ... m_(nboson-1)
+n_0 ... n_(nfermion-1)
+B_0_0_real B_0_0_imag
+... (ntau*nboson complex entries, row-major)
+F_0_0_real F_0_0_imag
+... (nfermion*ntau complex entries, row-major)
+```
+
+Package name/version are retained as provenance, not pinned to a particular
+sparse-ir release. Units and all six convention tokens must match exactly.
+`beta` is in Ha^-1; the three positive spectral bounds are in Ha.
+`g_wmax` bounds every included `abs(epsilon-mu)`; `w_wmax` bounds screened
+correlation W; `sigma_wmax >= g_wmax + w_wmax` covers the product support
+(allowing 64 double-precision epsilons of relative roundoff at equality).
+Beta, its inverse, the support sum and `beta*sigma_wmax` must be finite;
+`0 < tolerance < 1`. These checks do not establish physical convergence.
+
+Times increase strictly inside `(0,beta)`. Unique signed bosonic labels m
+denote `nu_m = 2*pi*m/beta`, include zero, and are closed under `m -> -m`.
+Unique signed fermionic labels n denote `omega_n = (2*n+1)*pi/beta` and are
+closed under `n -> -n-1`. Both lists may have arbitrary order, which is
+preserved exactly with their operator columns/rows. Negative sparse-ir odd
+label -1 corresponds to n=-1, not n=0. No sorting, positive-only completion,
+conjugate completion or real projection is performed.
+
+`B[ntau,nboson]` maps `Wc(i*nu_m)` to `Wc(tau_j)` with the inverse sign
+`exp(-i*nu*tau)`. Its zero-frequency column obeys
+`abs(beta*B[j,zero]-1) <= 1e-10` for every time node, including the imaginary
+part. A static anomaly maps to `A/beta`, never the RPA half weight.
+`F[nfermion,ntau]` maps `Sigma_c(tau_j)` to `Sigma_c(i*omega_n)` with the
+integral sign `exp(+i*omega*tau)`. Coefficients already contain their
+normalization; no extra time/frequency weights are applied by the loader.
+
+All three dimensions are positive and both matrix sizes must fit int
+storage. They are independent of the response/RPA `nfreq` and `ntau`
+options. The reader checks remaining file size before allocating arrays,
+rejects non-ASCII bytes, malformed numeric tokens, duplicate/unpaired labels,
+nonfinite values, invalid/overflowing dimensions, truncation and trailing
+data. It passes separate real/imaginary row-major arrays only through
+`librpa::Handler::set_external_thermal_gw_grid`.
+
+Loading occurs after SCF eigenvalues and FD occupation metadata. The public
+setter requires both, checks beta against the FD reference and `g_wmax`
+against the SCF spectrum, and copies the operators without replacing the
+response grid. `clear_external_thermal_gw_grid` clears only GW metadata.
+Every MPI rank must supply identical input; rank-local reader/setter errors
+are reduced before any subsequent work. This failure reduction does not
+compare otherwise valid but different files between ranks.
+
+The frozen `src/test/data/sparse_ir_gw_beta8_g1_w2.dat` fixture contains
+19 times, 17 bosonic labels and 20 fermionic labels, generated with sparse-ir
+2.1.4 at beta=8, g_wmax=1, w_wmax=2 and sigma_wmax=3. Driver parser/loader
+tests use it without regenerating files or requiring sparse-ir at build time.
