@@ -84,6 +84,12 @@ endforeach()
 target_sources(test_task_helper PRIVATE ../../driver/tasks/task_helper.cpp)
 target_compile_definitions(test_external_thermal_grid PRIVATE
   LIBRPA_SPARSE_TAU_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/data/sparse_ir_tau_beta8_wmax2.dat")
+config_test(test_external_thermal_gw 1)
+target_compile_definitions(test_external_thermal_gw PRIVATE
+  LIBRPA_SPARSE_GW_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/data/sparse_ir_gw_beta8_g1_w2.dat")
+target_compile_options(test_external_thermal_gw PRIVATE -UNDEBUG)
+set_tests_properties(test_external_thermal_gw PROPERTIES
+  ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1;MKL_NUM_THREADS=1")
 add_test(NAME test_rpa_logdet_mpi2 COMMAND mpirun -np 2 $<TARGET_FILE:test_rpa_logdet>)
 add_test(NAME test_rpa_logdet_mpi4 COMMAND mpirun -np 4 $<TARGET_FILE:test_rpa_logdet>)
 target_sources(test_strict_2d_coulomb_head_metadata
