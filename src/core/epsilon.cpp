@@ -1625,15 +1625,9 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 std::vector<int> ipiv(desc_nabf_nabf_opt.m_loc() + desc_nabf_nabf_opt.mb());
                 int info;
                 complex<double> ln_det =
-<<<<<<< HEAD
-                    compute_pi_det_blacs_2d(coul_chi0_block, desc_nabf_nabf_opt, ipiv, info);
-                MPI_Allreduce(&trace_pi_loc,&trace_pi,1,MPI_DOUBLE_COMPLEX,MPI_SUM,comm_h.comm);
-                delete[] ipiv;
-=======
                     compute_pi_det_blacs_2d(coul_chi0_block, desc_nabf_nabf_opt, ipiv.data(), info);
                 MPI_Allreduce(&trace_pi_loc, &trace_pi, 1, MPI_DOUBLE_COMPLEX, MPI_SUM,
                               comm_h.comm);
->>>>>>> 43ff1aea (Correct distributed RPA LU determinant phase and pivot storage)
                 rpa_for_omega_q = trace_pi + ln_det;
             }
             double det_end = omp_get_wtime();
@@ -1784,12 +1778,6 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
             // det_dig.push_back(loc_piT(locr,locc));
             // det_dig_r.push_back(locr);
             // det_dig_c.push_back(locc);
-<<<<<<< HEAD
-            // det(A) = det(P) * product U_ii. The sign of Re(U_ii)
-            // does not determine the permutation sign for complex matrices.
-            ln_det_loc += std::log(loc_piT(locr, locc));
-            row_swaps_loc += ipiv[locr] != ig + 1;
-=======
             const auto pivot_log = std::log(loc_piT(locr, locc));
             if (!std::isfinite(pivot_log.real()) || !std::isfinite(pivot_log.imag()) ||
                 ipiv[locr] < 1 || ipiv[locr] > range_all)
@@ -1801,7 +1789,6 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
             // IPIV holds global row labels. Count each swap only on the unique
             // owner of this diagonal entry, not on every process column.
             if (ipiv[locr] != ig + 1) ln_det_loc += complex<double>(0.0, std::acos(-1.0));
->>>>>>> 43ff1aea (Correct distributed RPA LU determinant phase and pivot storage)
         }
     }
     double ln_end = omp_get_wtime();
@@ -1828,17 +1815,10 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
     MPI_Allreduce(&invalid_local, &invalid_global, 1, MPI_INT, MPI_MAX, arrdesc_pi.comm());
     if (invalid_global) throw LIBRPA_RUNTIME_ERROR("RPA LU produced invalid pivots or logarithms");
     MPI_Allreduce(&ln_det_loc, &ln_det_all, 1, MPI_DOUBLE_COMPLEX, MPI_SUM, arrdesc_pi.comm());
-<<<<<<< HEAD
-    MPI_Allreduce(&row_swaps_loc, &row_swaps_all, 1, MPI_INT, MPI_SUM, arrdesc_pi.comm());
-    // Choose the principal phase of the complete determinant, not of each signed pivot.
-    const double determinant_phase = ln_det_all.imag() + (row_swaps_all % 2) * (TWO_PI / 2.0);
-    ln_det_all.imag(std::remainder(determinant_phase, TWO_PI));
-=======
     const double pi = std::acos(-1.0);
     double phase = std::remainder(ln_det_all.imag(), 2.0 * pi);
     if (phase <= -pi) phase += 2.0 * pi;
     ln_det_all.imag(phase);
->>>>>>> 43ff1aea (Correct distributed RPA LU determinant phase and pivot storage)
     double det_end = omp_get_wtime();
     // if(comm_h.myid == 0)
     //     lib_printf("    | Det time   trf: %f   ln: %f   allreduce: %f\n",trf_end-det_begin,ln_end-trf_end, det_end-ln_end);
@@ -1871,15 +1851,9 @@ cplxdb compute_rpa_response_trace_logdet_blacs_2d(
     }
 
     int info = 0;
-<<<<<<< HEAD
-    std::vector<int> ipiv(std::max(1, response_desc.m_loc() * 10));
-    const cplxdb ln_det = compute_pi_det_blacs_2d(
-        identity_minus_response, response_desc, ipiv.data(), info);
-=======
     std::vector<int> ipiv(response_desc.m_loc() + response_desc.mb());
     const cplxdb ln_det =
         compute_pi_det_blacs_2d(identity_minus_response, response_desc, ipiv.data(), info);
->>>>>>> 43ff1aea (Correct distributed RPA LU determinant phase and pivot storage)
     return trace + ln_det;
 }
 
@@ -2138,13 +2112,8 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
             // if(freq == chi0.tfg.get_freq_nodes()[0] && comm_h.is_root())
             //     print_complex_matrix(" loc_piT",loc_piT);
             double task_mid = omp_get_wtime();
-<<<<<<< HEAD
-            //printf("|process  %d, before det\n",comm_h.myid);
-            std::complex<double> ln_det=compute_pi_det_blacs_2d(loc_piT, arrdesc_pi, ipiv, info);
-=======
             // printf("|process  %d, before det\n",comm_h.myid);
             std::complex<double> ln_det = compute_pi_det_blacs_2d(loc_piT, arrdesc_pi, ipiv.data(), info);
->>>>>>> 43ff1aea (Correct distributed RPA LU determinant phase and pivot storage)
             double task_end = omp_get_wtime();
             if(comm_h.is_root())
                 lib_printf("| After det for freq:  %f,  q: ( %f, %f, %f)   TIME_Vq_COMM: %f   TIME_DET: %f  TIME_CAL_Pi: %f, TIME_TRAN_LOC: %f\n",freq, q.x,q.y,q.z,vq_time,task_end-task_mid,pi_time,loc_tran_time);

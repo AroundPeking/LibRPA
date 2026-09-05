@@ -13,6 +13,7 @@ list(APPEND exe_sources
   main.cpp
   reader_fermi_surface_payload.cpp
   reader_thermal_grid.cpp
+    reader_thermal_gw_grid.cpp
   reader_2d_coulomb_head.cpp
   reader_sternheimer.cpp
   reader_sternheimer_partial.cpp

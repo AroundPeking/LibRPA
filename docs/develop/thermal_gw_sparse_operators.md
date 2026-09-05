@@ -1,7 +1,8 @@
 # Sparse Finite-Temperature GW Operators
 
-This is an internal numerical-validation stage. The public finite-temperature
-GW guard remains enabled. The exporter is not yet a production driver input.
+This is an internal numerical-validation and input-integration stage. The public
+finite-temperature GW guard remains enabled. The exporter can now be loaded by
+the experimental `fn_thermal_gw_grid` driver input, as independent metadata only.
 Do not interpret an operator test as a Na quasiparticle or bandwidth result.
 
 ## Independent Grids
@@ -74,8 +75,34 @@ Existing output files are never replaced.
 Consumers must match beta and ordered frequency labels, not just matrix
 shapes. Sampling locations can vary between library versions/platforms;
 archive this complete file together with the sampled data. The current C++
-consumer is a test-only fixture reader feeding `ThermalGWTransform`.
-Production API, restart, and driver integration are separate work.
+consumer uses `librpa_set_external_thermal_gw_grid`, wrapped by C++ and Fortran,
+to copy independent `ExternalThermalGWGrid` data into Dataset. The response/RPA
+`TFGrids` and its dimensions remain unchanged. The versioned reader is under
+`driver/reader_thermal_gw_grid.cpp`; the full contract is in
+[dataset_format.md](dataset_format.md#external-thermal-gw-operators-v1).
+Neither loading this input nor passing reader tests activates GW execution.
+
+Setup checks the FD beta and all included `abs(epsilon-mu)` against `g_wmax`;
+grid initialization repeats these reference checks, including chemical potential.
+Replacing reference energies invalidates computed objects when GW input exists.
+Failed GW setters leave the old input and calculation state intact. Clearing
+the GW input does not clear the response grid or the FD reference, and clearing
+the response input does not clear GW input. If changing to a zero-temperature
+calculation, explicitly clear both thermal inputs and the FD reference.
+
+Fortran arrays have shapes `B(nboson,ntau)` and `F(ntau,nfermion)`, matching
+C row-major storage; their signed integer labels are not shifted by one.
+Reader errors on any MPI rank are reduced before subsequent work. Valid input
+must still be identical on all ranks; this failure reduction does not compare
+different valid files. Restart, production transforms and continuation remain
+separate work.
+
+Reference revalidation here certifies only the imported grid's compatibility.
+The pre-existing `p_headwing` cache is not cleared by Dataset's general
+computation invalidator and can be reused by `initialize_ds_headwing`. Its
+lifetime under changed mean-field/reference data must be audited before
+production thermal GW is enabled; this input-only change does not validate
+cached dielectric data or modify the old head/wing route.
 
 ## Verification
 

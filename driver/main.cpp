@@ -3,6 +3,7 @@
 #include "driver.h"
 #include "read_data.h"
 #include "reader_thermal_grid.h"
+#include "reader_thermal_gw_grid.h"
 #include "inputfile.h"
 #include "task.h"
 
@@ -287,6 +288,29 @@ int main(int argc, char **argv)
                     }
                     lib_printf_root("External thermal time grid: %s (%d times, %d bosonic modes)\n",
                                     driver_params.fn_thermal_tau_grid.c_str(), opts.ntau, opts.nfreq);
+                }
+                if (!driver_params.fn_thermal_gw_grid.empty())
+                {
+                    int local_failed = 0, any_failed = 0;
+                    try
+                    {
+                        load_external_thermal_gw_grid(
+                            driver_params.input_dir + driver_params.fn_thermal_gw_grid, h, opts);
+                    }
+                    catch (const std::exception &error)
+                    {
+                        lib_printf(LIBRPA_VERBOSE_CRITICAL, "Thermal GW metadata on MPI rank %d: %s\n",
+                                   mpi_comm_global_h.myid, error.what());
+                        local_failed = 1;
+                    }
+                    mpi_comm_global_h.allreduce(&local_failed, &any_failed, 1, MPI_MAX);
+                    if (any_failed)
+                    {
+                        throw std::runtime_error("Failed to load external thermal GW operators");
+                    }
+                    lib_printf_root("External thermal GW operators: %s (metadata only; "
+                                    "finite-temperature GW execution remains disabled)\n",
+                                    driver_params.fn_thermal_gw_grid.c_str());
                 }
             }
 

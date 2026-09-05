@@ -278,6 +278,16 @@ public:
     /** @brief Clear the external transform without changing the FD reference. */
     void clear_external_thermal_time_grid();
 
+    /** @brief Copy independent complex GW operators; does not enable thermal GW. See C API. */
+    void set_external_thermal_gw_grid(
+        double beta_ha_inv, double g_wmax_ha, double w_wmax_ha, double sigma_wmax_ha,
+        double tolerance, int ntau, int nboson, int nfermion, const double *times,
+        const int *bosonic_indices, const int *fermionic_indices, const double *b_real,
+        const double *b_imag, const double *f_real, const double *f_imag);
+
+    /** @brief Clear only external GW operators. */
+    void clear_external_thermal_gw_grid();
+
     /**
      * @brief Set wavefunction coefficients from separate real and imaginary arrays.
      * @param[in] ispin Spin index.

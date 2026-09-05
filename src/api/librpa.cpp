@@ -186,6 +186,20 @@ void Handler::clear_external_thermal_time_grid()
     ::librpa_clear_external_thermal_time_grid(this->h_);
 }
 
+void Handler::set_external_thermal_gw_grid(double beta_ha_inv, double g_wmax_ha, double w_wmax_ha,
+                                           double sigma_wmax_ha, double tolerance, int ntau,
+                                           int nboson, int nfermion, const double* times,
+                                           const int* bosonic_indices, const int* fermionic_indices,
+                                           const double* b_real, const double* b_imag,
+                                           const double* f_real, const double* f_imag)
+{
+    ::librpa_set_external_thermal_gw_grid(h_, beta_ha_inv, g_wmax_ha, w_wmax_ha, sigma_wmax_ha,
+                                          tolerance, ntau, nboson, nfermion, times, bosonic_indices,
+                                          fermionic_indices, b_real, b_imag, f_real, f_imag);
+}
+
+void Handler::clear_external_thermal_gw_grid() { ::librpa_clear_external_thermal_gw_grid(h_); }
+
 LIBRPA_CPP_H_METHOD_DEF_WRAP_VOID(
     set_wfc,
     (int ispin, int ik, int nstates_local, int nbasis_local, const double* wfc_real, const double* wfc_imag),
