@@ -4954,7 +4954,7 @@ std::complex<double> diele_func::compute_rpa_trace_log_average(
 
     auto identity_minus_body_for_logdet = identity_minus_body.copy();
     int info = 0;
-    std::vector<int> ipiv(std::max(1, desc_body.m_loc() * 10));
+    std::vector<int> ipiv(desc_body.m_loc() + desc_body.mb());
     std::complex<double> logdet_body =
         compute_pi_det_blacs_2d(identity_minus_body_for_logdet, desc_body, ipiv.data(), info);
 

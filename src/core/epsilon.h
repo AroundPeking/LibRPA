@@ -206,6 +206,9 @@ ComplexMatrix compute_Pi_freq_q_row(const AtomicBasis &atbasis_abf,
 cplxdb compute_pi_det_blacs(ComplexMatrix &loc_piT, const librpa_int::ArrayDesc &arrdesc_pi,
                             int *ipiv, int &info);
 
+//! Destructive LU log determinant, with permutation parity and principal scalar
+//! phase. Requires ipiv storage m_loc()+mb(). This does not certify positive
+//! dielectric eigenvalues or select a matrix-log branch for unstable systems.
 cplxdb compute_pi_det_blacs_2d(Matz &loc_piT, const librpa_int::ArrayDesc &arrdesc_pi, int *ipiv,
                                int &info);
 cplxdb compute_rpa_response_trace_logdet_blacs_2d(const Matz &response,

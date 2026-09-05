@@ -1705,13 +1705,12 @@ CorrEnergy compute_RPA_correlation_blacs_2d(Chi0 &chi0, atpair_k_cplx_mat_t &cou
                 // if( ifreq== 0 && comm_h.is_root() )
                 //     print_whole_matrix("pi-2D-loc", coul_chi0_block);
 
-                int *ipiv = new int[desc_nabf_nabf_opt.m_loc() * 10];
+                std::vector<int> ipiv(desc_nabf_nabf_opt.m_loc() + desc_nabf_nabf_opt.mb());
                 int info;
                 complex<double> ln_det =
-                    compute_pi_det_blacs_2d(coul_chi0_block, desc_nabf_nabf_opt, ipiv, info);
+                    compute_pi_det_blacs_2d(coul_chi0_block, desc_nabf_nabf_opt, ipiv.data(), info);
                 MPI_Allreduce(&trace_pi_loc, &trace_pi, 1, MPI_DOUBLE_COMPLEX, MPI_SUM,
                               comm_h.comm);
-                delete[] ipiv;
                 rpa_for_omega_q = trace_pi + ln_det;
             }
             double det_end = omp_get_wtime();
@@ -1812,6 +1811,14 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
 {
     int one = 1;
     const int range_all = arrdesc_pi.m();
+    int invalid_local = 0, invalid_global = 0;
+    for (int row = 0; row < arrdesc_pi.m_loc(); ++row)
+        for (int col = 0; col < arrdesc_pi.n_loc(); ++col)
+            if (!std::isfinite(loc_piT(row, col).real()) ||
+                !std::isfinite(loc_piT(row, col).imag()))
+                invalid_local = 1;
+    MPI_Allreduce(&invalid_local, &invalid_global, 1, MPI_INT, MPI_MAX, arrdesc_pi.comm());
+    if (invalid_global) throw LIBRPA_RUNTIME_ERROR("RPA log determinant received nonfinite data");
     int DESCPI_T[9];
 // if(out_pi)
 // {
@@ -1826,6 +1833,11 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
     double det_begin = omp_get_wtime();
     // ScalapackConnector::transpose_desc(DESCPI_T, arrdesc_pi.desc);
     pzgetrf_(&range_all, &range_all, loc_piT.ptr(), &one, &one, arrdesc_pi.desc, ipiv, &info);
+    invalid_local = info != 0;
+    MPI_Allreduce(&invalid_local, &invalid_global, 1, MPI_INT, MPI_MAX, arrdesc_pi.comm());
+    if (invalid_global)
+        throw LIBRPA_RUNTIME_ERROR("RPA LU factorization failed or is singular; INFO=" +
+                                   std::to_string(info));
     double trf_end = omp_get_wtime();
     // ScalapackConnector::pgetrf_f(range_all,range_all,loc_piT.c,one,one,DESCPI_T,ipiv, info);
     // printf("   after LU myid: %d\n",mpi_comm_global_h.myid);
@@ -1858,18 +1870,17 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
             // det_dig.push_back(loc_piT(locr,locc));
             // det_dig_r.push_back(locr);
             // det_dig_c.push_back(locc);
-            complex<double> tmp_ln_det;
-            if (loc_piT(locr, locc).real() > 0)
+            const auto pivot_log = std::log(loc_piT(locr, locc));
+            if (!std::isfinite(pivot_log.real()) || !std::isfinite(pivot_log.imag()) ||
+                ipiv[locr] < 1 || ipiv[locr] > range_all)
             {
-                tmp_ln_det = std::log(loc_piT(locr, locc));
-                // ln_det_dig.push_back(tmp_ln_det);
+                invalid_local = 1;
+                continue;
             }
-            else
-            {
-                tmp_ln_det = std::log(-loc_piT(locr, locc));
-                // ln_det_dig.push_back(tmp_ln_det);
-            }
-            ln_det_loc += tmp_ln_det;
+            ln_det_loc += pivot_log;
+            // IPIV holds global row labels. Count each swap only on the unique
+            // owner of this diagonal entry, not on every process column.
+            if (ipiv[locr] != ig + 1) ln_det_loc += complex<double>(0.0, std::acos(-1.0));
         }
     }
     double ln_end = omp_get_wtime();
@@ -1893,7 +1904,13 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
     //     sprintf(fn, "det_mat_myid_%d.mtx", comm_h.myid);
     //     print_complex_matrix_file("det_mat_loc", det_mm, fn, false);
 
+    MPI_Allreduce(&invalid_local, &invalid_global, 1, MPI_INT, MPI_MAX, arrdesc_pi.comm());
+    if (invalid_global) throw LIBRPA_RUNTIME_ERROR("RPA LU produced invalid pivots or logarithms");
     MPI_Allreduce(&ln_det_loc, &ln_det_all, 1, MPI_DOUBLE_COMPLEX, MPI_SUM, arrdesc_pi.comm());
+    const double pi = std::acos(-1.0);
+    double phase = std::remainder(ln_det_all.imag(), 2.0 * pi);
+    if (phase <= -pi) phase += 2.0 * pi;
+    ln_det_all.imag(phase);
     double det_end = omp_get_wtime();
     // if(comm_h.myid == 0)
     //     lib_printf("    | Det time   trf: %f   ln: %f   allreduce:
@@ -1926,7 +1943,7 @@ cplxdb compute_rpa_response_trace_logdet_blacs_2d(const Matz &response,
     }
 
     int info = 0;
-    std::vector<int> ipiv(std::max(1, response_desc.m_loc() * 10));
+    std::vector<int> ipiv(response_desc.m_loc() + response_desc.mb());
     const cplxdb ln_det =
         compute_pi_det_blacs_2d(identity_minus_response, response_desc, ipiv.data(), info);
     return trace + ln_det;
@@ -2031,7 +2048,7 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
     int loc_row = arrdesc_pi.m_loc(), loc_col = arrdesc_pi.n_loc(), info;
 
     // para_mpi.set_blacs_mat(desc_pi,loc_row,loc_col,N_all_mu,N_all_mu,row_nblk,col_nblk);
-    int *ipiv = new int[loc_row * 10];
+    std::vector<int> ipiv(arrdesc_pi.m_loc() + arrdesc_pi.mb());
     // double vq_begin_m2t= omp_get_wtime();
     // std::map<int, std::map<std::pair<int, std::array<double, 3>>, Tensor<complex<double>>>>
     // vq_libri; for(auto &Ip:Vq)
@@ -2199,7 +2216,7 @@ CorrEnergy compute_RPA_correlation_blacs(const Chi0 &chi0, const atpair_k_cplx_m
             //     print_complex_matrix(" loc_piT",loc_piT);
             double task_mid = omp_get_wtime();
             // printf("|process  %d, before det\n",comm_h.myid);
-            std::complex<double> ln_det = compute_pi_det_blacs_2d(loc_piT, arrdesc_pi, ipiv, info);
+            std::complex<double> ln_det = compute_pi_det_blacs_2d(loc_piT, arrdesc_pi, ipiv.data(), info);
             double task_end = omp_get_wtime();
             if (comm_h.is_root())
                 lib_printf(

@@ -67,6 +67,7 @@ foreach(target
     test_qpe_solver
     test_rsh
     test_rpa_headwing
+    test_rpa_logdet
     test_strict_2d_coulomb_head_metadata
     test_sternheimer_rpa
     test_sternheimer_symmetry
@@ -82,6 +83,8 @@ endforeach()
 target_sources(test_task_helper PRIVATE ../../driver/tasks/task_helper.cpp)
 target_compile_definitions(test_external_thermal_grid PRIVATE
   LIBRPA_SPARSE_TAU_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/data/sparse_ir_tau_beta8_wmax2.dat")
+add_test(NAME test_rpa_logdet_mpi2 COMMAND mpirun -np 2 $<TARGET_FILE:test_rpa_logdet>)
+add_test(NAME test_rpa_logdet_mpi4 COMMAND mpirun -np 4 $<TARGET_FILE:test_rpa_logdet>)
 target_sources(test_strict_2d_coulomb_head_metadata
   PRIVATE ../../driver/reader_2d_coulomb_head.cpp)
 # These suites use standard assert() and must remain active in Release builds.
