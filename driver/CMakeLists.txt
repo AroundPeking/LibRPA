@@ -11,6 +11,7 @@ list(APPEND exe_sources
   input_parser.cpp
   inputfile.cpp
   main.cpp
+  reader_fermi_surface_payload.cpp
   reader_2d_coulomb_head.cpp
   reader_sternheimer.cpp
   reader_sternheimer_partial.cpp
