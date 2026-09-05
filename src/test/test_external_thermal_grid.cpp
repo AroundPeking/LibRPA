@@ -14,6 +14,7 @@
 #include "../core/thermal_occupation.h"
 #include "../core/timefreq.h"
 #ifdef LIBRPA_USE_LIBRI
+#include "../api/dataset_helper.h"
 #include "../api/instance_manager.h"
 #include "librpa.hpp"
 #endif
@@ -172,8 +173,26 @@ void check_full_libri_response(const Fixture &fixture)
                 2.0 * fermi_dirac_occupation(mf.get_eigenvals()[0](ik, n), kbt) / nk;
     }
     ds->pbc.set_kgrids_kvec(nk, 1, 1, kvecs);
-    TFGrids grid(fixture.transform.nr);
-    grid.set_finite_beta_time_grid(fixture.times, fixture.beta, fixture.transform);
+    std::vector<double> energies(mf.get_eigenvals()[0].c, mf.get_eigenvals()[0].c + 2 * nk);
+    std::vector<double> occupations(2 * nk);
+    for (int i = 0; i < 2 * nk; ++i) occupations[i] = mf.get_weight()[0].c[i] * nk;
+    handler.set_wg_ekb_efermi(1, nk, 2, occupations.data(), energies.data(), 0.0);
+    std::vector<double> transform_real(fixture.transform.size),
+        transform_imag(fixture.transform.size);
+    for (int i = 0; i < fixture.transform.size; ++i)
+    {
+        transform_real[i] = fixture.transform.c[i].real();
+        transform_imag[i] = fixture.transform.c[i].imag();
+    }
+    handler.set_external_thermal_time_grid(
+        fixture.beta, fixture.wmax, fixture.tolerance, fixture.transform.nr, fixture.transform.nc,
+        fixture.times.data(), transform_real.data(), transform_imag.data());
+    librpa::Options options;
+    options.tfgrids_type = LIBRPA_TFGRID_FD_MATSUBARA;
+    options.nfreq = fixture.transform.nr;
+    options.ntau = fixture.transform.nc;
+    initialize_ds_tfgrids(*ds, options);
+    const auto &grid = ds->tfg;
 
     // For an onsite pair the two atom-centered LRI contributions are each P_mu/2.
     const double vertices[2][2][2] = {{{1.0, 0.0}, {0.0, 0.0}}, {{0.0, 0.7}, {0.7, 0.2}}};

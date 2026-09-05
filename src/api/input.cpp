@@ -5,8 +5,10 @@
 // Standard headers
 #include <array>
 #include <complex>
+#include <cmath>
 #include <cstring>
 #include <map>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -22,6 +24,7 @@
 #include "../utils/error.h"
 #include "../utils/profiler.h"
 #include "instance_manager.h"
+#include "dataset_helper.h"
 
 // External headers and stubs
 #ifdef LIBRPA_USE_LIBRI
@@ -266,6 +269,50 @@ void librpa_clear_fermi_dirac_reference(LibrpaHandler* h)
 {
     auto pds = librpa_int::api::get_dataset_instance(h);
     pds->mf.clear_fermi_dirac_reference();
+    pds->invalidate_compute_objects();
+}
+
+void librpa_set_external_thermal_time_grid(LibrpaHandler* h, double beta_ha_inv, double wmax_ha,
+                                           double tolerance, int nfreq, int ntau,
+                                           const double* times, const double* transform_real,
+                                           const double* transform_imag)
+{
+    const int max_dimension = std::numeric_limits<int>::max();
+    if (nfreq <= 0 || ntau <= 0 || nfreq > max_dimension / ntau || nfreq > max_dimension / nfreq ||
+        !times || !transform_real || !transform_imag)
+        throw LIBRPA_RUNTIME_ERROR("invalid external thermal grid dimensions or null arrays");
+    auto pds = librpa_int::api::get_dataset_instance(h);
+    auto grid = std::make_unique<librpa_int::ExternalThermalTimeGrid>();
+    grid->beta_ha_inv = beta_ha_inv;
+    grid->wmax_ha = wmax_ha;
+    grid->tolerance = tolerance;
+    librpa_int::validate_external_thermal_time_grid_reference(*pds, *grid);
+    grid->times.assign(times, times + ntau);
+    grid->transform.create(nfreq, ntau);
+    for (int i = 0; i < nfreq * ntau; ++i)
+        grid->transform.c[i] = {transform_real[i], transform_imag[i]};
+    librpa_int::TFGrids validated(nfreq);
+    validated.set_finite_beta_time_grid(grid->times, beta_ha_inv, grid->transform);
+
+    // A constant in imaginary time integrates to beta at n=0 and zero otherwise.
+    for (int n = 0; n < nfreq; ++n)
+    {
+        std::complex<double> integral = 0.0;
+        for (int j = 0; j < ntau; ++j) integral += grid->transform(n, j);
+        const double expected = n == 0 ? beta_ha_inv : 0.0;
+        if (!std::isfinite(integral.real()) || !std::isfinite(integral.imag()) ||
+            std::abs(integral - expected) / beta_ha_inv > std::max(1e-10, 10.0 * tolerance))
+            throw LIBRPA_RUNTIME_ERROR(
+                "external thermal transform fails constant-mode normalization");
+    }
+    pds->external_thermal_time_grid = std::move(grid);
+    pds->invalidate_compute_objects();
+}
+
+void librpa_clear_external_thermal_time_grid(LibrpaHandler* h)
+{
+    auto pds = librpa_int::api::get_dataset_instance(h);
+    pds->external_thermal_time_grid.reset();
     pds->invalidate_compute_objects();
 }
 

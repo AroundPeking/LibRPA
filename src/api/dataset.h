@@ -25,6 +25,15 @@
 namespace librpa_int
 {
 
+struct ExternalThermalTimeGrid
+{
+    double beta_ha_inv = 0.0;
+    double wmax_ha = 0.0;
+    double tolerance = 0.0;
+    std::vector<double> times;
+    ComplexMatrix transform;
+};
+
 /*!
  * Core object to hold runtime environment, input and output data
  */
@@ -110,6 +119,8 @@ public:
     bool is_band_calc_done;
     //! Time-frequency grids
     TFGrids tfg;
+    //! Optional external input retained across calculation-grid initialization.
+    std::unique_ptr<ExternalThermalTimeGrid> external_thermal_time_grid;
     //! Real-space RI coefficient tensors (local RI)
     Cs_LRI cs_data;
     //! Real-space RI coefficient tensors (local RI) of shrinked auxiliary basis

@@ -162,6 +162,19 @@ void Handler::clear_fermi_dirac_reference()
     ::librpa_clear_fermi_dirac_reference(this->h_);
 }
 
+void Handler::set_external_thermal_time_grid(
+    double beta_ha_inv, double wmax_ha, double tolerance, int nfreq, int ntau,
+    const double *times, const double *transform_real, const double *transform_imag)
+{
+    ::librpa_set_external_thermal_time_grid(this->h_, beta_ha_inv, wmax_ha, tolerance,
+                                          nfreq, ntau, times, transform_real, transform_imag);
+}
+
+void Handler::clear_external_thermal_time_grid()
+{
+    ::librpa_clear_external_thermal_time_grid(this->h_);
+}
+
 LIBRPA_CPP_H_METHOD_DEF_WRAP_VOID(
     set_wfc,
     (int ispin, int ik, int nstates_local, int nbasis_local, const double* wfc_real, const double* wfc_imag),

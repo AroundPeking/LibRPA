@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -109,11 +110,62 @@ void reject_spinor_symmetry_speedup(const Dataset &ds, const char *calculation)
         + " symmetry speed-up with spinor wave functions; disable symmetry for spinor runs");
 }
 
+void validate_external_thermal_time_grid_reference(
+    const Dataset &ds, const ExternalThermalTimeGrid &grid)
+{
+    const auto &reference = ds.mf.get_fermi_dirac_reference();
+    if (!ds.is_scf_eigocc_set || !reference.enabled)
+        throw LIBRPA_RUNTIME_ERROR(
+            "external thermal grid requires SCF eigenvalues and an FD reference");
+    const double beta_kbt = grid.beta_ha_inv * reference.kbt_ha;
+    if (!std::isfinite(grid.beta_ha_inv) || grid.beta_ha_inv <= 0.0 || !std::isfinite(beta_kbt) ||
+        std::abs(beta_kbt - 1.0) > 1e-10)
+        throw LIBRPA_RUNTIME_ERROR("external thermal grid beta differs from the FD reference");
+    if (!std::isfinite(grid.wmax_ha) || grid.wmax_ha <= 0.0 || !std::isfinite(grid.tolerance) ||
+        grid.tolerance <= 0.0 || grid.tolerance >= 1.0)
+        throw LIBRPA_RUNTIME_ERROR(
+            "external thermal grid requires positive wmax and tolerance in (0,1)");
+
+    double largest_transition = 0.0;
+    for (const auto &energies : ds.mf.get_eigenvals())
+    {
+        if (energies.size <= 0)
+            throw LIBRPA_RUNTIME_ERROR("external thermal grid requires nonempty SCF energies");
+        double lowest = std::numeric_limits<double>::infinity();
+        double highest = -lowest;
+        for (std::size_t i = 0; i < energies.size; ++i)
+        {
+            if (!std::isfinite(energies.c[i]))
+                throw LIBRPA_RUNTIME_ERROR("external thermal grid found nonfinite SCF energies");
+            lowest = std::min(lowest, energies.c[i]);
+            highest = std::max(highest, energies.c[i]);
+        }
+        largest_transition = std::max(largest_transition, highest - lowest);
+    }
+    if (!std::isfinite(largest_transition) ||
+        largest_transition > grid.wmax_ha + 1e-10 * std::max(1.0, grid.wmax_ha))
+        throw LIBRPA_RUNTIME_ERROR(
+            "external thermal grid wmax does not cover the SCF transition range");
+}
+
 void initialize_ds_tfgrids(Dataset &ds, const LibrpaOptions &opts)
 {
     global::profiler.start("initialize_ds_tfgrids");
     if (opts.nfreq <= 0)
         throw LIBRPA_RUNTIME_ERROR("number of frequency points must be positive");
+    if (ds.external_thermal_time_grid)
+    {
+        const auto &grid = *ds.external_thermal_time_grid;
+        if (opts.tfgrids_type != LIBRPA_TFGRID_FD_MATSUBARA)
+            throw LIBRPA_RUNTIME_ERROR("external thermal grid requires tfgrids_type = fd_matsubara");
+        if (opts.nfreq != grid.transform.nr || opts.ntau != grid.transform.nc)
+            throw LIBRPA_RUNTIME_ERROR("external thermal grid dimensions differ from nfreq/ntau");
+        validate_external_thermal_time_grid_reference(ds, grid);
+        ds.tfg.reset(opts.nfreq);
+        ds.tfg.set_finite_beta_time_grid(grid.times, grid.beta_ha_inv, grid.transform);
+        global::profiler.stop("initialize_ds_tfgrids");
+        return;
+    }
     ds.tfg.reset(opts.nfreq);
     if (opts.tfgrids_type == LIBRPA_TFGRID_FD_MATSUBARA)
     {

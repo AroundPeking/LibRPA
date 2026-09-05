@@ -241,6 +241,14 @@ public:
     /** @brief Return to the legacy occupation model. */
     void clear_fermi_dirac_reference();
 
+    /** @brief Copy an external row-major complex bosonic time transform; see the C API. */
+    void set_external_thermal_time_grid(
+        double beta_ha_inv, double wmax_ha, double tolerance, int nfreq, int ntau,
+        const double *times, const double *transform_real, const double *transform_imag);
+
+    /** @brief Clear the external transform without changing the FD reference. */
+    void clear_external_thermal_time_grid();
+
     /** @brief Set wavefunction coefficients (separated real/imag arrays). */
     void set_wfc(int ispin, int ik, int nstates_local, int nbasis_local, const double *wfc_real,
                  const double *wfc_imag);
