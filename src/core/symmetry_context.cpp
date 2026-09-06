@@ -1615,12 +1615,15 @@ static symmetry_atom_block_matrix_map_t rotate_symmetry_kspace_operator_blocks_i
                                                                 k_bz_target,
                                                                 "K-space rotation");
 
+    // Each stored operation maps the BZ member back to its IBZ representative.
+    // Restoring a BZ atom therefore reads the IBZ atom at atom_to, with the
+    // phase attached to the original BZ atom (atom_from).
     symmetry_atom_block_matrix_map_t rotated_blocks;
     for (std::size_t target_i = 0; target_i < atom_nbasis.size(); ++target_i)
     {
-        const auto* rot_i = plan.rotations_by_to[target_i];
-        const auto source_i = static_cast<atom_t>(rot_i->atom_from);
-        const auto& M_i = plan.atom_M_blocks[static_cast<std::size_t>(source_i)];
+        const auto* rot_i = plan.rotations_by_from[target_i];
+        const auto source_i = static_cast<atom_t>(rot_i->atom_to);
+        const auto& M_i = plan.atom_M_blocks[target_i];
         for (std::size_t target_j = 0; target_j < atom_nbasis.size(); ++target_j)
         {
             if (target_atom_pairs != nullptr &&
@@ -1629,9 +1632,9 @@ static symmetry_atom_block_matrix_map_t rotate_symmetry_kspace_operator_blocks_i
             {
                 continue;
             }
-            const auto* rot_j = plan.rotations_by_to[target_j];
-            const auto source_j = static_cast<atom_t>(rot_j->atom_from);
-            const auto& M_j = plan.atom_M_blocks[static_cast<std::size_t>(source_j)];
+            const auto* rot_j = plan.rotations_by_from[target_j];
+            const auto source_j = static_cast<atom_t>(rot_j->atom_to);
+            const auto& M_j = plan.atom_M_blocks[target_j];
             ComplexMatrix block_ibz;
             try
             {
@@ -1670,9 +1673,8 @@ static symmetry_atom_block_matrix_map_t rotate_symmetry_kspace_operator_blocks_i
             }
             if (plan.apply_target_gauge)
             {
-                const auto left_phase = plan.atom_target_phases[static_cast<std::size_t>(source_i)];
-                const auto right_phase =
-                    plan.atom_target_phases[static_cast<std::size_t>(source_j)];
+                const auto left_phase = plan.atom_target_phases[target_i];
+                const auto right_phase = plan.atom_target_phases[target_j];
                 block_rotated *= left_phase * std::conj(right_phase);
             }
             rotated_blocks[static_cast<atom_t>(target_i)][static_cast<atom_t>(target_j)] =
@@ -1829,11 +1831,14 @@ static ComplexMatrix build_symmetry_kspace_rotation_matrix_impl(
             block *= phase;
         }
 
-        const int row_offset = offsets.at(atom);
-        const int col_offset = offsets.at(static_cast<std::size_t>(atom_rotation->atom_to));
-        const int nrows = offsets.at(atom + 1) - row_offset;
-        const int ncols = offsets.at(static_cast<std::size_t>(atom_rotation->atom_to) + 1)
-                          - col_offset;
+        // Row-major band coefficients multiply this matrix on the right:
+        // the input column belongs to the IBZ atom_to and the output column
+        // to the BZ atom_from. Keep the phase with atom_from.
+        const int row_offset = offsets.at(static_cast<std::size_t>(atom_rotation->atom_to));
+        const int col_offset = offsets.at(atom);
+        const int nrows = offsets.at(static_cast<std::size_t>(atom_rotation->atom_to) + 1)
+                          - row_offset;
+        const int ncols = offsets.at(atom + 1) - col_offset;
         if (block.nr != nrows || block.nc != ncols)
         {
             throw LIBRPA_RUNTIME_ERROR("K-space rotation matrix block dimension mismatch");
@@ -1938,11 +1943,11 @@ std::array<ComplexMatrix, 3> build_symmetry_kspace_rotation_matrix_derivatives(
             from_coord_cart.x, from_coord_cart.y, from_coord_cart.z,
         }};
 
-        const int row_offset = offsets.at(static_cast<std::size_t>(atom_rotation.atom_from));
-        const int col_offset = offsets.at(static_cast<std::size_t>(atom_rotation.atom_to));
-        const int nrows = offsets.at(static_cast<std::size_t>(atom_rotation.atom_from) + 1)
+        const int row_offset = offsets.at(static_cast<std::size_t>(atom_rotation.atom_to));
+        const int col_offset = offsets.at(static_cast<std::size_t>(atom_rotation.atom_from));
+        const int nrows = offsets.at(static_cast<std::size_t>(atom_rotation.atom_to) + 1)
                           - row_offset;
-        const int ncols = offsets.at(static_cast<std::size_t>(atom_rotation.atom_to) + 1)
+        const int ncols = offsets.at(static_cast<std::size_t>(atom_rotation.atom_from) + 1)
                           - col_offset;
         if (nrows != ncols)
         {

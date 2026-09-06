@@ -1109,8 +1109,9 @@ void test_dense_kspace_rotation_matrix_orders_atom_swap_blocks()
 
     ComplexMatrix expected(2, 2);
     expected.zero_out();
-    expected(0, 1) = rot_0.bloch_rsh_rotations.at(0)(0, 0);
-    expected(1, 0) = rot_1.bloch_rsh_rotations.at(0)(0, 0);
+    // C_BZ(:, atom_from) reads C_IBZ(:, atom_to) in C_BZ = C_IBZ * rotation.
+    expected(1, 0) = rot_0.bloch_rsh_rotations.at(0)(0, 0);
+    expected(0, 1) = rot_1.bloch_rsh_rotations.at(0)(0, 0);
     assert_matrix_close(rotation, expected);
 }
 
