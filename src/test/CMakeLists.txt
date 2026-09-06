@@ -50,6 +50,7 @@ foreach(target
     test_fitting
     test_io
     test_symmetry_context
+    test_si_density_symmetry
     test_task_helper
     test_arbitrary_float
     test_geometry
@@ -106,3 +107,6 @@ if(LIBRPA_USE_LIBRI AND _LIBRPA_USE_BUNDLED_LIBCOMM)
 endif()
 
 # TODO(minye): make use of GTest
+
+target_compile_definitions(test_si_density_symmetry PRIVATE
+  SI_DENSITY_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/si_k444_density_reference.txt")
