@@ -11,6 +11,8 @@ def abs_diff(tolerance, precision=3):
     precision argument determines the number of digits behind the decimal dot.
     """
     tolerance = float(tolerance)
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("tolerance must be finite and nonnegative")
     prec = int(precision)
 
     def inner_float_absdiff(fnobj1, fnobj2):
@@ -40,10 +42,13 @@ def abs_diff(tolerance, precision=3):
                 value1 = _parse_float(o1)
                 value2 = _parse_float(o2)
                 if math.isnan(value1) or math.isnan(value2):
-                    if math.isnan(value1) and math.isnan(value2):
-                        continue
                     return False, (
-                        "nan mismatch in {} value {}: {} != {}"
+                        "nonfinite value (nan mismatch) in {} value {}: {} != {}"
+                        .format(fn, iobj, o1, o2)
+                    )
+                if not math.isfinite(value1) or not math.isfinite(value2):
+                    return False, (
+                        "nonfinite value in {} value {}: {} != {}"
                         .format(fn, iobj, o1, o2)
                     )
                 d = abs(value1 - value2)

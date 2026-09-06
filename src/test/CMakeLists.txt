@@ -79,6 +79,7 @@ target_sources(test_strict_2d_coulomb_head_metadata
 target_compile_options(test_sternheimer_rpa PRIVATE -UNDEBUG)
 target_compile_options(test_sternheimer_symmetry PRIVATE -UNDEBUG)
 target_compile_options(test_symmetry_context PRIVATE -UNDEBUG)
+target_compile_options(test_meanfield PRIVATE -UNDEBUG)
 
 # add 4-process tests
 foreach(target
@@ -93,6 +94,10 @@ foreach(target
   )
   config_test(${target} 4)
 endforeach()
+
+target_compile_options(test_meanfield_mpi PRIVATE -UNDEBUG)
+set_tests_properties(test_symmetry_context test_si_density_symmetry
+  test_meanfield test_meanfield_mpi PROPERTIES LABELS "symmetry")
 
 if(LIBRPA_USE_LIBRI AND _LIBRPA_USE_BUNDLED_LIBCOMM)
   config_test(test_libcomm_bounded_exchange 4)

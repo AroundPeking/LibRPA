@@ -19,9 +19,22 @@ class TestCmpFloat(unittest.TestCase):
         passed, _ = self._compare(["1.00001"], ["1.00002"])
         self.assertTrue(passed)
 
-    def test_matching_nan_values_pass(self):
+    def test_matching_nan_values_fail(self):
         passed, _ = self._compare(["nan"], ["NaN"])
-        self.assertTrue(passed)
+        self.assertFalse(passed)
+
+    def test_matching_infinities_fail(self):
+        for value in ("inf", "-inf"):
+            with self.subTest(value=value):
+                passed, msg = self._compare([value], [value])
+                self.assertFalse(passed)
+                self.assertIn("nonfinite", msg)
+
+    def test_nonfinite_tolerance_is_rejected(self):
+        for tolerance in ("nan", "inf", "-1"):
+            with self.subTest(tolerance=tolerance):
+                with self.assertRaises(ValueError):
+                    cmp_float.abs_diff(tolerance)
 
     def test_nan_in_test_only_fails(self):
         passed, msg = self._compare(["nan"], ["1.0"])
