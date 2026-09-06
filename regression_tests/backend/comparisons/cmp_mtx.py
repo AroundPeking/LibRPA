@@ -165,4 +165,6 @@ def _value_diff(value1, value2):
         if not math.isfinite(x) or not math.isfinite(y):
             return False, 0.0
         diffs.append(x - y)
+    if len(diffs) == 1:
+        return True, abs(diffs[0])
     return True, math.hypot(*diffs)
