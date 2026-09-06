@@ -69,6 +69,14 @@
                 regex="Wing_lambda diagnostics.*real_over_abs=\s*([-+0-9.Ee]+)"
                 comparison="cmp_float.abs_diff(1e-8)"
       />
+      <validate name="Per-q EcRPA real parts"
+                regex="^\|\s*\([^)]*\)\s*:\s*\(([^,()]+),[^()]+\)"
+                comparison="cmp_float.abs_diff(1e-4)"
+      />
+      <validate name="Per-q EcRPA imaginary parts"
+                regex="^\|\s*\([^)]*\)\s*:\s*\([^,()]+,([^()]+)\)"
+                comparison="cmp_float.abs_diff(1e-8)"
+      />
       <validate name="Correlation energy"
                 regex="Total EcRPA: \s+([-+]?\d*\.\d+)"
                 comparison="cmp_float.abs_diff(1e-4)"
