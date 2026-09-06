@@ -104,6 +104,10 @@ if(LIBRPA_USE_LIBRI AND _LIBRPA_USE_BUNDLED_LIBCOMM)
   config_test(test_libcomm_bounded_exchange 4)
 endif()
 
+foreach(target test_rpa_headwing test_symmetry)
+  target_compile_options(${target} PRIVATE -UNDEBUG)
+endforeach()
+
 add_test(NAME test_rpa_logdet_mpi
   COMMAND mpirun -np 4 $<TARGET_FILE:test_rpa_logdet>)
 

@@ -24,7 +24,7 @@ jobs:
       - name: Test regression result validators
         run: |
           python -m unittest discover -s regression_tests/backend/comparisons -p 'test_cmp_*.py'
-          PYTHONPATH=regression_tests python -m unittest discover -s regression_tests/backend -p 'test_*.py'
+          PYTHONPATH="$PWD/regression_tests:$PWD" python -m unittest discover -s regression_tests/backend -p 'test_*.py'
       - name: Setup Intel oneAPI apt repo
         run: |
           # download the key to system keyring
