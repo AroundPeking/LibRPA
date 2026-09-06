@@ -8,6 +8,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <unistd.h>
 #include <valarray>
 
 #include "../core/chi0.h"
@@ -1136,7 +1137,10 @@ void test_strict_2d_omega0_override_basis_modes_are_mutually_exclusive()
 
 void test_strict_2d_omega0_override_reader_validates_shape_and_payload()
 {
-    const std::string path = "strict2d_omega0_override_test.bin";
+    // Each MPI rank (and concurrent test invocation) owns its fixture file.
+    const std::string path = "strict2d_omega0_override_test_" +
+                             std::to_string(librpa_int::global::mpi_comm_global_h.myid) + "_" +
+                             std::to_string(getpid()) + ".bin";
     {
         std::ofstream output(path, std::ios::binary | std::ios::trunc);
         const char magic[8] = {'L', 'R', '2', 'D', 'W', 'C', '0', '1'};

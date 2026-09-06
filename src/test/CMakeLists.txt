@@ -110,6 +110,9 @@ endforeach()
 
 add_test(NAME test_rpa_logdet_mpi
   COMMAND mpirun -np 4 $<TARGET_FILE:test_rpa_logdet>)
+add_test(NAME test_rpa_headwing_mpi
+  COMMAND mpirun -np 4 $<TARGET_FILE:test_rpa_headwing>)
+set_tests_properties(test_rpa_headwing_mpi PROPERTIES TIMEOUT 120)
 
 # TODO(minye): make use of GTest
 

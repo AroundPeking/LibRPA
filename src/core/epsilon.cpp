@@ -4748,8 +4748,12 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(
     const auto n_k_points = pbc.get_n_cells_bvk();
     const auto &Rlist = pbc.Rlist;
 
-    // quick return if empty
-    if (Wc_freq_q.size() == 0) return Wc_freq_R;
+    // Empty ranks must still match the final barrier of the multi-k transform.
+    if (Wc_freq_q.empty())
+    {
+        if (n_k_points != 1) comm_h.barrier();
+        return Wc_freq_R;
+    }
     // For single k-point (Gamma only), there is no need to transform: just remap and return
     if (n_k_points == 1)
     {
