@@ -60,6 +60,7 @@ foreach(target
     test_qpe_solver
     test_rsh
     test_rpa_headwing
+    test_rpa_logdet
     test_strict_2d_coulomb_head_metadata
     test_sternheimer_rpa
     test_sternheimer_symmetry
@@ -102,6 +103,9 @@ set_tests_properties(test_symmetry_context test_si_density_symmetry
 if(LIBRPA_USE_LIBRI AND _LIBRPA_USE_BUNDLED_LIBCOMM)
   config_test(test_libcomm_bounded_exchange 4)
 endif()
+
+add_test(NAME test_rpa_logdet_mpi
+  COMMAND mpirun -np 4 $<TARGET_FILE:test_rpa_logdet>)
 
 # TODO(minye): make use of GTest
 
