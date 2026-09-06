@@ -46,31 +46,76 @@ static std::vector<int> build_atom_offsets(const std::map<atom_t, size_t>& atom_
     return offsets;
 }
 
-static std::vector<int> build_rspace_inverse_map(const SymmetryContext& ctx)
+static std::vector<int> build_rspace_inverse_map(const SymmetryContext& ctx,
+                                                 const bool require_affine_inverse)
 {
     std::vector<int> inverse_map(ctx.rspace_operations.size(), -1);
     for (std::size_t isym = 0; isym < ctx.rspace_operations.size(); ++isym)
     {
+        int inverse_rotation = -1;
         for (std::size_t jsym = 0; jsym < ctx.rspace_operations.size(); ++jsym)
         {
             const auto composed = compose_space_group_symmetry_operations(
                 ctx.rspace_operations[isym], ctx.rspace_operations[jsym]);
-            const bool is_inverse =
-                composed.is_identity_rotation()
-                && nearly_integer_vector(composed.translation, kSymmetryCoordTol);
-
-            if (is_inverse)
+            if (!composed.is_identity_rotation())
+            {
+                continue;
+            }
+            if (inverse_rotation < 0)
+            {
+                inverse_rotation = static_cast<int>(jsym);
+            }
+            if (nearly_integer_vector(composed.translation, kSymmetryCoordTol))
             {
                 inverse_map[isym] = static_cast<int>(jsym);
                 break;
             }
         }
+        if (inverse_map[isym] < 0 && !require_affine_inverse)
+        {
+            inverse_map[isym] = inverse_rotation;
+        }
         if (inverse_map[isym] < 0)
         {
-            throw LIBRPA_RUNTIME_ERROR("Failed to build inverse symmetry-operation map for symmetry");
+            const char* error_message =
+                "Failed to build inverse symmetry-operation map for symmetry";
+            if (!require_affine_inverse)
+            {
+                error_message = "Failed to build inverse rotation map for symmetry";
+            }
+            throw LIBRPA_RUNTIME_ERROR(error_message);
         }
     }
     return inverse_map;
+}
+
+static bool rspace_operations_form_affine_group(const SymmetryContext& ctx)
+{
+    if (ctx.rspace_operations.empty())
+    {
+        return false;
+    }
+    for (const auto& lhs : ctx.rspace_operations)
+    {
+        for (const auto& rhs : ctx.rspace_operations)
+        {
+            const auto composed = compose_space_group_symmetry_operations(lhs, rhs);
+            const auto matching_operation = std::find_if(
+                ctx.rspace_operations.begin(), ctx.rspace_operations.end(),
+                [&composed](const SpaceGroupSymOp& candidate)
+                {
+                    return is_same_matrix(composed.rotation, candidate.rotation,
+                                          kSymmetryCoordTol) &&
+                           nearly_integer_vector(composed.translation - candidate.translation,
+                                                 kSymmetryCoordTol);
+                });
+            if (matching_operation == ctx.rspace_operations.end())
+            {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 static Vector3_Order<int> rotate_rspace_vector(
@@ -315,7 +360,7 @@ static void store_generated_symmetry_kstars(
     ctx.kstars.clear();
     ctx.kstar_member_fold_G.clear();
     ctx.kstars.reserve(generated_stars.size());
-    const auto inverse_map = build_rspace_inverse_map(ctx);
+    const auto inverse_map = build_rspace_inverse_map(ctx, false);
 
     for (std::size_t istar = 0; istar != generated_stars.size(); ++istar)
     {
@@ -575,7 +620,8 @@ void SymmetryContext::build_periodic_mappings(const PeriodicBoundaryData& pbc,
 
 void SymmetryContext::generate_irreducible_sector(const std::vector<Vector3_Order<int>> &Rlist)
 {
-    if (!atom_to_type.empty() && !input_coord_frac.empty() && !Rlist.empty())
+    if (!atom_to_type.empty() && !input_coord_frac.empty() && !Rlist.empty() &&
+        rspace_operations_form_affine_group(*this))
     {
         irreducible_sector = build_symmetry_rspace_irreducible_sector(*this, Rlist);
     }
@@ -2113,7 +2159,7 @@ void build_symmetry_rspace_sector_stars(const SymmetryContext& ctx,
                 preserves_lattice_metric(ctx.rspace_operations[isym].rotation, ctx.lattice_vectors);
         }
     }
-    const auto inverse_map = build_rspace_inverse_map(ctx);
+    const auto inverse_map = build_rspace_inverse_map(ctx, true);
 
     sector_stars.clear();
     std::set<Vector3_Order<int>> Rset(Rlist.begin(), Rlist.end());
