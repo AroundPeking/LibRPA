@@ -113,6 +113,8 @@ add_test(NAME test_rpa_logdet_mpi
 add_test(NAME test_rpa_headwing_mpi
   COMMAND mpirun -np 4 $<TARGET_FILE:test_rpa_headwing>)
 set_tests_properties(test_rpa_headwing_mpi PROPERTIES TIMEOUT 120)
+config_test(test_headwing_descriptor 2)
+set_tests_properties(test_headwing_descriptor PROPERTIES TIMEOUT 30)
 
 # TODO(minye): make use of GTest
 
