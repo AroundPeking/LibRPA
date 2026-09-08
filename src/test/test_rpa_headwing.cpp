@@ -2924,8 +2924,8 @@ void test_wq_to_wr_symmetry_collective_handles_empty_local_rank()
     }
 }
 
-void test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(const int mesh,
-                                                               const int basis_case)
+void test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(
+    const int mesh, const int basis_case, const bool clear_rspace_sector = false)
 {
     const auto pbc_full = make_bn_hexagonal_full_pbc(mesh);
     const auto ctx_full = make_bn_hexagonal_context(pbc_full);
@@ -2991,6 +2991,12 @@ void test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(const int mesh,
         for (auto &[atom_j, q_blocks] : row)
             for (auto &[q, block] : q_blocks) block *= collective_scale;
 
+    if (clear_rspace_sector)
+    {
+        ctx.irreducible_sector.clear();
+        ctx.rspace_sector_stars.clear();
+    }
+
     const TFGrids dummy_tfg;
     SymmetryContext no_symmetry;
     const auto expected =
@@ -3009,6 +3015,11 @@ void test_bn_qstar_wq_to_wr_matches_explicit_full_bz_on_odd_and_even_meshes()
         test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(3, basis_case);
         test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(4, basis_case);
     }
+}
+
+void test_bn_qstar_wq_to_wr_without_rspace_sector_matches_explicit_full_bz()
+{
+    test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(3, 1, true);
 }
 
 void test_bn_qstar_vq_to_vr_without_rspace_sector_matches_explicit_full_bz()
@@ -3439,6 +3450,7 @@ int main(int argc, char *argv[])
         test_wq_to_wr_symmetry_collective_handles_empty_local_rank();
         test_spacetime_fourier_phases_form_k_minus_q_convolution();
         test_bn_qstar_wq_to_wr_matches_explicit_full_bz_on_odd_and_even_meshes();
+        test_bn_qstar_wq_to_wr_without_rspace_sector_matches_explicit_full_bz();
         test_bn_qstar_vq_to_vr_without_rspace_sector_matches_explicit_full_bz();
         test_bn_kstar_green_function_matches_explicit_full_bz_on_odd_and_even_meshes();
         test_dense_wq_to_wr_symmetry_reduced_q_matches_full_bz(blacs_h);
