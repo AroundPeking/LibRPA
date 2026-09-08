@@ -155,8 +155,11 @@ OpenMP threads per rank.
 
 The maximum differences are evaluated over the 16 calculated supercell edge states after
 matching each state to its primitive-cell folded counterpart. The fixed and automatic
-16-point minimax controls agree to the `1e-5 eV` print precision for every reported field;
-the automatic grid is therefore sufficient for this comparison.
+16-point minimax controls were compared after the EXX repair but before removing the
+incorrect `W_c(R)` capability gate; they agree to the `1e-5 eV` print precision for every
+reported field and therefore exclude minimax selection as the source of the original eV-scale
+residual. After the `W_c(R)` repair, the automatic-grid supercell calculation already agrees
+within `0.28 meV`, so the fixed-window supercell calculation was not repeated.
 
 Remote receipts:
 
