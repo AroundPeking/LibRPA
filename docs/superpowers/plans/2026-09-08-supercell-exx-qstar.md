@@ -67,11 +67,11 @@ Rebuild the test target on `df_dcu`; require the new test to pass with one and f
 
 Run `test_rpa_headwing` and symmetry-related CTest entries on `df_dcu`.
 
-- [ ] **Step 2: Run the LibRPA regression suite**
+- [x] **Step 2: Run the LibRPA regression suite**
 
 Run the available regression suite from the same remote executable and record failures separately from numerical result validation.
 
-- [ ] **Step 3: Commit the code fix**
+- [x] **Step 3: Commit the code fix**
 
 Commit only the test, implementation, design, and plan with Codex as author and AroundPeking as committer.
 
@@ -80,15 +80,15 @@ Commit only the test, implementation, design, and plan with Codex as author and 
 **Files:**
 - Create: a new sibling calculation directory under `/work1/ghj/gw/c_diamond_k444_equiv_optTZDP_a3p6_v1_shrink_sym_hw_nohw_20260623`
 
-- [ ] **Step 1: Freeze all inputs except cell/k mesh**
+- [x] **Step 1: Freeze all inputs except cell/k mesh**
 
 Reuse the completed ABACUS producers for primitive `k444` and `2x2x2` supercell `k222`. Keep symmetry on, shrink on, the same PP/NAO/ABFS, occupations, band window, and EXX settings.
 
-- [ ] **Step 2: Run `task = exx` with the fixed LibRPA**
+- [x] **Step 2: Run `task = exx` with the fixed LibRPA**
 
 Use one MPI rank per node, full-node OpenMP/MKL, and a square MPI rank count when more than one node is required.
 
-- [ ] **Step 3: Compare folded equivalent states**
+- [x] **Step 3: Compare folded equivalent states**
 
 Require matching KS and Vxc values and EXX matrix elements within `1 meV`. Stop before GW if this gate fails.
 
@@ -97,14 +97,73 @@ Require matching KS and Vxc values and EXX matrix elements within `1 meV`. Stop 
 **Files:**
 - Create: automatic-window and fixed-window GW result directories beside the EXX gate.
 
-- [ ] **Step 1: Run the automatic 16-point minimax comparison**
+- [x] **Step 1: Run the automatic 16-point minimax comparison**
 
 Run no-headwing and headwing GW for primitive `k444` and supercell `k222` using each calculation's automatically generated minimax range.
 
-- [ ] **Step 2: Run a common explicit minimax-window comparison**
+- [x] **Step 2: Run a common explicit minimax-window comparison**
 
 Set identical `minimax_emin` and `minimax_emax` in both primitive and supercell inputs, retaining 16 points and every other setting from Step 1.
 
-- [ ] **Step 3: Report separate error sources**
+- [x] **Step 3: Report separate error sources**
 
 Tabulate KS, Vxc, EXX, correlation self-energy, and QP differences for folded equivalent states. Attribute any change between automatic and fixed windows only to frequency integration; do not use it to mask residual EXX disagreement.
+
+### Task 6: Restore supercell q-stars in the GW screened interaction
+
+**Files:**
+- Modify: `src/core/epsilon.cpp`
+- Modify: `src/test/test_rpa_headwing.cpp`
+
+- [x] **Step 1: Isolate the post-EXX residual**
+
+After the EXX repair, compare primitive `k444` with supercell `k222`. The EXX elements
+agree within `0.01 meV`, while the no-headwing and headwing gaps still differ by
+`2.31294 eV` and `1.97231 eV`, respectively. The automatic and common minimax windows
+produce identical printed self-energies and QP energies, so frequency-window selection is
+not the source.
+
+- [x] **Step 2: Add a failing screened-interaction regression**
+
+Reuse the rotational BN q-star fixture, clear `irreducible_sector` and
+`rspace_sector_stars`, and require reduced-IBZ `FT_Wc_q2R` to match an explicit full-BZ
+transform. Before the fix, one representative matrix element is
+`-0.00109729-0.000777778i` instead of `0.277772-0.204880i`.
+
+- [x] **Step 3: Remove the unrelated real-space-sector gate**
+
+Allow full-q-star `W_c(q) -> W_c(R)` reconstruction whenever the k-star/grid mapping is
+complete and covers the BvK mesh. Do not require an affine real-space irreducible sector;
+the full-sector transform does not use it.
+
+- [x] **Step 4: Verify software and material results remotely**
+
+On `df_dcu`, require the focused test to pass with one and four MPI ranks, all 49 C++
+tests to pass, all 24 LibRPA regressions to pass, and the symmetry-enabled C supercell GW
+calculation to enter both complete-q-star `V(R)` and `W_c(R)` paths.
+
+## Validation Results
+
+All energies below are in eV. The material calculation reuses the frozen integer-occupation
+ABACUS producers, with symmetry and shrink enabled, four MPI ranks on four nodes, and 30
+OpenMP threads per rank.
+
+| Mode | Primitive gap | Supercell gap | Gap difference | Max `V_exx` difference | Max `ReSigma_c` difference | Max QP difference |
+|---|---:|---:|---:|---:|---:|---:|
+| no headwing | 8.50603 | 8.50607 | +0.00004 | 0.00001 | 0.00028 | 0.00028 |
+| headwing | 5.94600 | 5.94595 | -0.00005 | 0.00001 | 0.00013 | 0.00014 |
+
+The maximum differences are evaluated over the 16 calculated supercell edge states after
+matching each state to its primitive-cell folded counterpart. The fixed and automatic
+16-point minimax controls agree to the `1e-5 eV` print precision for every reported field;
+the automatic grid is therefore sufficient for this comparison.
+
+Remote receipts:
+
+- Red test: job `21912340`, expected failure in `FT_Wc_q2R`.
+- Focused green test: job `21912364`, one- and four-rank passes.
+- Full build and CTest: job `21912392`, 49/49 passed.
+- LibRPA regressions: job `21912409`, 24/24 passed; the independent Si symmetry control
+  also passed its EXX and self-energy tolerances.
+- C supercell GW: jobs `21912420` (no headwing) and `21912421` (headwing), both completed
+  successfully with integer occupations and no non-finite values.
