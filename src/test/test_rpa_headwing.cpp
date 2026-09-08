@@ -12,6 +12,7 @@
 #include <valarray>
 
 #include "../core/chi0.h"
+#include "../core/coulmat.h"
 #include "../core/dielecmodel.h"
 #include "../core/epsilon.h"
 #include "../core/gw.h"
@@ -28,6 +29,7 @@ using librpa_int::atom_mapping;
 using librpa_int::atom_t;
 using librpa_int::AtomicBasis;
 using librpa_int::atpair_k_cplx_mat_t;
+using librpa_int::atpair_R_mat_t;
 using librpa_int::BlacsCtxtHandler;
 using librpa_int::build_symmetry_qpoint_view;
 using librpa_int::C_ONE;
@@ -2437,6 +2439,18 @@ void add_wq_blocks(
     }
 }
 
+void add_vq_blocks(atpair_k_cplx_mat_t &vq, const Vector3_Order<double> &q,
+                   const librpa_int::symmetry_atom_block_matrix_map_t &blocks)
+{
+    for (const auto &[atom_i, row] : blocks)
+    {
+        for (const auto &[atom_j, source] : row)
+        {
+            vq[atom_i][atom_j][q] = std::make_shared<ComplexMatrix>(source);
+        }
+    }
+}
+
 librpa_int::symmetry_atom_block_matrix_map_t make_bn_hermitian_wq_blocks(
     const std::vector<int> &n_by_atom, const double index)
 {
@@ -2731,6 +2745,45 @@ void assert_wq_rspace_maps_close(
     }
 }
 
+void assert_vr_rspace_maps_close(const atpair_R_mat_t &actual,
+                                 const atpair_R_mat_t &expected)
+{
+    assert(actual.size() == expected.size());
+    for (const auto &[atom_i, expected_row] : expected)
+    {
+        assert(actual.count(atom_i) != 0);
+        assert(actual.at(atom_i).size() == expected_row.size());
+        for (const auto &[atom_j, expected_Rs] : expected_row)
+        {
+            assert(actual.at(atom_i).count(atom_j) != 0);
+            assert(actual.at(atom_i).at(atom_j).size() == expected_Rs.size());
+            for (const auto &[R, expected_block_ptr] : expected_Rs)
+            {
+                assert(actual.at(atom_i).at(atom_j).count(R) != 0);
+                const auto &actual_block = *actual.at(atom_i).at(atom_j).at(R);
+                const auto &expected_block = *expected_block_ptr;
+                if (actual_block.nr != expected_block.nr || actual_block.nc != expected_block.nc)
+                    throw std::runtime_error("V(R) atom block dimensions differ");
+                for (int i = 0; i != expected_block.nr; ++i)
+                {
+                    for (int j = 0; j != expected_block.nc; ++j)
+                    {
+                        if (std::abs(actual_block(i, j) - expected_block(i, j)) >= 1e-12)
+                        {
+                            std::cerr << "V(R) atom_pair=(" << atom_i << "," << atom_j
+                                      << ") R=(" << R.x << "," << R.y << "," << R.z
+                                      << ") block=(" << i << "," << j << ") actual="
+                                      << actual_block(i, j) << " expected=" << expected_block(i, j)
+                                      << std::endl;
+                        }
+                        assert(std::abs(actual_block(i, j) - expected_block(i, j)) < 1e-12);
+                    }
+                }
+            }
+        }
+    }
+}
+
 void test_wq_to_wr_symmetry_reduced_q_matches_full_bz()
 {
     const auto pbc_full = make_wq_full_pbc();
@@ -2956,6 +3009,80 @@ void test_bn_qstar_wq_to_wr_matches_explicit_full_bz_on_odd_and_even_meshes()
         test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(3, basis_case);
         test_bn_qstar_wq_to_wr_matches_explicit_full_bz_for_mesh(4, basis_case);
     }
+}
+
+void test_bn_qstar_vq_to_vr_without_rspace_sector_matches_explicit_full_bz()
+{
+    constexpr int mesh = 3;
+    constexpr int basis_case = 1;
+    const auto pbc_full = make_bn_hexagonal_full_pbc(mesh);
+    const auto ctx_full = make_bn_hexagonal_context(pbc_full);
+    const auto pbc_sym = make_bn_hexagonal_reduced_pbc(ctx_full, mesh);
+    const auto shells = make_bn_test_shells(basis_case);
+    const auto counts = basis_counts_from_shells(shells);
+    const int max_l = *std::max_element(shells.front().begin(), shells.front().end());
+    auto ctx = make_bn_hexagonal_context(pbc_sym, max_l);
+
+    AtomicBasis basis_abf(
+        std::vector<std::size_t>{static_cast<std::size_t>(counts.at(0)),
+                                 static_cast<std::size_t>(counts.at(1))});
+    basis_abf.set_l_shells(shells);
+    const auto layouts = basis_abf.build_species_basis_layouts(ctx.atom_to_type);
+    const std::map<atom_t, size_t> atom_nabf{
+        {0, static_cast<std::size_t>(counts.at(0))},
+        {1, static_cast<std::size_t>(counts.at(1))}};
+    const std::set<std::pair<atom_t, atom_t>> target_pairs{{0, 0}, {0, 1}, {1, 0}, {1, 1}};
+
+    atpair_k_cplx_mat_t vq_sym;
+    atpair_k_cplx_mat_t vq_full;
+    const auto full_targets =
+        librpa_int::build_symmetry_full_grid_kstar_member_kfrac_targets(ctx, pbc_sym.kfrac_list);
+    const bool use_full_targets = full_targets.size() == ctx.kstars.size();
+
+    for (std::size_t istar = 0; istar != ctx.kstars.size(); ++istar)
+    {
+        const auto &star = ctx.kstars[istar];
+        const auto mapping_iter =
+            std::find_if(ctx.kstar_grid_mapping.begin(), ctx.kstar_grid_mapping.end(),
+                         [istar](const librpa_int::SymmetryKStarGridMappingEntry &entry)
+                         { return entry.star_list_index == static_cast<int>(istar); });
+        assert(mapping_iter != ctx.kstar_grid_mapping.end());
+        const double index = static_cast<double>(istar + 1);
+        const auto blocks_ibz = make_bn_hermitian_wq_blocks(counts, index);
+        add_vq_blocks(vq_sym, pbc_sym.klist.at(istar), blocks_ibz);
+
+        const auto closure = librpa_int::build_symmetry_upper_atom_pair_closure(star, target_pairs);
+        const auto symmetrized = librpa_int::symmetrize_symmetry_ibz_kspace_operator_blocks(
+            ctx, layouts, star.k_ibz, blocks_ibz, atom_nabf, &closure);
+        for (std::size_t imember = 0; imember != star.members.size(); ++imember)
+        {
+            const auto target = librpa_int::restrict_fractional_coordinate(
+                use_full_targets
+                    ? full_targets.at(istar).at(imember)
+                    : Vector3_Order<double>{pbc_sym.latvec *
+                                            mapping_iter->member_q_bz_keys.at(imember)});
+            const auto rotated = librpa_int::rotate_symmetry_kspace_operator_blocks(
+                ctx, layouts, star.members[imember], symmetrized, atom_nabf, star.k_ibz,
+                star.members[imember].time_reversal, &target_pairs, &target);
+            const auto ifull = find_fractional_kpoint_index(pbc_full.kfrac_list, target);
+            add_vq_blocks(vq_full, pbc_full.klist.at(ifull), rotated);
+        }
+    }
+
+    const double collective_scale =
+        1.0 / static_cast<double>(librpa_int::global::mpi_comm_global_h.nprocs);
+    for (auto &[atom_i, row] : vq_sym)
+        for (auto &[atom_j, q_blocks] : row)
+            for (auto &[q, block] : q_blocks) *block *= collective_scale;
+
+    ctx.irreducible_sector.clear();
+    ctx.rspace_sector_stars.clear();
+    SymmetryContext no_symmetry;
+    const auto expected = librpa_int::FT_Vq(librpa_int::global::mpi_comm_global_h, basis_abf,
+                                             no_symmetry, vq_full, pbc_full, true, false);
+    const auto actual = librpa_int::FT_Vq(librpa_int::global::mpi_comm_global_h, basis_abf, ctx,
+                                           vq_sym, pbc_sym, true, true);
+    assert_vr_rspace_maps_close(actual, expected);
 }
 
 ComplexMatrix restore_bn_test_wfc_to_member(const SymmetryContext &ctx,
@@ -3312,6 +3439,7 @@ int main(int argc, char *argv[])
         test_wq_to_wr_symmetry_collective_handles_empty_local_rank();
         test_spacetime_fourier_phases_form_k_minus_q_convolution();
         test_bn_qstar_wq_to_wr_matches_explicit_full_bz_on_odd_and_even_meshes();
+        test_bn_qstar_vq_to_vr_without_rspace_sector_matches_explicit_full_bz();
         test_bn_kstar_green_function_matches_explicit_full_bz_on_odd_and_even_meshes();
         test_dense_wq_to_wr_symmetry_reduced_q_matches_full_bz(blacs_h);
         test_gamma_only_dense_wq_fourier_weight_scales_as_inverse_bvk_cells();
