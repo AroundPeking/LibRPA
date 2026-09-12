@@ -88,9 +88,11 @@ void librpa_get_exx_pot_band_k(LibrpaHandler *h, const LibrpaOptions *p_opts,
 
 //! Build self-energy matrix of G0W0, including the correlation and exchange contributions.
 /**
- * Explicit Fermi-Dirac references and the fd_matsubara grid are currently rejected:
- * the finite-temperature Wc and Sigma_c transforms are not yet implemented.
- * This restriction does not apply to finite-temperature chi0 or RPA.
+ * Finite-temperature GW requires an explicit Fermi-Dirac reference, fd_matsubara,
+ * and independent external thermal GW operators. The initial CPU route supports
+ * scalar spin, replicated full-k SCF data, optional EXX/chi0/q-star/Sigma symmetry,
+ * LibRI contractions and ScaLAPACK Wc in 3D. Legacy Sigma restart and continuation-grid resampling
+ * are not supported in this route; zero-temperature behavior is unchanged.
  *
  * @param[in]  h                Pointer to LibRPA handler.
  * @param[in]  p_opts           Pointer to runtime options.

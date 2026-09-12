@@ -21,7 +21,7 @@ void write_self_energy_omega(const char *fn, const G0W0 &s_g0w0,
 
     const auto &comm_h = s_g0w0.comm_h;
     const int n_spins = s_g0w0.mf.get_n_spins();
-    const auto &freqs = s_g0w0.tfg.get_freq_nodes();
+    const auto freqs = s_g0w0.get_sigc_frequency_nodes();
     const int n_kpts = static_cast<int>(iks.size());
 
     std::ofstream ofs;

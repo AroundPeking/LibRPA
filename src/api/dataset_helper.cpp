@@ -465,6 +465,15 @@ void initialize_ds_headwing(Dataset &ds, const LibrpaOptions &opts, const bool n
 
     global::profiler.start("initialize_ds_headwing");
 
+    // Thermal nodes and occupations can change without changing their dimensions.
+    // Rebuild analytic data rather than reusing a previous temperature's cache.
+    if (ds.mf.get_fermi_dirac_reference().enabled ||
+        (ds.p_headwing && ds.p_headwing->get_meanfield_df().get_fermi_dirac_reference().enabled))
+    {
+        ds.p_headwing.reset();
+        ds.epsmacs_imagfreq.clear();
+    }
+
     if (ds.p_headwing && (!need_wing || ds.p_headwing->has_wing()))
     {
         global::profiler.stop("initialize_ds_headwing");

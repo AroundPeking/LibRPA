@@ -304,7 +304,7 @@ void check_input()
                              grid + "\nnfreq = 7\nntau = 11\n");
         parse_inputfile_to_params(path.string());
     };
-    for (const auto &task : {"rpa", "g0w0"})
+    for (const auto &task : {"rpa", "g0w0", "g0w0_band"})
     {
         parse(task, "fd_matsubara");
         require(driver::driver_params.fn_thermal_gw_grid == "gw.dat", "filename was not parsed");
@@ -316,7 +316,6 @@ void check_input()
                 "GW option changed the response grid");
     }
     rejects([&]() { parse("exx", "fd_matsubara"); }, "task");
-    rejects([&]() { parse("g0w0_band", "fd_matsubara"); }, "task");
     rejects([&]() { parse("rpa", "minimax"); }, "fd_matsubara");
     rejects([&]() { parse("g0w0", "minimax"); }, "fd_matsubara");
     driver::driver_params = driver::DriverParams();

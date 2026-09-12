@@ -74,8 +74,6 @@ void validate_grid(double beta, const std::vector<double> &times,
         if (unique.size() != indices->size())
             throw std::invalid_argument("thermal GW Matsubara indices must be unique");
     }
-    frequencies(beta, bosonic_indices, false);
-    frequencies(beta, fermionic_indices, true);
 }
 
 ComplexMatrix apply(const ComplexMatrix &coefficients, const ComplexMatrix &samples)
@@ -92,12 +90,26 @@ ComplexMatrix apply(const ComplexMatrix &coefficients, const ComplexMatrix &samp
 }
 }  // namespace
 
+ThermalFrequencyGrid::ThermalFrequencyGrid(double beta_ha_inv, const std::vector<int> &indices,
+                                           bool fermionic)
+    : beta_ha_inv_(beta_ha_inv), fermionic_(fermionic), indices_(indices)
+{
+    if (!std::isfinite(beta_ha_inv) || beta_ha_inv <= 0.0 || !std::isfinite(1.0 / beta_ha_inv))
+        throw std::invalid_argument("thermal GW requires positive finite beta and finite 1/beta");
+    validate_dimensions(indices.size(), 1);
+    const std::unordered_set<int> unique(indices.begin(), indices.end());
+    if (unique.size() != indices.size())
+        throw std::invalid_argument("thermal GW Matsubara indices must be unique");
+    frequencies_ha_ = frequencies(beta_ha_inv, indices, fermionic);
+}
+
 ThermalGWTransform::ThermalGWTransform(double beta_ha_inv, const std::vector<double> &times,
                                        const std::vector<int> &bosonic_indices,
                                        const std::vector<int> &fermionic_indices,
                                        const ComplexMatrix &bosonic_frequency_to_time,
                                        const ComplexMatrix &fermionic_time_to_frequency)
-    : beta_ha_inv_(beta_ha_inv)
+    : bosonic_grid_(beta_ha_inv, bosonic_indices, false),
+      fermionic_grid_(beta_ha_inv, fermionic_indices, true)
 {
     validate_grid(beta_ha_inv, times, bosonic_indices, fermionic_indices);
     validate_matrix(bosonic_frequency_to_time, "thermal GW bosonic operator");
@@ -110,8 +122,6 @@ ThermalGWTransform::ThermalGWTransform(double beta_ha_inv, const std::vector<dou
 
     // Validate before invoking ComplexMatrix's unchecked deep-copy operations.
     times_ = times;
-    bosonic_indices_ = bosonic_indices;
-    fermionic_indices_ = fermionic_indices;
     bosonic_frequency_to_time_ = bosonic_frequency_to_time;
     fermionic_time_to_frequency_ = fermionic_time_to_frequency;
 }
@@ -153,16 +163,6 @@ ThermalGWTransform ThermalGWTransform::from_quadrature(double beta_ha_inv,
     }
     return ThermalGWTransform(beta_ha_inv, times, bosonic_indices, fermionic_indices, bosonic,
                               fermionic);
-}
-
-std::vector<double> ThermalGWTransform::get_bosonic_frequencies_ha() const
-{
-    return frequencies(beta_ha_inv_, bosonic_indices_, false);
-}
-
-std::vector<double> ThermalGWTransform::get_fermionic_frequencies_ha() const
-{
-    return frequencies(beta_ha_inv_, fermionic_indices_, true);
 }
 
 ComplexMatrix ThermalGWTransform::copy_bosonic_frequency_to_time() const

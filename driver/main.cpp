@@ -196,8 +196,12 @@ int main(int argc, char **argv)
         parse_inputfile_to_params(input_filename);
         // Early check of task to fail quickly in case
         task_t task = get_task(driver_params.task);
-        if (!driver_params.fn_thermal_tau_grid.empty() && task != task_t::RPA)
-            throw std::runtime_error("fn_thermal_tau_grid currently requires task=rpa");
+        const bool gw_task = task == task_t::G0W0 || task == task_t::G0W0_band;
+        if (!driver_params.fn_thermal_tau_grid.empty() && task != task_t::RPA && !gw_task)
+            throw std::runtime_error("fn_thermal_tau_grid requires an RPA or GW task");
+        if (gw_task && !driver_params.fn_thermal_tau_grid.empty() &&
+            driver_params.fn_thermal_gw_grid.empty())
+            throw std::runtime_error("thermal GW also requires fn_thermal_gw_grid");
 
         // Initialize LibRPA global environment and handler
         initialize_librpa(librpa_initialized);
@@ -308,8 +312,8 @@ int main(int argc, char **argv)
                     {
                         throw std::runtime_error("Failed to load external thermal GW operators");
                     }
-                    lib_printf_root("External thermal GW operators: %s (metadata only; "
-                                    "finite-temperature GW execution remains disabled)\n",
+                    lib_printf_root("External thermal GW operators: %s "
+                                    "(independent bosonic and fermionic transforms)\n",
                                     driver_params.fn_thermal_gw_grid.c_str());
                 }
             }
@@ -325,6 +329,9 @@ int main(int argc, char **argv)
             // Direct k-BLACS eigenvector input is a LibRI path.  Resolve AUTO before
             // reading wave functions so the reader can choose the final ownership
             // layout instead of first materializing dense matrices on k-group roots.
+            if (gw_task && opts.tfgrids_type == LIBRPA_TFGRID_FD_MATSUBARA &&
+                opts.parallel_routing == LIBRPA_ROUTING_AUTO)
+                opts.parallel_routing = LIBRPA_ROUTING_LIBRI;
             if (driver::opts.parallel_routing == LIBRPA_ROUTING_AUTO)
             {
                 driver::opts.parallel_routing = decide_auto_routing(

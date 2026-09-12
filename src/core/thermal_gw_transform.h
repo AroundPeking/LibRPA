@@ -7,6 +7,23 @@
 
 namespace librpa_int
 {
+/** Generate a validated Matsubara grid once; copies retain the stored values. */
+class ThermalFrequencyGrid
+{
+public:
+    ThermalFrequencyGrid(double beta_ha_inv, const std::vector<int> &indices, bool fermionic);
+    double get_beta_ha_inv() const { return beta_ha_inv_; }
+    bool is_fermionic() const { return fermionic_; }
+    const std::vector<int> &get_indices() const { return indices_; }
+    const std::vector<double> &get_frequencies_ha() const { return frequencies_ha_; }
+
+private:
+    double beta_ha_inv_;
+    bool fermionic_;
+    std::vector<int> indices_;
+    std::vector<double> frequencies_ha_;
+};
+
 /** Owned, integral-normalized finite-temperature GW transforms (internal only).
  *
  * B(j,m) maps Wc(i*nu_m) to Wc(tau_j), with nu_m = 2*pi*m/beta.
@@ -40,12 +57,20 @@ public:
                                               const std::vector<int> &bosonic_indices,
                                               const std::vector<int> &fermionic_indices);
 
-    double get_beta_ha_inv() const { return beta_ha_inv_; }
+    double get_beta_ha_inv() const { return fermionic_grid_.get_beta_ha_inv(); }
     const std::vector<double> &get_times() const { return times_; }
-    const std::vector<int> &get_bosonic_indices() const { return bosonic_indices_; }
-    const std::vector<int> &get_fermionic_indices() const { return fermionic_indices_; }
-    std::vector<double> get_bosonic_frequencies_ha() const;
-    std::vector<double> get_fermionic_frequencies_ha() const;
+    const ThermalFrequencyGrid &get_bosonic_grid() const { return bosonic_grid_; }
+    const ThermalFrequencyGrid &get_fermionic_grid() const { return fermionic_grid_; }
+    const std::vector<int> &get_bosonic_indices() const { return bosonic_grid_.get_indices(); }
+    const std::vector<int> &get_fermionic_indices() const { return fermionic_grid_.get_indices(); }
+    const std::vector<double> &get_bosonic_frequencies_ha() const
+    {
+        return bosonic_grid_.get_frequencies_ha();
+    }
+    const std::vector<double> &get_fermionic_frequencies_ha() const
+    {
+        return fermionic_grid_.get_frequencies_ha();
+    }
 
     // Return deep copies: even a const ComplexMatrix exposes a writable c pointer.
     ComplexMatrix copy_bosonic_frequency_to_time() const;
@@ -54,10 +79,9 @@ public:
     ComplexMatrix apply_fermionic_time_to_frequency(const ComplexMatrix &samples) const;
 
 private:
-    double beta_ha_inv_;
     std::vector<double> times_;
-    std::vector<int> bosonic_indices_;
-    std::vector<int> fermionic_indices_;
+    ThermalFrequencyGrid bosonic_grid_;
+    ThermalFrequencyGrid fermionic_grid_;
     ComplexMatrix bosonic_frequency_to_time_;
     ComplexMatrix fermionic_time_to_frequency_;
 };

@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -78,6 +79,12 @@ void check_signed_complex_modes()
     const std::vector<int> bosons{2, -1, 0}, fermions{1, -2, -1, 0};
     const auto transform =
         ThermalGWTransform::from_quadrature(beta, times, {1.0, 1.2, 1.8}, bosons, fermions);
+    require(std::is_lvalue_reference<decltype(transform.get_bosonic_frequencies_ha())>::value &&
+                std::is_lvalue_reference<decltype(transform.get_fermionic_frequencies_ha())>::value,
+            "frequency getters must expose the stored grid, not regenerate it");
+    const auto &stored = transform.get_fermionic_frequencies_ha();
+    require(stored.data() == transform.get_fermionic_frequencies_ha().data(),
+            "repeated frequency access must retain the same storage");
     require(transform.get_beta_ha_inv() == beta && transform.get_times() == times &&
                 transform.get_bosonic_indices() == bosons &&
                 transform.get_fermionic_indices() == fermions,
@@ -121,6 +128,25 @@ void check_signed_complex_modes()
     for (int j = 0; j < 3; ++j)
         for (int col = 0; col < 2; ++col)
             close(zero_time(j, col), zero_sample(0, col) / beta, 0.0, "zero mode counted once");
+}
+
+void check_owned_frequency_grid()
+{
+    using librpa_int::ThermalFrequencyGrid;
+    std::vector<int> labels{16000, -1, 0, -16001, 3, -4};
+    const ThermalFrequencyGrid grid(3157.75024849497186, labels, true);
+    const auto original = grid.get_frequencies_ha();
+    labels.clear();
+    auto copied = grid;
+    require(copied.get_indices() == grid.get_indices() &&
+                copied.get_frequencies_ha() == original && copied.is_fermionic(),
+            "owned grid copy changed its labels or frequencies");
+    require(copied.get_frequencies_ha().data() != grid.get_frequencies_ha().data(),
+            "grid value copies must own their storage");
+    reject([] { ThermalFrequencyGrid(0.0, {0}, true); });
+    reject([] { ThermalFrequencyGrid(8.0, {}, true); });
+    reject([] { ThermalFrequencyGrid(8.0, {0, 0}, true); });
+    reject([] { ThermalFrequencyGrid(std::numeric_limits<double>::infinity(), {0}, true); });
 }
 
 void check_owned_external_operators()
@@ -601,6 +627,7 @@ int main()
     std::cout << std::setprecision(12);
     const std::vector<std::pair<std::string, std::function<void()>>> tests{
         {"signed complex modes and zero mode", check_signed_complex_modes},
+        {"owned frequency grid copies and validation", check_owned_frequency_grid},
         {"owned external rectangular operators", check_owned_external_operators},
         {"rectangular B/F batches vs scalar reference", check_rectangular_batches},
         {"independent thermal single-pole W", check_single_pole_w},

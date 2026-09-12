@@ -186,8 +186,8 @@ static void validate_input_parameters()
                    });
     if (!params.fn_thermal_gw_grid.empty())
     {
-        if (task != "rpa" && task != "g0w0")
-            throw std::runtime_error("fn_thermal_gw_grid requires task=rpa or g0w0 (metadata only)");
+        if (task != "rpa" && task != "g0w0" && task != "g0w0_band")
+            throw std::runtime_error("fn_thermal_gw_grid requires task=rpa, g0w0 or g0w0_band");
         if (driver::opts.tfgrids_type != LIBRPA_TFGRID_FD_MATSUBARA)
             throw std::runtime_error("fn_thermal_gw_grid requires tfgrids_type=fd_matsubara");
     }

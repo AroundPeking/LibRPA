@@ -4238,13 +4238,10 @@ static Matz restore_symmetry_blacs_wq_to_star_source(const Matz& Wq_source,
     return Wq_star;
 }
 
-static std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
-    const std::map<Vector3_Order<double>, Matz>& Wq_rep_map,
-    const PeriodicBoundaryData& pbc,
-    const SymmetryQPointView& qpoint_view,
-    const SymmetryContext& symmetry_context,
-    const AtomicBasis& atbasis_Wc,
-    const ArrayDesc& ad_Wc)
+std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
+    const std::map<Vector3_Order<double>, Matz> &Wq_rep_map, const PeriodicBoundaryData &pbc,
+    const SymmetryQPointView &qpoint_view, const SymmetryContext &symmetry_context,
+    const AtomicBasis &atbasis_Wc, const ArrayDesc &ad_Wc)
 {
     const auto atom_nabf = build_atom_nabf_map(atbasis_Wc);
     const auto abf_layouts =
