@@ -338,7 +338,10 @@ void initialize_ds_exx(Dataset &ds, const LibrpaOptions &opts)
     {
         reject_spinor_symmetry_speedup(ds, "EXX");
     }
-    initialize_symmetry_context(ds, use_symmetry);
+    // The context is shared by EXX, chi0 and GW; a later stage must not erase
+    // rotations still needed by an earlier stage's q-star view.
+    initialize_symmetry_context(ds, use_symmetry || opts.use_symmetry_rpa == LIBRPA_SWITCH_ON ||
+                                        opts.use_symmetry_gw == LIBRPA_SWITCH_ON);
     if (use_symmetry)
     {
         require_symmetry_shell_layouts(ds, "EXX");
@@ -363,7 +366,8 @@ void initialize_ds_chi0(Dataset &ds, const LibrpaOptions &opts)
     {
         reject_spinor_symmetry_speedup(ds, "RPA/chi0");
     }
-    initialize_symmetry_context(ds, use_symmetry);
+    initialize_symmetry_context(ds, use_symmetry || opts.use_symmetry_exx == LIBRPA_SWITCH_ON ||
+                                        opts.use_symmetry_gw == LIBRPA_SWITCH_ON);
     if (use_symmetry)
     {
         require_symmetry_shell_layouts(ds, "RPA/chi0");
@@ -398,7 +402,8 @@ void initialize_ds_g0w0(Dataset &ds, const LibrpaOptions &opts)
     {
         reject_spinor_symmetry_speedup(ds, "GW");
     }
-    initialize_symmetry_context(ds, use_symmetry);
+    initialize_symmetry_context(ds, use_symmetry || opts.use_symmetry_exx == LIBRPA_SWITCH_ON ||
+                                        opts.use_symmetry_rpa == LIBRPA_SWITCH_ON);
     if (use_symmetry)
     {
         require_symmetry_shell_layouts(ds, "GW");
@@ -436,6 +441,15 @@ void initialize_ds_headwing(Dataset &ds, const LibrpaOptions &opts, const bool n
     }
 
     global::profiler.start("initialize_ds_headwing");
+
+    // Thermal nodes and occupations can change without changing their dimensions.
+    // Rebuild analytic data rather than reusing a previous temperature's cache.
+    if (ds.mf.get_fermi_dirac_reference().enabled ||
+        (ds.p_headwing && ds.p_headwing->get_meanfield_df().get_fermi_dirac_reference().enabled))
+    {
+        ds.p_headwing.reset();
+        ds.epsmacs_imagfreq.clear();
+    }
 
     if (ds.p_headwing && (!need_wing || ds.p_headwing->has_wing()))
     {

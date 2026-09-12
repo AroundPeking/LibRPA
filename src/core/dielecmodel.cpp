@@ -4635,11 +4635,6 @@ void diele_func::rewrite_metallic_static_3d_wc(
         Lind, schur_qminus2, schur_qminus1, qx_leb, qy_leb, qz_leb, qw_leb, physical_q_gamma,
         physical_gamma_volume);
 
-    auto regular_coulomb_sqrt = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
-    ScalapackConnector::pgemr2d_f(nbody, nbody, projected_coulomb_sqrt.ptr(), 2, 2,
-                                  desc_nabf_nabf_opt.desc, regular_coulomb_sqrt.ptr(), 1, 1,
-                                  desc_body.desc, blacs_h.ictxt);
-
     std::complex<double> head_sqrt_local = 0.0;
     const int local_head_row = desc_nabf_nabf_opt.indx_g2l_r(0);
     const int local_head_column = desc_nabf_nabf_opt.indx_g2l_c(0);
@@ -4648,8 +4643,7 @@ void diele_func::rewrite_metallic_static_3d_wc(
     std::complex<double> head_sqrt = 0.0;
     MPI_Allreduce(&head_sqrt_local, &head_sqrt, 1, MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
 
-    double maximum_head_body_local = 0.0;
-    double maximum_regular_local = 0.0;
+    double maximum_coulomb_local = 0.0;
     for (int iloc = 0; iloc != desc_nabf_nabf_opt.m_loc(); ++iloc)
     {
         const int i = desc_nabf_nabf_opt.indx_l2g_r(iloc);
@@ -4657,28 +4651,20 @@ void diele_func::rewrite_metallic_static_3d_wc(
         {
             const int j = desc_nabf_nabf_opt.indx_l2g_c(jloc);
             const double magnitude = std::abs(projected_coulomb_sqrt(iloc, jloc));
-            if ((i == 0 && j > 0 && j < as_int(n_nonsingular)) ||
-                (j == 0 && i > 0 && i < as_int(n_nonsingular)))
-                maximum_head_body_local = std::max(maximum_head_body_local, magnitude);
-            if (i > 0 && i < as_int(n_nonsingular) && j > 0 && j < as_int(n_nonsingular))
-                maximum_regular_local = std::max(maximum_regular_local, magnitude);
+            if (i < as_int(n_nonsingular) && j < as_int(n_nonsingular))
+                maximum_coulomb_local = std::max(maximum_coulomb_local, magnitude);
         }
     }
-    double maximum_head_body = 0.0;
-    double maximum_regular = 0.0;
-    MPI_Allreduce(&maximum_head_body_local, &maximum_head_body, 1, MPI_DOUBLE, MPI_MAX,
-                  comm_h.comm);
-    MPI_Allreduce(&maximum_regular_local, &maximum_regular, 1, MPI_DOUBLE, MPI_MAX, comm_h.comm);
-    const double coulomb_scale = std::max({1.0, std::abs(head_sqrt), maximum_regular});
+    double maximum_coulomb = 0.0;
+    MPI_Allreduce(&maximum_coulomb_local, &maximum_coulomb, 1, MPI_DOUBLE, MPI_MAX, comm_h.comm);
+    const double coulomb_scale = std::max(1.0, maximum_coulomb);
     if (head_sqrt.real() <= 0.0 || std::abs(head_sqrt.imag()) > 1.0e-10 * coulomb_scale)
         throw std::runtime_error(
             "metallic static complete-Wc Coulomb head square root is not positive real");
-    if (maximum_head_body > 1.0e-8 * coulomb_scale)
-        throw std::runtime_error(
-            "metallic static complete-Wc projected Coulomb square root mixes head and body");
-
+    // Form the existing Gamma model with unit outer Coulomb roots first. The
+    // full cut-Coulomb root need not be block diagonal in the full-V basis.
     const double bare_coulomb_head_average = 2.0 * TWO_PI * inverse_weights.bare_qminus2;
-    const double head_scale = head_sqrt.real() / std::sqrt(bare_coulomb_head_average);
+    const double head_scale = 1.0 / std::sqrt(bare_coulomb_head_average);
     const double sqrt_four_pi = std::sqrt(2.0 * TWO_PI);
 
     auto inverse_body_average = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
@@ -4703,15 +4689,6 @@ void diele_func::rewrite_metallic_static_3d_wc(
             inverse_body_average(iloc, jloc) = value;
         }
     }
-
-    auto body_tmp = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
-    auto wc_body = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
-    ScalapackConnector::pgemm_f('N', 'N', nbody, nbody, nbody, C_ONE, regular_coulomb_sqrt.ptr(), 1,
-                                1, desc_body.desc, inverse_body_average.ptr(), 1, 1, desc_body.desc,
-                                C_ZERO, body_tmp.ptr(), 1, 1, desc_body.desc);
-    ScalapackConnector::pgemm_f('N', 'N', nbody, nbody, nbody, C_ONE, body_tmp.ptr(), 1, 1,
-                                desc_body.desc, regular_coulomb_sqrt.ptr(), 1, 1, desc_body.desc,
-                                C_ZERO, wc_body.ptr(), 1, 1, desc_body.desc);
 
     ArrayDesc desc_body_head(blacs_h);
     desc_body_head.init(nbody, 1, desc_body.mb(), 1, 0, 0);
@@ -4744,33 +4721,35 @@ void diele_func::rewrite_metallic_static_3d_wc(
         }
     }
 
-    auto wc_body_head = init_local_mat<complex<double>>(desc_body_head, MAJOR::COL);
-    auto wc_head_body = init_local_mat<complex<double>>(desc_head_body, MAJOR::COL);
-    ScalapackConnector::pgemm_f('N', 'N', nbody, 1, nbody, C_ONE, regular_coulomb_sqrt.ptr(), 1, 1,
-                                desc_body.desc, inverse_body_head.ptr(), 1, 1, desc_body_head.desc,
-                                C_ZERO, wc_body_head.ptr(), 1, 1, desc_body_head.desc);
-    ScalapackConnector::pgemm_f('N', 'N', 1, nbody, nbody, C_ONE, inverse_head_body.ptr(), 1, 1,
-                                desc_head_body.desc, regular_coulomb_sqrt.ptr(), 1, 1,
-                                desc_body.desc, C_ZERO, wc_head_body.ptr(), 1, 1,
-                                desc_head_body.desc);
-
     this->chi0 = init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
     this->chi0.zero_out();
-    ScalapackConnector::pgemr2d_f(nbody, nbody, wc_body.ptr(), 1, 1, desc_body.desc,
+    ScalapackConnector::pgemr2d_f(nbody, nbody, inverse_body_average.ptr(), 1, 1, desc_body.desc,
                                   this->chi0.ptr(), 2, 2, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
-    ScalapackConnector::pgemr2d_f(nbody, 1, wc_body_head.ptr(), 1, 1, desc_body_head.desc,
+    ScalapackConnector::pgemr2d_f(nbody, 1, inverse_body_head.ptr(), 1, 1, desc_body_head.desc,
                                   this->chi0.ptr(), 2, 1, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
-    ScalapackConnector::pgemr2d_f(1, nbody, wc_head_body.ptr(), 1, 1, desc_head_body.desc,
+    ScalapackConnector::pgemr2d_f(1, nbody, inverse_head_body.ptr(), 1, 1, desc_head_body.desc,
                                   this->chi0.ptr(), 1, 2, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
     if (local_head_row >= 0 && local_head_column >= 0)
         this->chi0(local_head_row, local_head_column) =
             head_scale * head_scale * 2.0 * TWO_PI *
             (inverse_weights.inverse_q2 - inverse_weights.bare_qminus2);
 
+    // Apply T M T once, including head-body mixing and the complete -T^2 term.
+    auto wc_tmp = init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
+    const int n = as_int(n_nonsingular);
+    ScalapackConnector::pgemm_f('N', 'N', n, n, n, C_ONE, projected_coulomb_sqrt.ptr(), 1, 1,
+                                desc_nabf_nabf_opt.desc, this->chi0.ptr(), 1, 1,
+                                desc_nabf_nabf_opt.desc, C_ZERO, wc_tmp.ptr(), 1, 1,
+                                desc_nabf_nabf_opt.desc);
+    ScalapackConnector::pgemm_f('N', 'N', n, n, n, C_ONE, wc_tmp.ptr(), 1, 1,
+                                desc_nabf_nabf_opt.desc, projected_coulomb_sqrt.ptr(), 1, 1,
+                                desc_nabf_nabf_opt.desc, C_ZERO, this->chi0.ptr(), 1, 1,
+                                desc_nabf_nabf_opt.desc);
+
     if (debug && comm_h.is_root())
         global::lib_printf(
             "Metallic static complete Wc Gamma avg: schur_qminus2=(%.12e,%.12e) "
-            "head_scale=%.12e volume=%.12e\n",
+            "normalized_head_scale=%.12e volume=%.12e; full Coulomb congruence\n",
             schur_qminus2.real(), schur_qminus2.imag(), head_scale, inverse_weights.volume);
     assign_chi0(epsilon_block, desc_nabf_nabf_opt);
     this->chi0.clear();
@@ -4916,12 +4895,14 @@ std::complex<double> diele_func::compute_rpa_trace_log_average(
 
     const int body_start = rpa_headwing_regular_body_start_channel(settings);
     const int wing_row_offset = body_start - 1;
-    if (desc_response.m() <= body_start || wing_row_offset >= wing.at(ifreq).nr())
+    // The wing is distributed; a rank may own no rows of a valid global wing.
+    const int global_wing_rows = static_cast<int>(n_nonsingular) - 1;
+    if (desc_response.m() <= body_start || wing_row_offset >= global_wing_rows)
     {
         std::ostringstream oss;
         oss << "RPA head/wing regular-body split is inconsistent: response_size="
             << desc_response.m() << ", body_start=" << body_start
-            << ", wing_rows=" << wing.at(ifreq).nr();
+            << ", wing_rows=" << global_wing_rows;
         throw std::logic_error(oss.str());
     }
 

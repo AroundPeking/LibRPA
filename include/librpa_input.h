@@ -102,9 +102,9 @@ void librpa_set_external_thermal_rpa_grid(
 void librpa_clear_external_thermal_time_grid(LibrpaHandler* h);
 
 /**
- * @brief Copy independent finite-temperature GW operators (experimental input only).
+ * @brief Copy independent finite-temperature GW operators.
  *
- * This does NOT enable thermal GW execution. All arrays are copied. SCF energies
+ * All arrays are copied; no calculation is started by this setter. SCF energies
  * and an FD reference must already be set; beta (Ha^-1) must match 1/kBT.
  * Positive finite bounds in Ha cover G: abs(epsilon-mu), the Wc spectrum,
  * and Sigma: sigma_wmax >= g_wmax + w_wmax (up to roundoff). W/Sigma spectral

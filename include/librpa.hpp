@@ -256,7 +256,7 @@ public:
     /** @brief Clear the external transform without changing the FD reference. */
     void clear_external_thermal_time_grid();
 
-    /** @brief Copy independent complex GW operators; does not enable thermal GW. See C API. */
+    /** @brief Copy independent complex GW operators; see C API for supported thermal routes. */
     void set_external_thermal_gw_grid(
         double beta_ha_inv, double g_wmax_ha, double w_wmax_ha, double sigma_wmax_ha,
         double tolerance, int ntau, int nboson, int nfermion, const double *times,

@@ -992,11 +992,18 @@ without clearing the FD reference using `clear_external_thermal_time_grid`.
 ### External thermal GW operators v1
 
 `fn_thermal_gw_grid` is an optional filename relative to `input_dir`, empty
-by default. It loads **metadata only**, for `task=rpa` or `task=g0w0`, with
-`tfgrids_type=fd_matsubara`. It does not enable thermal GW execution or
-remove the existing public finite-temperature GW guard. It does not change
-the RPA-only restrictions of `fn_thermal_tau_grid`; specifying both filenames
-therefore still requires `task=rpa`.
+by default, for `task=rpa`, `task=g0w0` or `task=g0w0_band` with
+`tfgrids_type=fd_matsubara`. For RPA it only stores independent GW operators.
+For GW it is required by the initial 3D CPU route: scalar spin, replicated
+full-k SCF, optional EXX/response/Sigma symmetry, LibRI contractions and ScaLAPACK
+Wc. `fn_thermal_tau_grid` may provide the response grid independently; both
+files are allowed for GW. Loading either file does not itself run a calculation.
+The GW consumer unfolds compressed Wc to the full auxiliary basis, restores
+irreducible q stars when response symmetry is enabled, and completes negative
+bosonic samples by the matrix adjoint, then projects the resulting
+fermionic self-energy using the existing nearest-image averaging. Legacy Sigma
+restart and continuation-grid resampling are explicitly rejected in this route.
+Material convergence and head/wing accuracy remain separate validation tasks.
 
 The strict whitespace-separated ASCII layout, as emitted by
 `utilities/generate_thermal_gw_grid.py`, is:
@@ -1032,7 +1039,7 @@ Unique signed fermionic labels n denote `omega_n = (2*n+1)*pi/beta` and are
 closed under `n -> -n-1`. Both lists may have arbitrary order, which is
 preserved exactly with their operator columns/rows. Negative sparse-ir odd
 label -1 corresponds to n=-1, not n=0. No sorting, positive-only completion,
-conjugate completion or real projection is performed.
+conjugate completion or real projection is performed by the reader.
 
 `B[ntau,nboson]` maps `Wc(i*nu_m)` to `Wc(tau_j)` with the inverse sign
 `exp(-i*nu*tau)`. Its zero-frequency column obeys

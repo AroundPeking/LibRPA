@@ -110,6 +110,13 @@ CorrEnergy compute_RPA_correlation_blacs_2d_gamma_only(Chi0 &chi0, atpair_k_cplx
                                                        bool use_gpu_replace_scalapack = false);
 CorrEnergy compute_MP2_correlation(const Chi0 &chi0, const atpair_k_cplx_mat_t &coulmat);
 
+// Restore representative screened matrices in the original spherical-shell ABF
+// basis. Compressed matrices must be unfolded before this operation.
+std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
+    const std::map<Vector3_Order<double>, Matz> &Wq_rep_map, const PeriodicBoundaryData &pbc,
+    const SymmetryQPointView &qpoint_view, const SymmetryContext &symmetry_context,
+    const AtomicBasis &atbasis_Wc, const ArrayDesc &ad_Wc);
+
 std::map<double, std::map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>
 compute_Pi_q(const Chi0 &chi0, const atpair_k_cplx_mat_t &coulmat);
 std::map<double, std::map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>>

@@ -1,6 +1,7 @@
 #include "gw.h"
 
 // Public API headers
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -708,6 +709,11 @@ void G0W0::reset_rspace()
 {
     sigc_is_f_IJ_R.clear();
     is_rspace_built_ = false;
+    is_thermal_sigc_ = false;
+    sigc_beta_ha_inv_ = 0.0;
+    sigc_chemical_potential_ha_ = 0.0;
+    sigc_frequency_nodes_.clear();
+    sigc_fermionic_indices_.clear();
 }
 
 void G0W0::reset_kspace()
@@ -718,8 +724,233 @@ void G0W0::reset_kspace()
     sigc_kspace_source_.clear();
 }
 
+std::vector<double> G0W0::get_sigc_frequency_nodes() const
+{
+    return is_thermal_sigc_ ? sigc_frequency_nodes_ : tfg.get_freq_nodes();
+}
+
+int G0W0::get_sigc_frequency_index(const double frequency) const
+{
+    if (!is_thermal_sigc_) return tfg.get_freq_index(frequency);
+    const auto it =
+        std::lower_bound(sigc_frequency_nodes_.begin(), sigc_frequency_nodes_.end(), frequency);
+    if (!std::isfinite(frequency) || it == sigc_frequency_nodes_.end() || *it != frequency)
+        throw LIBRPA_RUNTIME_ERROR("frequency not found on the positive fermionic Sigma grid");
+    return static_cast<int>(std::distance(sigc_frequency_nodes_.begin(), it));
+}
+
+void G0W0::set_thermal_sigc(ThermalSigcRspace result)
+{
+    const auto &grid = result.fermionic_grid;
+    const double beta = grid.get_beta_ha_inv();
+    const auto &labels = grid.get_indices();
+    const auto &frequencies = grid.get_frequencies_ha();
+    const auto collective_check = [&](const auto &check)
+    {
+        std::string message;
+        try
+        {
+            check();
+        }
+        catch (const std::exception &error)
+        {
+            message = error.what();
+        }
+        int failed = !message.empty();
+        MPI_Allreduce(MPI_IN_PLACE, &failed, 1, MPI_INT, MPI_MAX, comm_h.comm);
+        if (failed)
+            throw std::invalid_argument(
+                "thermal Sigma import: " +
+                (message.empty() ? "invalid input on another rank" : message));
+    };
+
+    std::map<int, double> signed_frequencies;
+    collective_check(
+        [&]
+        {
+            const auto &fd = mf.get_fermi_dirac_reference();
+            if (!fd.enabled || !std::isfinite(fd.kbt_ha) || fd.kbt_ha <= 0.0 ||
+                !std::isfinite(beta * fd.kbt_ha) || std::abs(beta * fd.kbt_ha - 1.0) > 1e-10)
+                throw std::invalid_argument("positive finite beta does not match the FD reference");
+            if (!grid.is_fermionic())
+                throw std::invalid_argument("requires a fermionic frequency grid");
+            if (!std::isfinite(result.chemical_potential_ha) ||
+                !std::isfinite(fd.chemical_potential_ha))
+                throw std::invalid_argument("requires a finite FD chemical potential");
+            validate_fermi_dirac_chemical_potential(fd, result.chemical_potential_ha);
+            validate_fermi_dirac_chemical_potential(fd, mf.get_efermi());
+            if (mf.get_n_spinor() != 1)
+                throw std::invalid_argument("requires scalar spin");
+            // Spatially reduced contractions have already restored full AO/R
+            // blocks; the import and its ordinary distributed sum are unchanged.
+            if (use_symmetry_context &&
+                (pbc.klist != pbc.klist_full || mf.get_n_kpoints() != pbc.get_n_cells_bvk()))
+                throw std::invalid_argument("self-energy symmetry import requires a full SCF k grid");
+            if (mf.get_n_spins() <= 0 || atbasis_wfc.n_atoms == 0 ||
+                atbasis_wfc.nb_total != mf.get_n_aos())
+                throw std::invalid_argument("invalid AO/spin dimensions");
+            if (labels.empty() || labels.size() != frequencies.size() ||
+                labels.size() > std::size_t(std::numeric_limits<int>::max()))
+                throw std::invalid_argument("requires nonempty signed fermionic labels");
+            bool has_positive = false;
+            for (std::size_t i = 0; i < labels.size(); ++i)
+            {
+                signed_frequencies.emplace(labels[i], frequencies[i]);
+                has_positive = has_positive || labels[i] >= 0;
+            }
+            if (!has_positive)
+                throw std::invalid_argument("requires at least one positive fermionic sample");
+            for (const auto &[spin, samples] : result.blocks)
+            {
+                if (spin < 0 || spin >= mf.get_n_spins())
+                    throw std::invalid_argument("spin index is out of range");
+                for (const auto &[n, pairs] : samples)
+                {
+                    if (signed_frequencies.count(n) == 0)
+                        throw std::invalid_argument("sample label is not on the supplied grid");
+                    for (const auto &[ij, cells] : pairs)
+                    {
+                        if (ij.first >= atbasis_wfc.n_atoms || ij.second >= atbasis_wfc.n_atoms)
+                            throw std::invalid_argument("atom index is out of range");
+                        const auto ni = atbasis_wfc.get_atom_nb(ij.first);
+                        const auto nj = atbasis_wfc.get_atom_nb(ij.second);
+                        for (const auto &[r, block] : cells)
+                        {
+                            if (pbc.get_R_index(r) < 0)
+                                throw std::invalid_argument("R is not on the SCF BvK grid");
+                            if (ni == 0 || nj == 0 || block.nr() != ni || block.nc() != nj ||
+                                block.size() != ni * nj || !block.sptr() ||
+                                block.sptr()->size() != ni * nj ||
+                                (block.major() != MAJOR::ROW && block.major() != MAJOR::COL))
+                                throw std::invalid_argument("invalid atom-local AO block storage");
+                            for (std::size_t i = 0; i < block.size(); ++i)
+                                if (!std::isfinite(block.ptr()[i].real()) ||
+                                    !std::isfinite(block.ptr()[i].imag()))
+                                    throw std::invalid_argument("nonfinite signed Sigma sample");
+                        }
+                    }
+                }
+            }
+        });
+
+    // Metadata must agree before rank-local sparse blocks enter projection collectives.
+    const int local_shape[]{mf.get_n_spins(), mf.get_n_aos(), as_int(atbasis_wfc.n_atoms),
+                            as_int(labels.size())};
+    int root_shape[4];
+    std::copy(local_shape, local_shape + 4, root_shape);
+    MPI_Bcast(root_shape, 4, MPI_INT, 0, comm_h.comm);
+    collective_check(
+        [&]
+        {
+            if (!std::equal(local_shape, local_shape + 4, root_shape))
+                throw std::invalid_argument("basis/spin/grid dimensions differ across ranks");
+        });
+    const double local_metadata[]{
+        beta, result.chemical_potential_ha, mf.get_fermi_dirac_reference().kbt_ha,
+        mf.get_fermi_dirac_reference().chemical_potential_ha, mf.get_efermi()};
+    double root_metadata[5];
+    std::copy(local_metadata, local_metadata + 5, root_metadata);
+    MPI_Bcast(root_metadata, 5, MPI_DOUBLE, 0, comm_h.comm);
+    auto root_labels = labels;
+    MPI_Bcast(root_labels.data(), root_shape[3], MPI_INT, 0, comm_h.comm);
+    auto root_frequencies = frequencies;
+    MPI_Bcast(root_frequencies.data(), root_shape[3], MPI_DOUBLE, 0, comm_h.comm);
+    std::vector<int> atom_sizes;
+    for (std::size_t i = 0; i < atbasis_wfc.n_atoms; ++i)
+        atom_sizes.push_back(as_int(atbasis_wfc.get_atom_nb(i)));
+    auto root_atom_sizes = atom_sizes;
+    MPI_Bcast(root_atom_sizes.data(), root_shape[2], MPI_INT, 0, comm_h.comm);
+    collective_check(
+        [&]
+        {
+            if (!std::equal(local_metadata, local_metadata + 5, root_metadata) ||
+                root_labels != labels || root_frequencies != frequencies ||
+                root_atom_sizes != atom_sizes)
+                throw std::invalid_argument(
+                    "FD metadata, labels or atom-local sizes differ across ranks");
+        });
+
+    SigcRspaceMap imported;
+    std::vector<double> positive_nodes;
+    std::vector<int> positive_labels;
+    collective_check(
+        [&]
+        {
+            for (const auto &[n, omega] : signed_frequencies)
+            {
+                if (n < 0) continue;
+                positive_nodes.push_back(omega);
+                positive_labels.push_back(n);
+                for (int spin = 0; spin < mf.get_n_spins(); ++spin)
+                {
+                    auto &destination = imported[spin][0][0][omega];
+                    const auto source_spin = result.blocks.find(spin);
+                    if (source_spin == result.blocks.end()) continue;
+                    const auto source_frequency = source_spin->second.find(n);
+                    if (source_frequency == source_spin->second.end()) continue;
+                    for (const auto &[ij, cells] : source_frequency->second)
+                        for (const auto &[r, block] : cells)
+                        {
+                            // LibRI projection wraps row-major buffers. Detach shared Matz data.
+                            auto copied = block.copy();
+                            copied.swap_to_row_major();
+                            destination[ij].emplace(r, std::move(copied));
+                        }
+                }
+            }
+        });
+
+    sigc_is_f_IJ_R = std::move(imported);
+    sigc_frequency_nodes_ = std::move(positive_nodes);
+    sigc_fermionic_indices_ = std::move(positive_labels);
+    sigc_beta_ha_inv_ = beta;
+    sigc_chemical_potential_ha_ = result.chemical_potential_ha;
+    is_thermal_sigc_ = true;
+    is_rspace_built_ = true;
+    reset_kspace();
+    global::lib_printf_root(
+        "Imported Sigma on %zu independent positive fermionic frequencies "
+        "(beta=%.17g Ha^-1, mu=%.17g Ha); bosonic W grid unchanged.\n",
+        sigc_frequency_nodes_.size(), sigc_beta_ha_inv_, sigc_chemical_potential_ha_);
+    if (output_sigc_mat_rf) write_sigc_rf_output_files();
+}
+
+void G0W0::write_sigc_frequency_grid(const std::string &directory) const
+{
+    if (!is_thermal_sigc_) return;
+    const auto filename = path_as_directory(directory) + "Sigc_fermionic_grid.dat";
+    int file_ok = 1;
+    if (comm_h.is_root())
+    {
+        std::ofstream output(filename);
+        output << "# Independent positive fermionic Sigma grid; not the bosonic W grid\n"
+               << "# SigcRF storage: additive rank-local ordered atom-pair blocks\n"
+               << "# Thermal restart reading is unsupported\n"
+               << std::setprecision(17) << "# beta_ha_inv " << sigc_beta_ha_inv_ << '\n'
+               << "# chemical_potential_ha " << sigc_chemical_potential_ha_ << '\n'
+               << "# ifreq fermionic_n omega_ha\n";
+        for (std::size_t i = 0; i < sigc_frequency_nodes_.size(); ++i)
+            output << i << ' ' << sigc_fermionic_indices_[i] << ' ' << sigc_frequency_nodes_[i]
+                   << '\n';
+        output.close();
+        file_ok = output.good();
+    }
+    comm_h.bcast(&file_ok, 1, 0);
+    if (!file_ok)
+        throw LIBRPA_RUNTIME_ERROR("failed to write thermal Sigma grid file: " + filename);
+}
+
 void G0W0::read_sigc(const std::string &input_dir)
 {
+    const std::ifstream thermal_grid(path_as_directory(input_dir) + "Sigc_fermionic_grid.dat");
+    int thermal_restart = is_thermal_sigc_ || mf.get_fermi_dirac_reference().enabled ||
+                          tfg.get_finite_beta_ha_inv() > 0.0 || thermal_grid.good();
+    MPI_Allreduce(MPI_IN_PLACE, &thermal_restart, 1, MPI_INT, MPI_MAX, comm_h.comm);
+    if (thermal_restart)
+        throw LIBRPA_RUNTIME_ERROR(
+            "thermal Sigma restart reading is unsupported: legacy SigcRF files do not encode "
+            "the independent fermionic grid and additive ownership");
+
     reset_rspace();
     reset_kspace();
 
@@ -749,7 +980,7 @@ void G0W0::read_sigc(const std::string &input_dir)
         {
             for (int ispinor_ket = 0; ispinor_ket != n_spinor; ++ispinor_ket)
             {
-                for (size_t iomega = 0; iomega != tfg.get_n_grids(); ++iomega)
+                for (size_t iomega = 0; iomega != get_sigc_frequency_nodes().size(); ++iomega)
                 {
                     for (int myid_old = myid_old_begin; myid_old != myid_old_end; ++myid_old)
                     {
@@ -783,7 +1014,7 @@ void G0W0::read_sigc(const std::string &input_dir)
         {
             for (int ispinor_ket = 0; ispinor_ket != n_spinor; ++ispinor_ket)
             {
-                for (size_t iomega = 0; iomega != tfg.get_n_grids(); ++iomega)
+                for (size_t iomega = 0; iomega != get_sigc_frequency_nodes().size(); ++iomega)
                 {
                     for (int myid_old = myid_old_begin; myid_old != myid_old_end; ++myid_old)
                     {
@@ -797,7 +1028,7 @@ void G0W0::read_sigc(const std::string &input_dir)
                         size_t n_IJR_myid = 0;
                         read_exact(ifs_sigmac_r, &n_IJR_myid, sizeof(n_IJR_myid), fn);
 
-                        const auto omega = tfg.get_freq_nodes()[iomega];
+                        const auto omega = get_sigc_frequency_nodes()[iomega];
                         for (size_t idx = 0; idx != n_IJR_myid; ++idx)
                         {
                             size_t dims[5];
@@ -867,7 +1098,7 @@ void G0W0::collect_sigc_rf_output_shards()
         {
             for (int ispinor_ket = 0; ispinor_ket != n_spinor; ++ispinor_ket)
             {
-                for (const auto omega : tfg.get_freq_nodes())
+                for (const auto omega : get_sigc_frequency_nodes())
                 {
                     auto &sigc_IJ_R = sigc_is_f_IJ_R[ispin][ispinor_bra][ispinor_ket][omega];
                     std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<cplxdb>>>
@@ -909,6 +1140,7 @@ void G0W0::collect_sigc_rf_output_shards()
 
 void G0W0::write_sigc_rf_output_files() const
 {
+    write_sigc_frequency_grid(output_dir);
     const int n_spinor = mf.get_n_spinor();
     for (int ispin = 0; ispin != mf.get_n_spins(); ++ispin)
     {
@@ -916,7 +1148,7 @@ void G0W0::write_sigc_rf_output_files() const
         {
             for (int ispinor_ket = 0; ispinor_ket != n_spinor; ++ispinor_ket)
             {
-                for (std::size_t iomega = 0; iomega != tfg.get_n_grids(); ++iomega)
+                for (std::size_t iomega = 0; iomega != get_sigc_frequency_nodes().size(); ++iomega)
                 {
                     const auto fn =
                         make_sigc_rf_filenames(output_dir, ispin, ispinor_bra, ispinor_ket,
@@ -930,7 +1162,7 @@ void G0W0::write_sigc_rf_output_files() const
                     ofs_sigmac_r.write(reinterpret_cast<const char *>(&n_IJR_myid),
                                        sizeof(n_IJR_myid));
 
-                    const auto omega = tfg.get_freq_nodes()[iomega];
+                    const auto omega = get_sigc_frequency_nodes()[iomega];
                     const auto &sigc_IJ_R =
                         sigc_is_f_IJ_R.at(ispin).at(ispinor_bra).at(ispinor_ket).at(omega);
                     for (const auto &[IJ, R_sigc] : sigc_IJ_R)
@@ -964,6 +1196,7 @@ void G0W0::write_sigc_rf_output_files() const
 void G0W0::write_sigc_matrices_KS_binary(const std::string &output_dir,
                                          const std::string &source) const
 {
+    write_sigc_frequency_grid(output_dir);
     char fn[100];
     for (const auto &ispin_sigc : sigc_is_ik_f_KS)
     {
@@ -973,7 +1206,7 @@ void G0W0::write_sigc_matrices_KS_binary(const std::string &output_dir,
             const auto &ik = ik_sigc.first;
             for (const auto &freq_sigc : ik_sigc.second)
             {
-                const auto ifreq = tfg.get_freq_index(freq_sigc.first);
+                const auto ifreq = get_sigc_frequency_index(freq_sigc.first);
                 std::snprintf(fn, sizeof(fn), "Sigc_fk_mn_%s_ispin_%d_ik_%d_ifreq_%d.bin",
                               source.c_str(), ispin, ik, ifreq);
                 write_sigc_matrix_binary_parallel(freq_sigc.second, desc_sigc_is_ik_f_KS,
@@ -1278,9 +1511,8 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
                 std::abs(transform.get_beta_ha_inv() * fd.kbt_ha - 1) > 1e-10)
                 throw std::invalid_argument("FD beta mismatch");
             validate_fermi_dirac_chemical_potential(fd, mf.get_efermi());
-            if (use_symmetry_context || mf.get_n_spinor() != 1 || is_eigvec_k_distributed_)
-                throw std::invalid_argument(
-                    "reference requires scalar spin, replicated SCF and no symmetry");
+            if (mf.get_n_spinor() != 1 || is_eigvec_k_distributed_)
+                throw std::invalid_argument("reference requires scalar spin and replicated SCF");
             if (pbc.klist != pbc.klist_full || pbc.kfrac_list != pbc.kfrac_list_full ||
                 mf.get_n_kpoints() != pbc.get_n_cells_bvk() ||
                 pbc.kfrac_list.size() != static_cast<std::size_t>(mf.get_n_kpoints()))
@@ -1337,6 +1569,72 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
                 }
         });
 
+    const auto n_full_blocks = atbasis_wfc.n_atoms * atbasis_wfc.n_atoms * pbc.Rlist.size();
+    bool use_rspace_symmetry = false;
+    std::map<std::pair<int, int>, std::set<std::array<int, 3>>> irreducible_sector;
+    collective_check(
+        [&]
+        {
+            if (!use_symmetry_context) return;
+            if (!symmetry_context.available || !atbasis_wfc.has_l_shells() ||
+                symmetry_context.rspace_operations.empty() ||
+                symmetry_context.rsh_rotations.empty() ||
+                !symmetry_species_layouts_match_atom_counts(
+                    atbasis_wfc.build_species_basis_layouts(symmetry_context.atom_to_type),
+                    symmetry_context.atom_to_type, atbasis_wfc.get_atom_nb_map()))
+                throw std::invalid_argument(
+                    "self-energy symmetry requires complete AO rotation metadata");
+            const bool reduces = symmetry_context.count_irreducible_blocks() < n_full_blocks;
+            use_rspace_symmetry = should_use_sigc_rspace_symmetry(
+                reduces, rspace_symmetry_has_complete_band_space(mf, -1),
+                std::getenv("LIBRPA_DISABLE_SIGC_RSPACE_SYMMETRY_DIAG"),
+                std::getenv("LIBRPA_STRICT2D_QMEMBER_DIAG"));
+            if (!use_rspace_symmetry) return;
+            irreducible_sector = convert_symmetry_irreducible_sector_to_libri_gw(
+                symmetry_context.irreducible_sector, pbc.period_array);
+            // Check the complete restore partition before LibRI communication: a
+            // missing or duplicated member must not silently drop or double a block.
+            std::set<std::pair<atpair_t, Vector3_Order<int>>> full_blocks;
+            const auto layouts =
+                atbasis_wfc.build_species_basis_layouts(symmetry_context.atom_to_type);
+            for (const auto &[ij, cells] : irreducible_sector)
+                for (const auto &r : cells)
+                {
+                    const auto &members =
+                        symmetry_context.rspace_sector_stars.at({ij.first, ij.second})
+                            .at({r[0], r[1], r[2]});
+                    for (const auto &member : members)
+                    {
+                        const auto pair = member.full_atom_pair;
+                        if (pair.first >= atbasis_wfc.n_atoms ||
+                            pair.second >= atbasis_wfc.n_atoms ||
+                            pbc.get_R_index(member.full_R) < 0 || member.isym < 0 ||
+                            std::size_t(member.isym) >= symmetry_context.rspace_operations.size() ||
+                            !full_blocks.emplace(pair, member.full_R).second)
+                            throw std::invalid_argument(
+                                "invalid self-energy symmetry restore partition");
+                        for (const auto atom : {ij.first, ij.second})
+                            (void)symmetry_context.get_rotation_matrix(
+                                layouts, symmetry_context.atom_to_type.at(atom), member.isym);
+                    }
+                }
+            if (full_blocks.size() != n_full_blocks)
+                throw std::invalid_argument("incomplete self-energy symmetry restore partition");
+        });
+    int symmetry_min = use_rspace_symmetry, symmetry_max = use_rspace_symmetry;
+    MPI_Allreduce(MPI_IN_PLACE, &symmetry_min, 1, MPI_INT, MPI_MIN, comm_h.comm);
+    MPI_Allreduce(MPI_IN_PLACE, &symmetry_max, 1, MPI_INT, MPI_MAX, comm_h.comm);
+    if (symmetry_min != symmetry_max)
+        throw std::invalid_argument(
+            "thermal self-energy symmetry selection differs between MPI ranks");
+    if (comm_h.is_root())
+        global::lib_printf(
+            "Thermal Sigma real-space symmetry: %s, requested blocks=%zu full blocks=%zu; "
+            "full k/q grids retained\n",
+            use_rspace_symmetry ? "on" : "off",
+            use_rspace_symmetry ? symmetry_context.count_irreducible_blocks() : n_full_blocks,
+            n_full_blocks);
+
     auto wc_tau_r = thermal_Wc_freq_q_to_tau_R(comm_h, wc_freq_q, pbc, transform);
     const auto distribution =
         get_balanced_ap_distribution_for_consec_descriptor(atbasis_abf, atbasis_abf, ad_wc);
@@ -1351,6 +1649,10 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
     libri_set_parallel(gw_libri, comm_h.comm, atoms_pos, pbc.latvec_array, pbc.period_array,
                        atbasis_wfc.get_atom_nb_map<int>());
     gw_libri.set_symmetry(false, {});
+    if (use_rspace_symmetry)
+        gw_libri.lri.filter_atom =
+            std::make_shared<OutputOnlyFilter_GW_Symmetry<int, std::array<int, 3>, cplxdb>>(
+                gw_libri.lri.period, irreducible_sector);
     TensorMap cs;
     for (const auto &[i, jrmap] : lri_cs.data_libri)
         for (const auto &[jr, c] : jrmap) cs[i][jr] = RI::Global_Func::convert<cplxdb>(c);
@@ -1359,10 +1661,12 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
     const auto ijrs =
         dispatch_vector_prod(pairs, pbc.Rlist, comm_h.myid, comm_h.nprocs, true, false);
     const auto f = transform.copy_fermionic_time_to_frequency();
-    const auto frequencies = transform.get_fermionic_frequencies_ha();
-    ThermalSigcRspace result{transform.get_beta_ha_inv(), transform.get_fermionic_indices(), {}};
+    const auto &labels = transform.get_fermionic_indices();
+    ThermalSigcRspace result{
+        transform.get_fermionic_grid(), {}, mf.get_fermi_dirac_reference().chemical_potential_ha};
     for (std::size_t itau = 0; itau < transform.get_times().size(); ++itau)
     {
+        const double start_time = MPI_Wtime();
         const double tau = transform.get_times()[itau];
         TensorMap ws;
         for (auto &[r, mat] : wc_tau_r.at(tau))
@@ -1379,8 +1683,10 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
         }
         wc_tau_r.erase(tau);
         gw_libri.set_Ws(ws, libri_threshold_Wc);
+        const double w_ready_time = MPI_Wtime();
         for (int spin = 0; spin < mf.get_n_spins(); ++spin)
         {
+            const double g_start_time = MPI_Wtime();
             std::map<double, TensorMap> gs;
             collective_check(
                 [&]
@@ -1389,7 +1695,18 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
                                            false, pbc.kfrac_list, {tau}, ijrs, gs);
                 });
             gw_libri.set_Gs(gs.at(tau), libri_threshold_G);
+            const double g_ready_time = MPI_Wtime();
             gw_libri.cal_Sigmas();
+            const double contracted_time = MPI_Wtime();
+            if (use_rspace_symmetry)
+                collective_check(
+                    [&]
+                    {
+                        gw_libri.Sigmas = restore_symmetry_ao_rspace_tensor_map_gw(
+                            gw_libri.Sigmas, symmetry_context, symmetry_context.rspace_sector_stars,
+                            atbasis_wfc);
+                    });
+            const double restored_time = MPI_Wtime();
             gw_libri.free_Gs();
             // G_lib already contains the GW sign. F contains the full integral weight.
             collective_check(
@@ -1402,9 +1719,9 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
                             const Vector3_Order<int> r{jr.second[0], jr.second[1], jr.second[2]};
                             const auto ni = atbasis_wfc.get_atom_nb(i),
                                        nj = atbasis_wfc.get_atom_nb(j);
-                            for (std::size_t n = 0; n < frequencies.size(); ++n)
+                            for (std::size_t n = 0; n < labels.size(); ++n)
                             {
-                                auto &rmap = result.blocks[spin][frequencies[n]][{i, j}];
+                                auto &rmap = result.blocks[spin][labels[n]][{i, j}];
                                 auto entry = rmap.find(r);
                                 if (entry == rmap.end())
                                     entry = rmap.emplace(r, Matz(ni, nj, MAJOR::ROW)).first;
@@ -1420,6 +1737,13 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
                             }
                         }
                 });
+            if (comm_h.is_root())
+                global::lib_printf(
+                    "Thermal Sigma tau %zu/%zu spin %d: W setup %.6fs G setup %.6fs "
+                    "LibRI contraction %.6fs symmetry restore %.6fs frequency accumulation %.6fs\n",
+                    itau + 1, transform.get_times().size(), spin, w_ready_time - start_time,
+                    g_ready_time - g_start_time, contracted_time - g_ready_time,
+                    restored_time - contracted_time, MPI_Wtime() - restored_time);
             gw_libri.Sigmas.clear();
         }
         gw_libri.free_Ws();
@@ -1454,6 +1778,11 @@ void G0W0::build_spacetime(
         lib_printf_root("Parsed time-frequency object do not have time grids, exiting\n");
         comm_h.barrier();
         throw LIBRPA_RUNTIME_ERROR("input TFGrids object has no time grids");
+    }
+    if (is_thermal_sigc_)
+    {
+        reset_rspace();
+        reset_kspace();
     }
     comm_h.barrier();
 
@@ -2329,6 +2658,9 @@ void G0W0::build_sigc_matrix_KS_blacs(
     assert(blacs_ctxt_h.comm() == this->comm_h.comm);
     assert(this->is_rspace_built_);
 
+    if (output_sigc_ks_mat_kf || output_sigc_ks_kf || output_sigc_mat_kf)
+        write_sigc_frequency_grid(output_dir);
+
     if (this->is_kspace_built_)
     {
         global::lib_printf(LIBRPA_VERBOSE_WARN, "Warning: reset Sigmac_c k-space matrices\n");
@@ -2455,7 +2787,7 @@ void G0W0::build_sigc_matrix_KS_blacs(
                 {
                     const auto sigc_orig =
                         find_nested_int_map_3(sigc_redist_source, isp, ispn_bra, ispn_ket);
-                    for (const auto &freq : this->tfg.get_freq_nodes())
+                    for (const auto &freq : this->get_sigc_frequency_nodes())
                     {
                         std::map<int, std::map<std::pair<int, std::array<int, 3>>, Tensor<cplxdb>>>
                             sigc_I_JR_local;
@@ -2588,7 +2920,7 @@ void G0W0::build_sigc_matrix_KS_blacs(
                     desc_nao_nband_fb.init(n_aos, n_bands, n_aos, n_bands, 0, 0);
                     std::vector<complex<double>> dummy(1, complex<double>{0.0, 0.0});
                     release_free_mem();
-                    for (const auto &freq : this->tfg.get_freq_nodes())
+                    for (const auto &freq : this->get_sigc_frequency_nodes())
                     {
                         std::map<SigcIJKAtomKey, std::map<SigcIJKKey, Matz>> sigc_I_Jik_mat;
                         global::profiler.start("g0w0_build_sigc_KS_fourier_world");
@@ -2720,7 +3052,7 @@ void G0W0::build_sigc_matrix_KS_blacs(
                                 collect_sigc_nao_from_ijk(sigc_nao_nao, it_sigc_ik->second);
                             if (this->output_sigc_mat_kf)
                             {
-                                const int ifreq = this->tfg.get_freq_index(freq);
+                                const int ifreq = this->get_sigc_frequency_index(freq);
                                 write_sigc_nao_kf_matrix(sigc_nao_nao, desc_nao_nao,
                                                          this->output_dir, source, isp, ispn_bra,
                                                          ispn_ket, n_spinor, ik, ifreq);
@@ -2847,7 +3179,7 @@ void G0W0::build_sigc_matrix_KS_blacs(
                              std::map<atom_t, std::map<atom_t, std::map<Vector3_Order<int>, Matz>>>>
                         sigc_isp_local;
                     global::profiler.start("g0w0_build_sigc_KS_find_bvk");
-                    for (const auto &freq : this->tfg.get_freq_nodes())
+                    for (const auto &freq : this->get_sigc_frequency_nodes())
                     {
                         const auto &sigc_IJ_R =
                             sigc_rotation_source->at(isp).at(ispn_bra).at(ispn_ket).at(freq);
@@ -2891,7 +3223,7 @@ void G0W0::build_sigc_matrix_KS_blacs(
                     desc_nband_nband_fb.init(n_bands, n_bands, n_bands, n_bands, 0, 0);
                     auto sigc_nband_nband_fb =
                         init_local_mat<complex<double>>(desc_nband_nband_fb, MAJOR::COL);
-                    for (const auto &freq : this->tfg.get_freq_nodes())
+                    for (const auto &freq : this->get_sigc_frequency_nodes())
                     {
                         // Perform Fourier transform and rotate
                         for (size_t ik = 0; ik < kfrac_target.size(); ik++)
@@ -2915,7 +3247,7 @@ void G0W0::build_sigc_matrix_KS_blacs(
                                 fourier, sigc_isp_local.at(freq));
                             if (this->output_sigc_mat_kf)
                             {
-                                const int ifreq = this->tfg.get_freq_index(freq);
+                                const int ifreq = this->get_sigc_frequency_index(freq);
                                 write_sigc_nao_kf_matrix(sigc_nao_nao, desc_nao_nao,
                                                          this->output_dir, source, isp, ispn_bra,
                                                          ispn_ket, n_spinor, ik, ifreq);

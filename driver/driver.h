@@ -35,7 +35,7 @@ struct DriverParams
     //! LIBRPA_THERMAL_TAU_V1 supplies nonuniform times and an integral-normalized
     //! complex transform to consecutive bosonic frequencies. LIBRPA_THERMAL_RPA_V1
     //! additionally supplies sparse mode indices and infinite-sum RPA weights.
-    //! Requires task=rpa,
+    //! Requires task=rpa, g0w0 or g0w0_band,
     //! tfgrids_type=fd_matsubara, matching nfreq/ntau, and FD metadata.
     //! Only the RPA format compresses dielectric inversions and the frequency sum.
     //! @par Default
@@ -46,10 +46,11 @@ struct DriverParams
 
     //! External LIBRPA_THERMAL_GW_V1 operator filename, relative to input_dir.
     //! Loads independent complex bosonic inverse and fermionic integral operators
-    //! as metadata only; does not enable finite-temperature GW execution.
-    //! Requires task=rpa or g0w0, tfgrids_type=fd_matsubara, SCF eigenvalues and
+    //! for the experimental full-grid scalar-spin 3D finite-temperature GW route.
+    //! Requires task=rpa, g0w0 or g0w0_band, tfgrids_type=fd_matsubara, SCF eigenvalues and
     //! an explicit FD reference. File dimensions are independent of nfreq/ntau.
-    //! Does not change fn_thermal_tau_grid or its RPA-only restrictions.
+    //! Does not replace fn_thermal_tau_grid: chi/W and Sigma retain independent grids.
+    //! The GW route requires replicated full-k SCF data; EXX/response/Sigma symmetry is optional.
     //! @par Default
     //! empty (disabled)
     //! @par Status

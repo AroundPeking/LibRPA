@@ -26,6 +26,7 @@
 #include "../core/meanfield.h"
 #include "../core/qpe_solver.h"
 #include "../core/timefreq.h"
+#include "../core/thermal_gw_prepare.h"
 #include "../io/fs.h"
 #include "../io/global_io.h"
 #include "../math/complexmatrix.h"
@@ -120,6 +121,10 @@ GwAnaconGrid make_gw_anacon_grid(
                                 && opts.anacon_nfreq != source_nfreq;
     const bool use_new_grid_type = opts.anacon_tfgrids_type != LIBRPA_TFGRID_UNSET
                                    && opts.anacon_tfgrids_type != source_grid_type;
+    if (source_grid_type == LIBRPA_TFGRID_FD_MATSUBARA &&
+        (use_new_nfreq || use_new_grid_type))
+        throw LIBRPA_RUNTIME_ERROR(
+            "thermal GW continuation uses the supplied fermionic grid; legacy resampling is disabled");
     if (!use_new_nfreq && !use_new_grid_type)
     {
         return {make_imagfreqs(source_freq_nodes), false};
@@ -675,13 +680,61 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
 
     auto pds = librpa_int::api::get_dataset_instance(h);
     const auto &opts = *p_opts;
-    if (opts.tfgrids_type == LIBRPA_TFGRID_FD_MATSUBARA ||
-        pds->mf.get_fermi_dirac_reference().enabled || pds->external_thermal_gw_grid)
+    int thermal_input = opts.tfgrids_type == LIBRPA_TFGRID_FD_MATSUBARA ||
+                        pds->mf.get_fermi_dirac_reference().enabled ||
+                        bool(pds->external_thermal_gw_grid);
+    MPI_Allreduce(MPI_IN_PLACE, &thermal_input, 1, MPI_INT, MPI_MAX, pds->comm_h.comm);
+    const bool thermal = thermal_input != 0;
+    if (thermal)
     {
-        throw LIBRPA_RUNTIME_ERROR(
-            "Finite-temperature GW is not yet supported: the independent Wc/Sigma_c "
-            "transforms are not connected to a validated production GW path. "
-            "Finite-temperature chi0 and RPA remain available.");
+        std::string preflight_error;
+        try
+        {
+            const auto unsupported = [](const char *reason)
+            {
+                throw LIBRPA_RUNTIME_ERROR(
+                    std::string("Finite-temperature GW is not yet supported ") +
+                    "for this input: " + reason);
+            };
+            if (opts.tfgrids_type != LIBRPA_TFGRID_FD_MATSUBARA ||
+                !pds->mf.get_fermi_dirac_reference().enabled || !pds->external_thermal_gw_grid)
+                unsupported(
+                    "an FD reference, fd_matsubara and an external GW transform are required");
+            if (pds->mf.get_n_spinor() != 1 || opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON)
+                unsupported(
+                    "the reference route requires scalar spin and replicated SCF");
+            if (pds->pbc.klist.empty() || pds->pbc.klist != pds->pbc.klist_full ||
+                pds->mf.get_n_kpoints() != pds->pbc.get_n_cells_bvk())
+                unsupported("a complete SCF k grid is required");
+            if (pds->atoms.size() == 0 || pds->atoms.size() != pds->basis_wfc.n_atoms ||
+                pds->basis_aux.n_atoms != pds->basis_wfc.n_atoms ||
+                pds->basis_wfc.nb_total != pds->mf.get_n_aos())
+                unsupported("complete geometry and atom-local AO/auxiliary bases are required");
+            if (opts.use_2d_dielectric == LIBRPA_SWITCH_ON || opts.option_dielect_func == 4 ||
+                opts.read_sigc_mat_rf == LIBRPA_SWITCH_ON ||
+                opts.use_scalapack_gw_wc != LIBRPA_SWITCH_ON ||
+                opts.use_gpu_replace_scalapack == LIBRPA_SWITCH_ON ||
+                std::getenv("LIBRPA_DIRECT_COMPRESSED_SIGC_DIAG"))
+                unsupported(
+                    "use the 3D CPU screened-matrix route without legacy restart or diagnostics");
+            if (opts.parallel_routing != LIBRPA_ROUTING_AUTO &&
+                opts.parallel_routing != LIBRPA_ROUTING_LIBRI)
+                unsupported("the thermal self-energy uses LibRI routing");
+            validate_external_thermal_gw_grid_reference(*pds, *pds->external_thermal_gw_grid);
+        }
+        catch (const std::exception &error)
+        {
+            preflight_error = error.what();
+        }
+        int failed = !preflight_error.empty();
+        MPI_Allreduce(MPI_IN_PLACE, &failed, 1, MPI_INT, MPI_MAX, pds->comm_h.comm);
+        if (failed)
+        {
+            if (preflight_error.empty())
+                preflight_error = "Finite-temperature GW is not yet supported for this input "
+                                  "on another MPI rank";
+            throw LIBRPA_RUNTIME_ERROR(preflight_error);
+        }
     }
     const bool debug = global::should_output(LIBRPA_VERBOSE_DEBUG);
     pds->is_band_calc_done = false;
@@ -691,6 +744,15 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
 
     // Prepare time-frequency grids
     initialize_ds_tfgrids(*pds, opts);
+    if (thermal)
+    {
+        const auto requested = pds->external_thermal_gw_grid->transform.get_bosonic_frequencies_ha();
+        const auto &available = pds->tfg.get_freq_nodes();
+        for (double frequency : requested)
+            if (std::none_of(available.begin(), available.end(), [frequency](double value)
+                { return std::abs(value - std::abs(frequency)) <= 1e-12 * std::max(1.0, std::abs(frequency)); }))
+                throw LIBRPA_RUNTIME_ERROR("thermal GW bosonic sample missing from chi0 frequency grid");
+    }
     if (opts.replace_w_head == LIBRPA_SWITCH_ON && opts.option_dielect_func == 0
         && !pds->epsmacs_imagfreq.empty()
         && pds->epsmacs_imagfreq.size() != pds->tfg.get_freq_nodes().size())
@@ -708,7 +770,8 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
     if (routing == LIBRPA_ROUTING_AUTO)
     {
         const int n_atoms = pds->atoms.size();
-        routing = decide_auto_routing(n_atoms, opts.nfreq * pds->pbc.get_n_cells_bvk());
+        routing = thermal ? LIBRPA_ROUTING_LIBRI :
+                            decide_auto_routing(n_atoms, opts.nfreq * pds->pbc.get_n_cells_bvk());
     }
 
     if (opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON)
@@ -991,7 +1054,7 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
 
     std::map<double, atom_mapping<std::map<Vector3_Order<double>, Matz>>::pair_t_old>
         Wc_freq_q_atom_pair;
-    if (use_shrink_abfs)
+    if (use_shrink_abfs && !thermal)
     {
         profiler.start("collect_Wc_blacs_to_atom_pairs",
                        "Collect compressed Wc from BLACS to atom pairs");
@@ -1015,17 +1078,41 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
                 std::stringstream ss;
                 ss << "Wcfq_ifreq_" << ifreq << "_iq_" << iq << ".csc";
                 const auto fn = librpa_int::path_as_directory(opts.output_dir) + ss.str();
-                write_matrix_elsi_csc_parallel(fn, Wc, pds->desc_abf, 1e-15);
+                write_matrix_elsi_csc_parallel(fn, Wc, wc_desc_abf, 1e-15);
             }
         }
     }
 
     initialize_ds_g0w0(*pds, opts);
     profiler.start("g0w0_sigc_IJ", "Build real-space correlation self-energy");
+    if (thermal)
+    {
+        try
+        {
+            const auto &transform = pds->external_thermal_gw_grid->transform;
+            auto signed_wc =
+                prepare_thermal_wc(pds->comm_h, Wc_freq_q, pds->pbc, transform, wc_desc_abf,
+                                   pds->desc_abf, use_shrink_abfs ? &pds->sinvS : nullptr,
+                                   &chi0.qpoint_view(), &pds->symmetry_context, &pds->basis_aux);
+            Wc_freq_q.clear();
+            auto sigma = pds->p_g0w0->build_thermal_spacetime(pds->basis_aux, pds->cs_data,
+                                                              signed_wc, pds->desc_abf, transform);
+            pds->p_g0w0->set_thermal_sigc(std::move(sigma));
+        }
+        catch (...)
+        {
+            pds->p_g0w0.reset();
+            profiler.stop("g0w0_sigc_IJ");
+            profiler.stop("api_build_g0w0_sigma");
+            throw;
+        }
+        profiler.stop("g0w0_sigc_IJ");
+        profiler.stop("api_build_g0w0_sigma");
+        return;
+    }
     const bool direct_compressed_sigc = should_contract_sigc_in_compressed_abfs(
         use_shrink_abfs, std::getenv("LIBRPA_DIRECT_COMPRESSED_SIGC_DIAG"));
-    const auto &sigc_basis_aux =
-        direct_compressed_sigc ? pds->basis_aux_shrink : pds->basis_aux;
+    const auto &sigc_basis_aux = direct_compressed_sigc ? pds->basis_aux_shrink : pds->basis_aux;
     const auto &sigc_cs = direct_compressed_sigc ? pds->cs_data_shrink : pds->cs_data;
     const auto &sigc_desc_abf = direct_compressed_sigc ? pds->desc_abf_shrink : pds->desc_abf;
     if (direct_compressed_sigc)
@@ -1034,14 +1121,13 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
             "Diagnostic: contracting Sigma_c directly in the compressed auxiliary basis; "
             "Wc unfolding and full-ABF Cs are bypassed\n");
     }
-    // HACK: choice of space-time is hard-coded. May need to change when more approaches are implemented
+    // HACK: choice of space-time is hard-coded. May need to change when more approaches are
+    // implemented
     pds->p_g0w0->build_spacetime(
         routing, sigc_basis_aux, sigc_cs, Wc_freq_q, sigc_desc_abf,
-        use_shrink_abfs ? &Wc_freq_q_atom_pair : nullptr,
-        use_shrink_abfs ? &pds->sinvS : nullptr,
+        use_shrink_abfs ? &Wc_freq_q_atom_pair : nullptr, use_shrink_abfs ? &pds->sinvS : nullptr,
         use_shrink_abfs ? &pds->basis_aux_shrink : nullptr,
-        use_shrink_abfs ? &pds->basis_aux : nullptr,
-        use_shrink_abfs ? &pds->blacs_h : nullptr,
+        use_shrink_abfs ? &pds->basis_aux : nullptr, use_shrink_abfs ? &pds->blacs_h : nullptr,
         use_shrink_abfs ? &pds->desc_wfc_kb_full : nullptr);
     profiler.stop("g0w0_sigc_IJ");
     release_free_mem();
@@ -1089,7 +1175,7 @@ void librpa_get_g0w0_qpe_kgrid(LibrpaHandler *h, const LibrpaOptions *p_opts, co
         write_sigc_matrices_KS_binary(*pds, opts.output_dir, "kgrid");
 
     std::vector<int> iks_collect;
-    const auto freq_nodes = pds->tfg.get_freq_nodes();
+    const auto freq_nodes = pds->p_g0w0->get_sigc_frequency_nodes();
     const bool publish_local_values =
         opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON || pds->blacs_h.myid == 0;
     const auto sigc_diag = collect_sigc_diag_to_callers(
@@ -1236,7 +1322,7 @@ void librpa_get_g0w0_spectral_function_kgrid(
         write_sigc_matrices_KS_binary(*pds, opts.output_dir, "kgrid");
 
     std::vector<int> iks_collect;
-    const auto freq_nodes = pds->tfg.get_freq_nodes();
+    const auto freq_nodes = pds->p_g0w0->get_sigc_frequency_nodes();
     const bool publish_local_values =
         opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON || pds->blacs_h.myid == 0;
     const auto sigc_diag = collect_sigc_diag_to_callers(
@@ -1306,7 +1392,7 @@ void librpa_get_g0w0_qpe_band_k(LibrpaHandler *h, const LibrpaOptions *p_opts, c
                                       "band_" + std::to_string(pds->band_data_id));
 
     std::vector<int> iks_collect;
-    const auto freq_nodes = pds->tfg.get_freq_nodes();
+    const auto freq_nodes = pds->p_g0w0->get_sigc_frequency_nodes();
     const bool publish_local_values =
         opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON || pds->blacs_h.myid == 0;
     const auto sigc_diag = collect_sigc_diag_to_callers(
@@ -1463,7 +1549,7 @@ void librpa_get_g0w0_spectral_function_band_k(
                                       "band_" + std::to_string(pds->band_data_id));
 
     std::vector<int> iks_collect;
-    const auto freq_nodes = pds->tfg.get_freq_nodes();
+    const auto freq_nodes = pds->p_g0w0->get_sigc_frequency_nodes();
     const bool publish_local_values =
         opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON || pds->blacs_h.myid == 0;
     const auto sigc_diag = collect_sigc_diag_to_callers(

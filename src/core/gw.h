@@ -3,6 +3,8 @@
  * @brief facilities to calculate self-energy operator.
  */
 #pragma once
+#include <limits>
+
 #include "../math/matrix_m.h"
 #include "../mpi/base_blacs.h"
 #include "../mpi/kpoint_blacs_parallel_context.h"
@@ -20,17 +22,17 @@
 namespace librpa_int
 {
 
-/** Internal thermal result, separate from legacy restart/KS frequency metadata.
+/** Internal thermal result, separate from legacy time/frequency grids.
  * Blocks are additive rank-local partial sums of ordered AO matrices, indexed
- * [spin][frequency][pair][R]. The same block may have contributions on several
+ * [spin][integer Matsubara label][pair][R]. The same block may have contributions on several
  * ranks; global matrices require MPI_SUM, not selection of one owner.
- * This scalar-spin reference path does not yet produce QPEs or band tables.
+ * The scalar-spin builder is state-free; set_thermal_sigc imports its result.
  */
 struct ThermalSigcRspace
 {
-    double beta_ha_inv;
-    std::vector<int> fermionic_indices;
-    std::map<int, std::map<double, ap_p_map<std::map<Vector3_Order<int>, Matz>>>> blocks;
+    ThermalFrequencyGrid fermionic_grid;
+    std::map<int, std::map<int, ap_p_map<std::map<Vector3_Order<int>, Matz>>>> blocks;
+    double chemical_potential_ha = std::numeric_limits<double>::quiet_NaN();
 };
 
 bool disable_sigc_rspace_symmetry_diagnostic_requested(const char *value);
@@ -53,6 +55,11 @@ private:
     bool is_kspace_built_;
     int output_sigc_ks_kf_band_index_;
     std::string sigc_kspace_source_;
+    bool is_thermal_sigc_ = false;
+    double sigc_beta_ha_inv_ = 0.0;
+    double sigc_chemical_potential_ha_ = 0.0;
+    std::vector<double> sigc_frequency_nodes_;
+    std::vector<int> sigc_fermionic_indices_;
 
     //! frequency-domain reciprocal-space correlation self-energy, indices
     //! [ispin][ispinor_bra][ispinor_ket][freq][R][I][J](n_I, n_J)
@@ -61,6 +68,7 @@ private:
 
     void collect_sigc_rf_output_shards();
     void write_sigc_rf_output_files() const;
+    void write_sigc_frequency_grid(const std::string &directory) const;
 
     void build_sigc_matrix_KS(
         const std::map<int, std::map<int, std::map<int, ComplexMatrix>>> &wfc_target,
@@ -149,8 +157,24 @@ public:
     //! Read real-space imaginary-frequency correlation self-energy matrices from disk
     void read_sigc(const std::string &input_dir);
 
+    /** Collectively validate and import additive rank-local scalar-spin Sigma.
+     * Requires identical signed labels and basis/spin/FD metadata across ranks.
+     * Beta/mu must match the FD reference at its established tolerances; the
+     * result's beta/mu are preserved. Missing blocks are zero; pairs are not folded.
+     * All signed samples are validated, but only n >= 0 is copied into [spin][0][0]
+     * storage, in increasing frequency order. Invalid input leaves state unchanged;
+     * successful import invalidates KS caches without changing mf or tfg.
+     */
+    void set_thermal_sigc(ThermalSigcRspace result);
+
+    //! Positive fermionic nodes after thermal import, otherwise the unchanged legacy grid.
+    std::vector<double> get_sigc_frequency_nodes() const;
+    //! Exact node lookup, returning its zero-based grid offset; throws if absent.
+    int get_sigc_frequency_index(double frequency) const;
+
     /** Internal full-q/signed-frequency path; leaves legacy GW state untouched.
-     * Requires scalar spin, replicated full SCF k grid, no symmetry/shrink and
+     * Requires scalar spin, replicated full SCF k grid and uncompressed W/C;
+     * the existing output-only real-space symmetry filter is optional. Requires
      * a global BLACS Wc descriptor. Inputs are preserved. No head/wing generation,
      * continuation or restart. Identical physical metadata is required on all ranks.
      */

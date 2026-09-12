@@ -45,6 +45,7 @@ foreach(target
     test_fitting
     test_io
     test_symmetry_context
+    test_si_density_symmetry
     test_task_helper
     test_thermal_api
     test_thermal_chi0
@@ -94,15 +95,24 @@ set_tests_properties(test_external_thermal_gw PROPERTIES
 add_test(NAME test_rpa_logdet_mpi2 COMMAND mpirun -np 2 $<TARGET_FILE:test_rpa_logdet>)
 add_test(NAME test_external_thermal_gw_api_mpi2 COMMAND mpirun -np 2 $<TARGET_FILE:test_external_thermal_gw_api>)
 add_test(NAME test_rpa_logdet_mpi4 COMMAND mpirun -np 4 $<TARGET_FILE:test_rpa_logdet>)
+add_test(NAME test_rpa_headwing_mpi4 COMMAND mpirun -np 4 $<TARGET_FILE:test_rpa_headwing>)
+set_tests_properties(test_rpa_headwing test_rpa_headwing_mpi4 PROPERTIES
+  ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1;MKL_NUM_THREADS=1")
 target_sources(test_strict_2d_coulomb_head_metadata
   PRIVATE ../../driver/reader_2d_coulomb_head.cpp)
 # These suites use standard assert() and must remain active in Release builds.
 target_compile_options(test_sternheimer_rpa PRIVATE -UNDEBUG)
 target_compile_options(test_sternheimer_symmetry PRIVATE -UNDEBUG)
 target_compile_options(test_symmetry_context PRIVATE -UNDEBUG)
+target_compile_options(test_rpa_headwing PRIVATE -UNDEBUG)
+target_compile_options(test_si_density_symmetry PRIVATE -UNDEBUG)
+target_compile_options(test_thermal_gw_transform PRIVATE -UNDEBUG)
+target_compile_definitions(test_si_density_symmetry PRIVATE
+  SI_DENSITY_REFERENCE="${CMAKE_CURRENT_SOURCE_DIR}/data/si_k444_density_reference.txt")
 
 # Internal thermal full-q Wc spacetime transform.
 config_test(test_thermal_wc_spacetime 1)
+target_compile_options(test_thermal_wc_spacetime PRIVATE -UNDEBUG)
 add_test(NAME test_thermal_wc_spacetime_mpi2
   COMMAND mpirun -np 2 $<TARGET_FILE:test_thermal_wc_spacetime>)
 set_tests_properties(test_thermal_wc_spacetime test_thermal_wc_spacetime_mpi2 PROPERTIES
@@ -129,8 +139,34 @@ endif()
 
 if(LIBRPA_USE_LIBRI)
   config_test(test_thermal_gw_spacetime 1)
+  config_test(test_thermal_sigc_symmetry 1)
+  config_test(test_thermal_sigc_symmetry_api 1)
+  add_test(NAME test_thermal_sigc_symmetry_api_mpi4
+    COMMAND mpirun -np 4 $<TARGET_FILE:test_thermal_sigc_symmetry_api>)
+  add_test(NAME test_thermal_sigc_symmetry_mpi4
+    COMMAND mpirun -np 4 $<TARGET_FILE:test_thermal_sigc_symmetry>)
+  set_tests_properties(test_thermal_sigc_symmetry test_thermal_sigc_symmetry_mpi4
+    test_thermal_sigc_symmetry_api test_thermal_sigc_symmetry_api_mpi4 PROPERTIES
+    ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1;MKL_NUM_THREADS=1")
+  config_test(test_generic_thermal_gw_api 1)
+  config_test(test_thermal_gw_prepare 1)
+  config_test(test_thermal_headwing_cache 1)
+  add_test(NAME test_thermal_headwing_cache_mpi4
+    COMMAND mpirun -np 4 $<TARGET_FILE:test_thermal_headwing_cache>)
+  add_test(NAME test_thermal_gw_prepare_mpi4
+    COMMAND mpirun -np 4 $<TARGET_FILE:test_thermal_gw_prepare>)
+  config_test(test_thermal_sigc_projection 1)
+  add_test(NAME test_generic_thermal_gw_api_mpi4
+    COMMAND mpirun -np 4 $<TARGET_FILE:test_generic_thermal_gw_api>)
+  add_test(NAME test_thermal_sigc_projection_mpi4
+    COMMAND mpirun -np 4 $<TARGET_FILE:test_thermal_sigc_projection>)
   add_test(NAME test_thermal_gw_spacetime_mpi2
     COMMAND mpirun -np 2 $<TARGET_FILE:test_thermal_gw_spacetime>)
   set_tests_properties(test_thermal_gw_spacetime test_thermal_gw_spacetime_mpi2 PROPERTIES
     ENVIRONMENT "OMP_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1;MKL_NUM_THREADS=1")
+  foreach(target test_thermal_gw_spacetime test_thermal_sigc_symmetry
+      test_thermal_sigc_symmetry_api test_generic_thermal_gw_api
+      test_thermal_gw_prepare test_thermal_headwing_cache test_thermal_sigc_projection)
+    target_compile_options(${target} PRIVATE -UNDEBUG)
+  endforeach()
 endif()

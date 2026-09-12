@@ -148,8 +148,12 @@ int main(int argc, char **argv)
     parse_inputfile_to_params(input_filename);
     // Early check of task to fail quickly in case
     task_t task = get_task(driver_params.task);
-    if (!driver_params.fn_thermal_tau_grid.empty() && task != task_t::RPA)
-        throw std::runtime_error("fn_thermal_tau_grid currently requires task=rpa");
+    const bool gw_task = task == task_t::G0W0 || task == task_t::G0W0_band;
+    if (!driver_params.fn_thermal_tau_grid.empty() && task != task_t::RPA && !gw_task)
+        throw std::runtime_error("fn_thermal_tau_grid requires an RPA or GW task");
+    if (gw_task && !driver_params.fn_thermal_tau_grid.empty() &&
+        driver_params.fn_thermal_gw_grid.empty())
+        throw std::runtime_error("thermal GW also requires fn_thermal_gw_grid");
 
     // Initialize LibRPA global environment and handler
     initialize_librpa();
@@ -263,8 +267,8 @@ int main(int argc, char **argv)
                     MPI_Finalize();
                     return EXIT_FAILURE;
                 }
-                lib_printf_root("External thermal GW operators: %s (metadata only; "
-                                "finite-temperature GW execution remains disabled)\n",
+                lib_printf_root("External thermal GW operators: %s "
+                                "(independent bosonic and fermionic transforms)\n",
                                 driver_params.fn_thermal_gw_grid.c_str());
             }
         }
@@ -304,6 +308,9 @@ int main(int argc, char **argv)
         profiler.stop("driver_read_eigenvector");
 
         profiler.start("driver_read_ri");
+        if (gw_task && opts.tfgrids_type == LIBRPA_TFGRID_FD_MATSUBARA &&
+            opts.parallel_routing == LIBRPA_ROUTING_AUTO)
+            opts.parallel_routing = LIBRPA_ROUTING_LIBRI;
         read_ri(driver_params.input_dir, driver::opts.parallel_routing);
         lib_printf_root("Actual parallel routing used: %s\n",
                         get_routing_string(driver::opts.parallel_routing).c_str());

@@ -1411,7 +1411,9 @@ void test_strict_2d_omega0_override_basis_modes_are_mutually_exclusive()
 
 void test_strict_2d_omega0_override_reader_validates_shape_and_payload()
 {
-    const std::string path = "strict2d_omega0_override_test.bin";
+    const auto &comm = librpa_int::global::mpi_comm_global_h;
+    const std::string path = "strict2d_omega0_override_test_np" + std::to_string(comm.nprocs) +
+                             "_rank" + std::to_string(comm.myid) + ".bin";
     {
         std::ofstream output(path, std::ios::binary | std::ios::trunc);
         const char magic[8] = {'L', 'R', '2', 'D', 'W', 'C', '0', '1'};
@@ -2203,8 +2205,11 @@ void test_headwing_wfc_restore_applies_atom_permutation()
     const auto wfc_bz = librpa_int::rotate_headwing_wfc_to_kstar_member(
         ctx, member, layouts, atom_nw, {0.0, 0.0, 0.0}, wfc_ibz, nullptr);
 
-    assert_complex_close(wfc_bz(0, 0), wfc_ibz(0, 1) * std::complex<double>{3.0, -0.25}, 1e-12);
-    assert_complex_close(wfc_bz(0, 1), wfc_ibz(0, 0) * std::complex<double>{2.0, 0.5}, 1e-12);
+    // Stored rotations map BZ atom_from back to IBZ atom_to. The coefficient
+    // returns to atom_from, retaining that atom's rotation (also checked against
+    // independent producer densities in test_si_density_symmetry).
+    assert_complex_close(wfc_bz(0, 0), wfc_ibz(0, 1) * std::complex<double>{2.0, 0.5}, 1e-12);
+    assert_complex_close(wfc_bz(0, 1), wfc_ibz(0, 0) * std::complex<double>{3.0, -0.25}, 1e-12);
 }
 
 void test_headwing_wfc_restore_applies_time_reversal()
@@ -2437,7 +2442,8 @@ void test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(
     const atpair_k_cplx_mat_t empty_vq;
     librpa_int::Cs_LRI coefficients;
     coefficients.use_libri = true;
-    coefficients.data_libri[0][{0, {0, 0, 0}}] = make_single_value_tensor(1.0);
+    if (librpa_int::global::mpi_comm_global_h.is_root())
+        coefficients.data_libri[0][{0, {0, 0, 0}}] = make_single_value_tensor(1.0);
 
     diele_func df(mf, velocity, kfrac, basis_wfc, basis_abf, omega, 1, 1, 1, 1, pbc,
                   librpa_int::global::mpi_comm_global_h, blacs_h);
@@ -2446,8 +2452,12 @@ void test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(
     const auto transformed = df.transform_Cs2mnk(0, 0, coefficients_for_transform, 0);
     const int diagonal_row = transformed.first.indx_g2l_r(0);
     const int diagonal_col = transformed.first.indx_g2l_c(0);
-    assert(diagonal_row >= 0 && diagonal_col >= 0);
-    assert_complex_close(transformed.second(diagonal_row, diagonal_col), 2.0, 1.0e-12);
+    int diagonal_owners = diagonal_row >= 0 && diagonal_col >= 0;
+    if (diagonal_owners)
+        assert_complex_close(transformed.second(diagonal_row, diagonal_col), 2.0, 1.0e-12);
+    MPI_Allreduce(MPI_IN_PLACE, &diagonal_owners, 1, MPI_INT, MPI_SUM,
+                  librpa_int::global::mpi_comm_global_h.comm);
+    assert(diagonal_owners == 1);
     df.init(0.0, empty_vq);
     df.cal_head();
     df.cal_wing(coefficients, 0.0, empty_vq);
@@ -2513,8 +2523,9 @@ void test_finite_temperature_static_metallic_rpa_gamma_path(const BlacsCtxtHandl
     const atpair_k_cplx_mat_t empty_vq;
     librpa_int::Cs_LRI coefficients;
     coefficients.use_libri = true;
-    coefficients.data_libri[0][{0, {0, 0, 0}}] =
-        make_two_auxiliary_value_tensor(1.0, 0.01);
+    if (librpa_int::global::mpi_comm_global_h.is_root())
+        coefficients.data_libri[0][{0, {0, 0, 0}}] =
+            make_two_auxiliary_value_tensor(1.0, 0.01);
 
     diele_func df(mf, velocity, kfrac, basis_wfc, basis_abf, omega, 1, 1, 1, 2, pbc,
                   librpa_int::global::mpi_comm_global_h, blacs_h);
@@ -2580,7 +2591,8 @@ void test_finite_temperature_static_metallic_gw_gamma_path(const BlacsCtxtHandle
     const atpair_k_cplx_mat_t empty_vq;
     librpa_int::Cs_LRI coefficients;
     coefficients.use_libri = true;
-    coefficients.data_libri[0][{0, {0, 0, 0}}] = make_two_auxiliary_value_tensor(1.0, 0.01);
+    if (librpa_int::global::mpi_comm_global_h.is_root())
+        coefficients.data_libri[0][{0, {0, 0, 0}}] = make_two_auxiliary_value_tensor(1.0, 0.01);
 
     diele_func df(mf, velocity, kfrac, basis_wfc, basis_abf, omega, 1, 1, 1, 2, pbc,
                   librpa_int::global::mpi_comm_global_h, blacs_h);
@@ -2662,6 +2674,52 @@ void test_finite_temperature_static_metallic_gw_gamma_path(const BlacsCtxtHandle
         assert_complex_close(epsilon(head_row, body_col), expected_head_body, 3.0e-10);
     if (body_row >= 0 && body_col >= 0)
         assert_complex_close(epsilon(body_row, body_col), expected_body, 3.0e-10);
+
+    // Normalize the existing analytic result by its original diagonal Coulomb roots.
+    const double original_head_root = std::sqrt(2.0 * librpa_int::TWO_PI * bare_qminus2);
+    const std::complex<double> normalized[2][2] = {
+        {expected_head / (original_head_root * original_head_root),
+         expected_head_body / original_head_root},
+        {expected_body_head / original_head_root, expected_body}};
+    const std::complex<double> mixed_root[2][2] = {
+        {{2.0, 0.0}, {0.12, 0.07}}, {{0.12, -0.07}, {1.4, 0.0}}};
+    assert(mixed_root[0][0].real() * mixed_root[1][1].real() -
+               std::norm(mixed_root[0][1]) >
+           0.0);
+    std::complex<double> expected_mixed[2][2]{};
+    for (int i = 0; i != 2; ++i)
+        for (int j = 0; j != 2; ++j)
+            for (int a = 0; a != 2; ++a)
+                for (int b = 0; b != 2; ++b)
+                    expected_mixed[i][j] +=
+                        mixed_root[i][a] * normalized[a][b] * mixed_root[b][j];
+
+    auto mixed_coulomb_sqrt = init_local_mat<std::complex<double>>(desc_coulomb, MAJOR::COL);
+    for (int i = 0; i != 2; ++i)
+    {
+        const int iloc = desc_coulomb.indx_g2l_r(i);
+        if (iloc < 0) continue;
+        for (int j = 0; j != 2; ++j)
+        {
+            const int jloc = desc_coulomb.indx_g2l_c(j);
+            if (jloc >= 0) mixed_coulomb_sqrt(iloc, jloc) = mixed_root[i][j];
+        }
+    }
+    auto mixed_epsilon = init_local_mat<std::complex<double>>(desc_coulomb, MAJOR::COL);
+    if (head_row >= 0 && head_col >= 0) mixed_epsilon(head_row, head_col) = 1.0;
+    if (body_row >= 0 && body_col >= 0) mixed_epsilon(body_row, body_col) = 1.2;
+    df.rewrite_metallic_static_3d_wc(mixed_epsilon, 0, desc_coulomb, mixed_coulomb_sqrt);
+    for (int i = 0; i != 2; ++i)
+    {
+        const int iloc = desc_coulomb.indx_g2l_r(i);
+        if (iloc < 0) continue;
+        for (int j = 0; j != 2; ++j)
+        {
+            const int jloc = desc_coulomb.indx_g2l_c(j);
+            if (jloc >= 0)
+                assert_complex_close(mixed_epsilon(iloc, jloc), expected_mixed[i][j], 3.0e-10);
+        }
+    }
 #else
     (void)blacs_h;
 #endif

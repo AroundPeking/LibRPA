@@ -4734,7 +4734,7 @@ static Matz restore_symmetry_blacs_wq_to_star_source(const Matz &Wq_source, cons
     return Wq_star;
 }
 
-static std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
+std::map<Vector3_Order<double>, Matz> restore_symmetry_dense_wq_map(
     const std::map<Vector3_Order<double>, Matz> &Wq_rep_map, const PeriodicBoundaryData &pbc,
     const SymmetryQPointView &qpoint_view, const SymmetryContext &symmetry_context,
     const AtomicBasis &atbasis_Wc, const ArrayDesc &ad_Wc)
@@ -4829,7 +4829,13 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(
     const auto &Rlist = pbc.Rlist;
 
     // quick return if empty
-    if (Wc_freq_q.size() == 0) return Wc_freq_R;
+    if (Wc_freq_q.empty())
+    {
+        // Match the final collective of ranks that have local Fourier data.
+        // The Gamma-only remapping path has no final collective.
+        if (n_k_points != 1) comm_h.barrier();
+        return Wc_freq_R;
+    }
     // For single k-point (Gamma only), there is no need to transform: just remap and return
     if (n_k_points == 1)
     {

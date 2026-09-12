@@ -572,19 +572,22 @@ void check_libri_contraction(const Fixture& fixture, const ThermalGWTransform& t
     }
     const auto result = production_gw.build_thermal_spacetime(abf, lri_cs, wc, desc, transform);
     require(
-        result.beta_ha_inv == beta && result.fermionic_indices == transform.get_fermionic_indices(),
+        result.fermionic_grid.get_beta_ha_inv() == beta &&
+            result.fermionic_grid.get_indices() == transform.get_fermionic_indices() &&
+            result.fermionic_grid.get_frequencies_ha() == transform.get_fermionic_frequencies_ha(),
         "internal G0W0 changed beta or signed fermionic label order");
     require(!production_gw.is_rspace_built() && production_gw.sigc_kspace_source().empty() &&
                 production_gw.sigc_is_ik_f_KS.empty() && production_gw.sigc_diag_is_ik_f_KS.empty(),
             "internal thermal G0W0 changed legacy GW state");
     require(
-        result.blocks.size() == 1 && result.blocks.at(0).size() == result.fermionic_indices.size(),
+        result.blocks.size() == 1 &&
+            result.blocks.at(0).size() == result.fermionic_grid.get_indices().size(),
         "internal G0W0 returned unexpected spin/frequency blocks");
     ErrorMetric production_frequency_error;
-    const auto fermionic_frequencies = transform.get_fermionic_frequencies_ha();
+    const auto &fermionic_labels = transform.get_fermionic_indices();
     for (int row = 0; row < sigma_expected.nr; ++row)
     {
-        const auto& pairs = result.blocks.at(0).at(fermionic_frequencies[row]);
+        const auto& pairs = result.blocks.at(0).at(fermionic_labels[row]);
         require(pairs.size() == 1 && pairs.at({0, 0}).size() == 1,
                 "one-atom internal G0W0 returned unexpected AO pair/R blocks");
         const auto& block = pairs.at({0, 0}).at({0, 0, 0});
