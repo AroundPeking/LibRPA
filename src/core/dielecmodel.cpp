@@ -41,6 +41,13 @@ namespace librpa_int
 using RI::Tensor;
 using RI::Communicate_Tensors_Map_Judge::comm_map2_first;
 
+static bool headwing_numerically_degenerate(double first, double second)
+{
+    // Resolve equality at floating-point precision, not at a smearing/broadening scale.
+    const double scale = std::max({1.0, std::abs(first), std::abs(second)});
+    return std::abs(first - second) <= 64.0 * std::numeric_limits<double>::epsilon() * scale;
+}
+
 std::string strict_2d_omega0_diagnostic_directory(const char *value)
 {
     if (value == nullptr || value[0] == '\0') return {};
@@ -1830,21 +1837,27 @@ void diele_func::cal_head_full_bz()
                         fd_reference.kbt_ha);
                     static_intraband_screening_wavevector_squared_ +=
                         full_bz_kpoint_weight * minus_fd_derivative;
-                    for (int alpha = 0; alpha != 3; ++alpha)
+                    // Tr_P(v_alpha v_beta) includes off-diagonal degenerate states.
+                    for (int jband = 0; jband != n_states; ++jband)
                     {
-                        const auto velocity_alpha = velocity[ik][alpha](iband, iband);
-                        for (int beta = 0; beta != 3; ++beta)
+                        if (!headwing_numerically_degenerate(eigenvalues(ik, iband),
+                                                             eigenvalues(ik, jband)))
+                            continue;
+                        for (int alpha = 0; alpha != 3; ++alpha)
                         {
-                            const auto velocity_product =
-                                velocity_alpha * std::conj(velocity[ik][beta](iband, iband));
-                            for (std::size_t iomega = 0; iomega != omega.size(); ++iomega)
+                            const auto velocity_alpha = velocity[ik][alpha](iband, jband);
+                            for (int beta = 0; beta != 3; ++beta)
                             {
-                                const double bosonic_frequency = omega[iomega];
-                                if (bosonic_frequency <= 0.0) continue;
-                                head.at(iomega)(alpha, beta) +=
-                                    full_bz_kpoint_weight * minus_fd_derivative
-                                    * velocity_product
-                                    / (bosonic_frequency * bosonic_frequency);
+                                const auto velocity_product =
+                                    velocity_alpha * velocity[ik][beta](jband, iband);
+                                for (std::size_t iomega = 0; iomega != omega.size(); ++iomega)
+                                {
+                                    const double bosonic_frequency = omega[iomega];
+                                    if (bosonic_frequency <= 0.0) continue;
+                                    head.at(iomega)(alpha, beta) +=
+                                        full_bz_kpoint_weight * minus_fd_derivative *
+                                        velocity_product / (bosonic_frequency * bosonic_frequency);
+                                }
                             }
                         }
                     }
@@ -1857,6 +1870,10 @@ void diele_func::cal_head_full_bz()
                 {
                     if (iocc < iunocc)
                     {
+                        if (fd_reference.enabled &&
+                            headwing_numerically_degenerate(eigenvalues(ik, iocc),
+                                                            eigenvalues(ik, iunocc)))
+                            continue;
                         double egap =
                             (eigenvalues(ik, iocc) - eigenvalues(ik, iunocc));  // * HA2EV;
                         // NOTE: wg is matrix(n_kpoints, n_states); index with (ik, ib) not flat
@@ -1994,23 +2011,29 @@ void diele_func::cal_head_symmetric()
                             fd_reference.kbt_ha);
                         static_intraband_screening_wavevector_squared_ +=
                             full_bz_kpoint_weight * minus_fd_derivative;
-                        for (int alpha = 0; alpha != 3; ++alpha)
+                        for (int jband = 0; jband != n_states; ++jband)
                         {
-                            const auto velocity_alpha = v_band_bz[alpha](iband, iband);
-                            for (int beta = 0; beta != 3; ++beta)
+                            if (!headwing_numerically_degenerate(eigenvalues(ik_ibz, iband),
+                                                                 eigenvalues(ik_ibz, jband)))
+                                continue;
+                            for (int alpha = 0; alpha != 3; ++alpha)
                             {
-                                const auto velocity_product =
-                                    velocity_alpha * std::conj(v_band_bz[beta](iband, iband));
-                                for (std::size_t iomega = 0; iomega != omega.size(); ++iomega)
+                                const auto velocity_alpha = v_band_bz[alpha](iband, jband);
+                                for (int beta = 0; beta != 3; ++beta)
                                 {
-                                    const double bosonic_frequency = omega[iomega];
-                                    if (bosonic_frequency <= 0.0) continue;
-                                    const auto contribution =
-                                        full_bz_kpoint_weight * minus_fd_derivative
-                                        * velocity_product
-                                        / (bosonic_frequency * bosonic_frequency);
-                                    head.at(iomega)(alpha, beta) += contribution;
-                                    if (debug) head_check[iomega][alpha][beta] += contribution;
+                                    const auto velocity_product =
+                                        velocity_alpha * v_band_bz[beta](jband, iband);
+                                    for (std::size_t iomega = 0; iomega != omega.size(); ++iomega)
+                                    {
+                                        const double bosonic_frequency = omega[iomega];
+                                        if (bosonic_frequency <= 0.0) continue;
+                                        const auto contribution =
+                                            full_bz_kpoint_weight * minus_fd_derivative *
+                                            velocity_product /
+                                            (bosonic_frequency * bosonic_frequency);
+                                        head.at(iomega)(alpha, beta) += contribution;
+                                        if (debug) head_check[iomega][alpha][beta] += contribution;
+                                    }
                                 }
                             }
                         }
@@ -2024,6 +2047,10 @@ void diele_func::cal_head_symmetric()
                     for (int iunocc = 0; iunocc != n_states; iunocc++)
                     {
                         if (iocc >= iunocc) continue;
+                        if (fd_reference.enabled &&
+                            headwing_numerically_degenerate(eigenvalues(ik_ibz, iocc),
+                                                            eigenvalues(ik_ibz, iunocc)))
+                            continue;
                         const double factor =
                             bz_weight_scale * headwing_transition_weight(wg(ik_ibz, iocc),
                                                                          wg(ik_ibz, iunocc), n_spin,
@@ -2326,21 +2353,29 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
                     for (int iband = 0; iband != n_states; ++iband)
                     {
                         const int loc_m = desc_nband_nband.indx_g2l_r(iband);
-                        const int loc_n = desc_nband_nband.indx_g2l_c(iband);
-                        if (loc_m < 0 || loc_n < 0) continue;
+                        if (loc_m < 0) continue;
                         const double minus_fd_derivative = -fermi_dirac_derivative(
-                            eigenvalues[isp](ik, iband)
-                                - fd_reference.chemical_potential_ha,
+                            eigenvalues[isp](ik, iband) - fd_reference.chemical_potential_ha,
                             fd_reference.kbt_ha);
-                        const std::array<std::complex<double>, 3> diagonal_velocity{
-                            velocity[0](iband, iband), velocity[1](iband, iband),
-                            velocity[2](iband, iband)};
-                        local_static_intraband_wing_mu[as_size(mu)] -=
-                            full_bz_kpoint_weight * minus_fd_derivative
-                            * C_mnk(loc_m, loc_n);
-                        accumulate_dynamic_intraband_wing_for_state(
-                            omega, diagonal_velocity, C_mnk(loc_m, loc_n),
-                            minus_fd_derivative, full_bz_kpoint_weight, wing_mu_for_mu);
+                        // Tr_P(C_mu v_alpha), with each distributed C_mn owned once.
+                        for (int jband = 0; jband != n_states; ++jband)
+                        {
+                            const int loc_n = desc_nband_nband.indx_g2l_c(jband);
+                            if (loc_n < 0 ||
+                                !headwing_numerically_degenerate(eigenvalues[isp](ik, iband),
+                                                                 eigenvalues[isp](ik, jband)))
+                                continue;
+                            if (iband == jband)
+                                local_static_intraband_wing_mu[as_size(mu)] -=
+                                    full_bz_kpoint_weight * minus_fd_derivative *
+                                    C_mnk(loc_m, loc_n);
+                            const std::array<std::complex<double>, 3> block_velocity{
+                                velocity[0](jband, iband), velocity[1](jband, iband),
+                                velocity[2](jband, iband)};
+                            accumulate_dynamic_intraband_wing_for_state(
+                                omega, block_velocity, C_mnk(loc_m, loc_n), minus_fd_derivative,
+                                full_bz_kpoint_weight, wing_mu_for_mu);
+                        }
                     }
                 }
 
@@ -2356,9 +2391,17 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
 
                         const double egap =
                             eigenvalues[isp](ik, iunocc) - eigenvalues[isp](ik, iocc);
+                        if (fd_reference.enabled && headwing_numerically_degenerate(
+                                eigenvalues[isp](ik, iocc), eigenvalues[isp](ik, iunocc))) continue;
                         double factor1 = 0.0;
                         double factor2 = 0.0;
-                        if (use_soc_wing)
+                        if (fd_reference.enabled)
+                        {
+                            // Combine time-reversal partners before any degenerate division.
+                            factor1 = headwing_transition_weight(
+                                wg(ik, iocc), wg(ik, iunocc), n_spin, use_soc_wing);
+                        }
+                        else if (use_soc_wing)
                         {
                             factor1 = wg(ik, iocc) * (1.0 - wg(ik, iunocc) * nk);
                             factor2 = wg(ik, iunocc) * (1.0 - wg(ik, iocc) * nk);
@@ -2538,21 +2581,29 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
                         for (int iband = 0; iband != n_states; ++iband)
                         {
                             const int loc_m = desc_nband_nband.indx_g2l_r(iband);
-                            const int loc_n = desc_nband_nband.indx_g2l_c(iband);
-                            if (loc_m < 0 || loc_n < 0) continue;
-                            const double minus_fd_derivative = -fermi_dirac_derivative(
-                                eigenvalues[isp](ik_ibz, iband)
-                                    - fd_reference.chemical_potential_ha,
-                                fd_reference.kbt_ha);
-                            const std::array<std::complex<double>, 3> diagonal_velocity{
-                                velocity[0](iband, iband), velocity[1](iband, iband),
-                                velocity[2](iband, iband)};
-                            local_static_intraband_wing_mu[as_size(mu)] -=
-                                full_bz_kpoint_weight * minus_fd_derivative
-                                * C_mnk(loc_m, loc_n);
-                            accumulate_dynamic_intraband_wing_for_state(
-                                omega, diagonal_velocity, C_mnk(loc_m, loc_n),
-                                minus_fd_derivative, full_bz_kpoint_weight, wing_mu_for_mu);
+                            if (loc_m < 0) continue;
+                            const double minus_fd_derivative =
+                                -fermi_dirac_derivative(eigenvalues[isp](ik_ibz, iband) -
+                                                            fd_reference.chemical_potential_ha,
+                                                        fd_reference.kbt_ha);
+                            for (int jband = 0; jband != n_states; ++jband)
+                            {
+                                const int loc_n = desc_nband_nband.indx_g2l_c(jband);
+                                if (loc_n < 0 || !headwing_numerically_degenerate(
+                                                     eigenvalues[isp](ik_ibz, iband),
+                                                     eigenvalues[isp](ik_ibz, jband)))
+                                    continue;
+                                if (iband == jband)
+                                    local_static_intraband_wing_mu[as_size(mu)] -=
+                                        full_bz_kpoint_weight * minus_fd_derivative *
+                                        C_mnk(loc_m, loc_n);
+                                const std::array<std::complex<double>, 3> block_velocity{
+                                    velocity[0](jband, iband), velocity[1](jband, iband),
+                                    velocity[2](jband, iband)};
+                                accumulate_dynamic_intraband_wing_for_state(
+                                    omega, block_velocity, C_mnk(loc_m, loc_n), minus_fd_derivative,
+                                    full_bz_kpoint_weight, wing_mu_for_mu);
+                            }
                         }
                     }
 
@@ -2568,11 +2619,18 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
 
                             const double egap =
                                 eigenvalues[isp](ik_ibz, iunocc) - eigenvalues[isp](ik_ibz, iocc);
+                            if (fd_reference.enabled && headwing_numerically_degenerate(
+                                    eigenvalues[isp](ik_ibz, iocc), eigenvalues[isp](ik_ibz, iunocc))) continue;
                             const double wg_occ = wg(ik_ibz, iocc) * bz_weight_scale_wing;
                             const double wg_unocc = wg(ik_ibz, iunocc) * bz_weight_scale_wing;
                             double factor1 = 0.0;
                             double factor2 = 0.0;
-                            if (use_soc_wing)
+                            if (fd_reference.enabled)
+                            {
+                                factor1 = headwing_transition_weight(wg_occ, wg_unocc, n_spin,
+                                                                     use_soc_wing);
+                            }
+                            else if (use_soc_wing)
                             {
                                 factor1 = wg_occ * (1.0 - wg_unocc * n_kpoints_bz);
                                 factor2 = wg_unocc * (1.0 - wg_occ * n_kpoints_bz);

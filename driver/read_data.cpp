@@ -1403,8 +1403,10 @@ void read_headwing_input(const string &dir_path, bool need_wing,
     {
         librpa_int::initialize_symmetry_context(*pds, true);
     }
-    if (path_exists(pyatb_velocity.c_str()) && pds->symmetry_context.available &&
-        !pds->symmetry_context.kstars.empty())
+    // Thermal q/GG symmetry retains a full SCF mesh; do not expand its stars again.
+    const bool headwing_uses_reduced_kmesh = scf_nk < pds->pbc.get_n_cells_bvk();
+    if (headwing_uses_reduced_kmesh && path_exists(pyatb_velocity.c_str()) &&
+        pds->symmetry_context.available && !pds->symmetry_context.kstars.empty())
     {
         direct_full_bz_velocity_member_source_ik =
             map_symmetry_kstar_members_to_source_kpoints(
@@ -1469,9 +1471,9 @@ void read_headwing_input(const string &dir_path, bool need_wing,
     }
     pds->p_headwing->use_soc = mf.get_n_spinor() > 1;
     pds->p_headwing->debug = librpa_int::global::should_output(LIBRPA_VERBOSE_DEBUG);
-    // Symmetry-aware head/wing uses the same active k-list as the main LibRPA
-    // path: full BZ without symmetry, IBZ with input k-star metadata.
-    if (pds->symmetry_context.available && !pds->symmetry_context.kstars.empty())
+    // q-space symmetry does not imply that the active mean-field list is reduced.
+    if (headwing_uses_reduced_kmesh && pds->symmetry_context.available &&
+        !pds->symmetry_context.kstars.empty())
     {
         pds->p_headwing->set_symmetry_context(pds->symmetry_context);
         pds->p_headwing->use_symmetry = true;

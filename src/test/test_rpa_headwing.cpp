@@ -2123,6 +2123,43 @@ void test_accumulate_wing_mu_for_pair_matches_original_formula()
     }
 }
 
+void test_fd_wing_time_reversal_pair_and_degenerate_cancellation()
+{
+    const std::vector<double> omega{0.0, 0.5};
+    const std::complex<double> vertex{0.7, -0.2};
+    const std::array<std::complex<double>, 3> velocity{std::complex<double>{0.2, -0.1},
+                                                       std::complex<double>{-0.3, 0.4},
+                                                       std::complex<double>{0.15, 0.05}};
+    std::array<std::complex<double>, 3> reverse_velocity;
+    for (int a = 0; a < 3; ++a) reverse_velocity[a] = -std::conj(velocity[a]);
+    const double fm = 0.7;
+    const double fn = 0.2;
+    const double weight = 0.125;
+    const double difference =
+        librpa_int::headwing_transition_weight(2.0 * weight * fm, 2.0 * weight * fn, 1, false);
+    std::array<std::complex<double>, 6> original{}, combined{};
+    for (int partner = 0; partner < 2; ++partner)
+    {
+        const auto c = partner ? std::conj(vertex) : vertex;
+        const auto &v = partner ? reverse_velocity : velocity;
+        librpa_int::accumulate_wing_mu_for_pair(omega, v, c, 1.8, weight * fm * (1.0 - fn),
+                                                weight * fn * (1.0 - fm), original.data());
+        librpa_int::accumulate_wing_mu_for_pair(omega, v, c, 1.8, difference, 0.0, combined.data());
+    }
+    for (std::size_t i = 0; i < original.size(); ++i)
+        assert_complex_close(original[i], combined[i], 1.e-14);
+
+    std::array<std::complex<double>, 6> degenerate{};
+    const double equal_weight = 2.0 * weight * 0.5;
+    const double zero =
+        librpa_int::headwing_transition_weight(equal_weight, equal_weight, 1, false);
+    librpa_int::accumulate_wing_mu_for_pair(omega, velocity, vertex, 0.0, zero, 0.0,
+                                            degenerate.data());
+    for (const auto value : degenerate) assert_complex_close(value, 0.0, 1.e-14);
+    assert(std::abs(librpa_int::headwing_transition_weight(2.0 * weight, 0.0, 1, false) - weight) <
+           1.e-14);
+}
+
 void test_dynamic_intraband_wing_has_inverse_frequency_and_imaginary_phase()
 {
     const std::vector<double> omega{0.0, 0.5, 2.0};
@@ -2490,6 +2527,108 @@ void test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(
             assert_complex_close(input.wing_mu(0, alpha), expected, 1.0e-12);
         }
     }
+#else
+    (void)blacs_h;
+#endif
+}
+
+void test_fd_degenerate_headwing_is_basis_invariant(const BlacsCtxtHandler &blacs_h)
+{
+#ifdef LIBRPA_USE_LIBRI
+    const std::vector<double> omega{0.0, 0.5, 1.0};
+    const double kbt = 0.25;
+    const double unit = 2.0 * std::sqrt(2.0 * librpa_int::TWO_PI);
+    for (const double angle : {0.0, 0.37, librpa_int::PI / 4.0})
+        for (const bool time_reversal_pair : {false, true})
+        {
+            const int nk = time_reversal_pair ? 4 : 1;
+            const int active_k = time_reversal_pair ? 1 : 0;
+            MeanField mf(1, nk, 2, 2);
+            mf.get_efermi() = 0.0;
+            for (int ik = 0; ik < nk; ++ik)
+                for (int n = 0; n < 2; ++n)
+                {
+                    mf.get_eigenvals()[0](ik, n) = 0.0;
+                    mf.get_weight()[0](ik, n) = 1.0 / nk;
+                }
+            mf.set_fermi_dirac_reference(
+                librpa_int::make_fermi_dirac_reference(kbt, 0.0, 2.0, 1.e-12));
+            auto &wfc = mf.get_eigenvectors()[0][0][active_k];
+            wfc.create(2, 2);
+            const auto phase = std::polar(1.0, 0.43);
+            wfc(0, 0) = std::cos(angle) * phase;
+            wfc(0, 1) = std::sin(angle) * phase;
+            wfc(1, 0) = -std::sin(angle);
+            wfc(1, 1) = std::cos(angle);
+            librpa_int::velocity_matrix_t velocity;
+            librpa_int::initialize_velocity_matrix(velocity, 1, nk, 2);
+            for (int a = 0; a < 3; ++a)
+                for (int m = 0; m < 2; ++m)
+                    for (int n = 0; n < 2; ++n)
+                        velocity[0][active_k][a](m, n) =
+                            (a + 1.0) *
+                            (std::conj(wfc(m, 0)) * wfc(n, 1) + std::conj(wfc(m, 1)) * wfc(n, 0));
+            if (time_reversal_pair)
+            {
+                mf.get_eigenvectors()[0][0][0] = wfc;
+                mf.get_eigenvectors()[0][0][2] = wfc;
+                mf.get_eigenvectors()[0][0][3] = librpa_int::conj(wfc);
+                for (int a = 0; a < 3; ++a)
+                    for (int m = 0; m < 2; ++m)
+                        for (int n = 0; n < 2; ++n)
+                            velocity[0][3][a](m, n) = -std::conj(velocity[0][1][a](m, n));
+            }
+            AtomicBasis basis_wfc({2});
+            AtomicBasis basis_abf({1});
+            PeriodicBoundaryData pbc;
+            pbc.set_latvec({1., 0., 0., 0., 1., 0., 0., 0., 1.});
+            const std::vector<Vector3_Order<double>> kfrac =
+                time_reversal_pair ? std::vector<Vector3_Order<double>>{{0., 0., 0.},
+                                                                        {0.25, 0., 0.},
+                                                                        {0.5, 0., 0.},
+                                                                        {0.75, 0., 0.}}
+                                   : std::vector<Vector3_Order<double>>{{0., 0., 0.}};
+            std::vector<double> kcart;
+            for (const auto &k : kfrac)
+                for (const double x : {k.x, k.y, k.z}) kcart.push_back(librpa_int::TWO_PI * x);
+            pbc.set_kgrids_kvec(nk, 1, 1, kcart);
+            const atpair_k_cplx_mat_t empty_vq;
+            librpa_int::Cs_LRI coefficients;
+            coefficients.use_libri = true;
+            if (librpa_int::global::mpi_comm_global_h.is_root())
+            {
+                // The two LRI centers give C = I + sigma_x, with Tr(C v_x) = 2.
+                auto data = std::make_shared<std::valarray<double>>(0.5, 4);
+                coefficients.data_libri[0][{0, {0, 0, 0}}] =
+                    RI::Tensor<double>({1UL, 2UL, 2UL}, data);
+            }
+            diele_func df(mf, velocity, kfrac, basis_wfc, basis_abf, omega, 2, 2, 1, 1, pbc,
+                          librpa_int::global::mpi_comm_global_h, blacs_h);
+            df.init(0.0, empty_vq);
+            df.cal_head();
+            df.cal_wing(coefficients, 0.0, empty_vq);
+            assert_complex_close(df.get_static_intraband_chi0v_wing_mu().at(0), -4.0 * unit,
+                                 1.e-11);
+            require_double_close(df.get_static_intraband_screening_wavevector_squared(),
+                                 16.0 * librpa_int::PI, 1.e-11);
+            librpa_int::RpaHeadwingSettings settings;
+            for (int iw = 1; iw < 3; ++iw)
+            {
+                const auto head = df.get_rpa_chi0v_head(iw);
+                const auto input = df.get_sternheimer_rpa_headwing_input(iw, settings);
+                for (int a = 0; a < 3; ++a)
+                {
+                    const auto expected_wing = std::complex<double>(0., 4.0 * unit) *
+                                               (time_reversal_pair ? 0.0 : a + 1.0) / omega[iw];
+                    assert_complex_close(input.wing_mu(0, a), expected_wing, 1.e-10);
+                    for (int b = 0; b < 3; ++b)
+                        assert_complex_close(head(a, b),
+                                             (time_reversal_pair ? -8.0 : -16.0) * librpa_int::PI *
+                                                 (a + 1.0) * (b + 1.0) / (omega[iw] * omega[iw]),
+                                             1.e-10);
+                }
+            }
+        }
 #else
     (void)blacs_h;
 #endif
@@ -3968,6 +4107,7 @@ int main(int argc, char *argv[])
         test_velocity_matrix_initialization();
         test_headwing_local_kpoints_prefers_kpoint_blacs_context();
         test_accumulate_wing_mu_for_pair_matches_original_formula();
+        test_fd_wing_time_reversal_pair_and_degenerate_cancellation();
         test_dynamic_intraband_wing_has_inverse_frequency_and_imaginary_phase();
         test_headwing_wfc_restore_applies_atom_permutation();
         test_headwing_wfc_restore_applies_time_reversal();
@@ -3983,6 +4123,7 @@ int main(int argc, char *argv[])
         test_head_initialization_does_not_require_coulomb_diagonalization(blacs_h);
         test_finite_temperature_dynamic_intraband_head_is_velocity_weighted(blacs_h);
         test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(blacs_h);
+        test_fd_degenerate_headwing_is_basis_invariant(blacs_h);
         test_finite_temperature_static_metallic_rpa_gamma_path(blacs_h);
         test_finite_temperature_static_metallic_gw_gamma_path(blacs_h);
         test_strict_2d_gamma_quadrature_is_ready_after_wing_initialization(blacs_h);
