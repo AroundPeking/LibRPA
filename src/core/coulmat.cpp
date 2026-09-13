@@ -559,9 +559,11 @@ atpair_R_mat_t FT_Vq(const MpiCommHandler &comm_h,
                      const atpair_k_cplx_mat_t &coulmat_k,
                      const PeriodicBoundaryData &pbc,
                      bool return_ordered_atom_pair,
-                     const bool use_symmetry_context)
+                     const bool use_symmetry_context,
+                     bool* result_is_replicated)
 {
     atpair_R_mat_t coulmat_R;
+    if (result_is_replicated) *result_is_replicated = false;
 
     const auto &Rlist = pbc.Rlist;
     const auto &latvec = pbc.latvec;
@@ -574,6 +576,7 @@ atpair_R_mat_t FT_Vq(const MpiCommHandler &comm_h,
     {
         global::lib_printf_root(
             "EXX symmetry accumulates irreducible-sector `V(R)` directly from IBZ q-stars\n");
+        if (result_is_replicated) *result_is_replicated = true;
         return accumulate_symmetry_abf_irreducible_sector_vr(
             comm_h, symmetry_context, basis_abf, coulmat_k, pbc);
     }

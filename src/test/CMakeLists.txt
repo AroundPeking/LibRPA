@@ -112,6 +112,17 @@ if(LIBRPA_USE_LIBRI AND _LIBRPA_USE_BUNDLED_LIBCOMM)
   config_test(test_libcomm_bounded_exchange 4)
 endif()
 
+if(LIBRPA_USE_LIBRI)
+  config_test(test_exx_coulomb_ownership 1)
+  target_compile_options(test_exx_coulomb_ownership PRIVATE -UNDEBUG)
+  foreach(nproc 2 4)
+    add_test(NAME test_exx_coulomb_ownership_mpi${nproc}
+      COMMAND mpirun -np ${nproc} $<TARGET_FILE:test_exx_coulomb_ownership>)
+  endforeach()
+  set_tests_properties(test_exx_coulomb_ownership test_exx_coulomb_ownership_mpi2
+    test_exx_coulomb_ownership_mpi4 PROPERTIES LABELS "symmetry;exx" TIMEOUT 120)
+endif()
+
 foreach(target test_rpa_headwing test_symmetry)
   target_compile_options(${target} PRIVATE -UNDEBUG)
 endforeach()
