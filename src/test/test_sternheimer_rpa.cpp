@@ -252,6 +252,30 @@ void test_sternheimer_qavg_matches_standard_rpa_headwing_average()
     require_close(sternheimer.integrand, standard, 1e-12);
 }
 
+void test_sternheimer_qavg_body_start_zero_keeps_all_positive_finite_part_channels()
+{
+    librpa_int::ComplexMatrix coulomb(3, 3);
+    coulomb(0, 0) = {-1.0, 0.0};
+    coulomb(1, 1) = {4.0, 0.0};
+    coulomb(2, 2) = {9.0, 0.0};
+
+    librpa_int::ComplexMatrix response_m(3, 3);
+    response_m(1, 1) = {-0.8, 0.0};
+    response_m(2, 2) = {-1.8, 0.0};
+
+    librpa_int::SternheimerRpaHeadwingInput headwing;
+    headwing.mode = "qavg";
+    headwing.body_start = 0;
+    headwing.head = librpa_int::ComplexMatrix(3, 3);
+    headwing.wing_mu = librpa_int::ComplexMatrix(3, 3);
+    headwing.directions = {{{1.0, 0.0, 0.0}, 1.0}};
+
+    const auto result = librpa_int::compute_sternheimer_rpa_frequency_headwing(
+        coulomb, response_m, headwing, 1, 0.5, 0.25, 1.0, 1e-12);
+    const auto one_body_channel = std::log(std::complex<double>(1.2, 0.0)) - 0.2;
+    require_close(result.integrand, 2.0 * one_body_channel, 1e-12);
+}
+
 void test_sternheimer_strict_2d_qavg_integrates_radial_dependence()
 {
     librpa_int::ComplexMatrix coulomb(2, 2);
@@ -301,6 +325,7 @@ int main()
     test_sternheimer_headwing_dense_projection_matches_direct_reference();
     test_sternheimer_qavg_uses_analytic_head_and_wing();
     test_sternheimer_qavg_matches_standard_rpa_headwing_average();
+    test_sternheimer_qavg_body_start_zero_keeps_all_positive_finite_part_channels();
     test_sternheimer_strict_2d_qavg_integrates_radial_dependence();
     return 0;
 }

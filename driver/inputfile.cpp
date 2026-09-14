@@ -287,8 +287,8 @@ void parse_inputfile_to_params(const std::string &fn)
         if (flag == 0) opts.output_gw_sigc_ks_kf = get_switch(btmp);
     }
     _parse_int(opts, rpa_headwing_body_start);
-    if (opts.rpa_headwing_body_start < 0)
-        throw std::runtime_error("rpa_headwing_body_start must be non-negative");
+    if (opts.rpa_headwing_body_start < -1)
+        throw std::runtime_error("rpa_headwing_body_start must be at least -1");
     parser.parse_string("rpa_headwing_mode", stmp, "qavg", flag);
     if (flag == 0 || flag == 1)
     {

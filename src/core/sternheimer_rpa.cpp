@@ -388,7 +388,11 @@ SternheimerRpaFrequencyResult compute_sternheimer_rpa_frequency_headwing(
                                      integrand - trace(response));
     }
 
-    const int body_start = headwing.body_start > 0 ? headwing.body_start : 1;
+    if (headwing.body_start < 0)
+    {
+        throw std::logic_error("ST-RPA head/wing body start must be non-negative");
+    }
+    const int body_start = headwing.body_start;
     if (body_start >= basis.active_size)
     {
         throw std::logic_error("ST-RPA head/wing Coulomb subspace has no regular body channels");

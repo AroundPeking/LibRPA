@@ -571,21 +571,29 @@ void test_rpa_headwing_regular_body_start_channel()
 {
     librpa_int::RpaHeadwingSettings settings;
 
-    settings.use_2d_dielectric = false;
+    settings.rpa_headwing_body_start = -1;
+    assert(librpa_int::rpa_headwing_regular_body_start_channel(settings) == 0);
+
     settings.rpa_headwing_body_start = 0;
     assert(librpa_int::rpa_headwing_regular_body_start_channel(settings) == 1);
 
-    settings.use_2d_dielectric = true;
-    settings.rpa_headwing_body_start = 0;
-    assert(librpa_int::rpa_headwing_regular_body_start_channel(settings) == 1);
-
-    settings.use_2d_dielectric = false;
     settings.rpa_headwing_body_start = 1;
     assert(librpa_int::rpa_headwing_regular_body_start_channel(settings) == 1);
 
-    settings.use_2d_dielectric = true;
     settings.rpa_headwing_body_start = 4;
     assert(librpa_int::rpa_headwing_regular_body_start_channel(settings) == 4);
+
+    settings.rpa_headwing_body_start = -2;
+    bool threw = false;
+    try
+    {
+        (void)librpa_int::rpa_headwing_regular_body_start_channel(settings);
+    }
+    catch (const std::logic_error &)
+    {
+        threw = true;
+    }
+    assert(threw);
 }
 
 void test_rpa_headwing_gamma_cell_volume_uses_reciprocal_lattice()

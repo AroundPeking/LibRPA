@@ -3827,9 +3827,13 @@ void diele_func::assign_chi0(matrix_m<std::complex<double>> &chi0_block,
 
 int rpa_headwing_regular_body_start_channel(const RpaHeadwingSettings &settings)
 {
-    if (settings.rpa_headwing_body_start < 0)
+    if (settings.rpa_headwing_body_start < -1)
     {
-        throw std::logic_error("rpa_headwing_body_start must be non-negative");
+        throw std::logic_error("rpa_headwing_body_start must be at least -1");
+    }
+    if (settings.rpa_headwing_body_start == -1)
+    {
+        return 0;
     }
     if (settings.rpa_headwing_body_start > 0)
     {
@@ -4250,6 +4254,11 @@ std::complex<double> diele_func::compute_rpa_trace_log_average(
     }
 
     const int body_start = rpa_headwing_regular_body_start_channel(settings);
+    if (body_start == 0)
+    {
+        throw std::logic_error(
+            "rpa_headwing_body_start=-1 is supported only by the Sternheimer RPA path");
+    }
     const int wing_row_offset = body_start - 1;
     if (desc_response.m() <= body_start || wing_row_offset >= wing.at(ifreq).nr())
     {
