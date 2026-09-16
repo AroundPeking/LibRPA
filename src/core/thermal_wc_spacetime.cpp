@@ -286,4 +286,146 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
     collective_rethrow(comm_h, error);
     return result;
 }
+
+void thermal_Wc_freq_q_to_tau_R_stream(
+    const MpiCommHandler& comm_h,
+    std::map<double, std::map<Vector3_Order<double>, Matz>>& Wc_freq_q,
+    const PeriodicBoundaryData& pbc, const ThermalGWTransform& transform,
+    const ThermalWcTimeConsumer& consume)
+{
+    std::exception_ptr error;
+    std::vector<double> frequencies;
+    try
+    {
+        validate_pbc(pbc);
+        frequencies = transform.get_bosonic_frequencies_ha();
+        if (transform.get_times().empty())
+            throw std::invalid_argument("thermal Wc requires a nonempty time grid");
+        if (!consume) throw std::invalid_argument("thermal Wc requires a time-slice consumer");
+        validate_samples(Wc_freq_q, pbc, frequencies);
+    }
+    catch (...)
+    {
+        error = std::current_exception();
+    }
+    collective_rethrow(comm_h, error);
+
+    const auto& input_layout = Wc_freq_q.begin()->second.begin()->second;
+    const int rows = input_layout.nr();
+    const int columns = input_layout.nc();
+    const auto major = input_layout.major();
+    const auto matrix_size = input_layout.size();
+    int major_mask = 1 << major;
+    comm_h.allreduce(MPI_IN_PLACE, &major_mask, 1, MPI_BOR);
+    if (major_mask != (1 << ROW) && major_mask != (1 << COL))
+        throw std::invalid_argument("thermal Wc storage major must agree on every MPI rank");
+
+    using SpatialMap = std::map<Vector3_Order<int>, Matz>;
+    std::map<double, SpatialMap> frequency_r;
+    try
+    {
+        const auto& qlist = pbc.klist_full;
+        const auto spatial_batch =
+            choose_spatial_batch(qlist.size(), pbc.Rlist.size(), 1, 1, matrix_size);
+        while (!Wc_freq_q.empty())
+        {
+            auto frequency_node = Wc_freq_q.begin();
+            const double frequency = frequency_node->first;
+            const auto& qmap = frequency_node->second;
+            auto& rmap = frequency_r[frequency];
+            for (const auto& r : pbc.Rlist) rmap.emplace(r, Matz(rows, columns, major));
+
+            for (std::size_t r_offset = 0; r_offset < pbc.Rlist.size();
+                 r_offset += spatial_batch.r_count)
+            {
+                const auto r_count = std::min(spatial_batch.r_count, pbc.Rlist.size() - r_offset);
+                validate_dense_dimensions(r_count, qlist.size());
+                ComplexMatrix phases(static_cast<int>(r_count), static_cast<int>(qlist.size()));
+                for (std::size_t ir = 0; ir < r_count; ++ir)
+                {
+                    const auto cartesian_r = pbc.Rlist[r_offset + ir] * pbc.latvec;
+                    if (!finite(cartesian_r))
+                        throw std::overflow_error("thermal Wc lattice translation is nonfinite");
+                    for (std::size_t q = 0; q < qlist.size(); ++q)
+                    {
+                        const double angle = -TWO_PI * (qlist[q] * cartesian_r);
+                        if (!std::isfinite(angle))
+                            throw std::overflow_error("thermal Wc spatial phase is nonfinite");
+                        phases(ir, q) =
+                            cplxdb(std::cos(angle), std::sin(angle)) / double(qlist.size());
+                    }
+                }
+                for (std::size_t offset = 0; offset < matrix_size; offset += spatial_batch.elements)
+                {
+                    const auto count = std::min(spatial_batch.elements, matrix_size - offset);
+                    validate_dense_dimensions(qlist.size(), count);
+                    validate_dense_dimensions(r_count, count);
+                    ComplexMatrix qpack(static_cast<int>(qlist.size()), static_cast<int>(count));
+                    for (std::size_t q = 0; q < qlist.size(); ++q)
+                        std::copy_n(qmap.at(qlist[q]).ptr() + offset, count, qpack.c + q * count);
+                    const auto spatial = phases * qpack;
+                    for (std::size_t ir = 0; ir < r_count; ++ir)
+                        std::copy_n(spatial.c + ir * count, count,
+                                    rmap.at(pbc.Rlist[r_offset + ir]).ptr() + offset);
+                }
+            }
+            Wc_freq_q.erase(frequency_node);
+        }
+    }
+    catch (...)
+    {
+        error = std::current_exception();
+    }
+    collective_rethrow(comm_h, error);
+
+    const auto bosonic = transform.copy_bosonic_frequency_to_time();
+    const auto time_batch =
+        choose_spatial_batch(frequencies.size(), pbc.Rlist.size(), 1, 1, matrix_size);
+    for (std::size_t time_index = 0; time_index < transform.get_times().size(); ++time_index)
+    {
+        SpatialMap time_r;
+        try
+        {
+            for (const auto& r : pbc.Rlist) time_r.emplace(r, Matz(rows, columns, major));
+            ComplexMatrix coefficients(1, static_cast<int>(frequencies.size()));
+            for (std::size_t m = 0; m < frequencies.size(); ++m)
+                coefficients(0, m) = bosonic(time_index, m);
+
+            for (std::size_t r_offset = 0; r_offset < pbc.Rlist.size();
+                 r_offset += time_batch.r_count)
+            {
+                const auto r_count = std::min(time_batch.r_count, pbc.Rlist.size() - r_offset);
+                for (std::size_t offset = 0; offset < matrix_size; offset += time_batch.elements)
+                {
+                    const auto count = std::min(time_batch.elements, matrix_size - offset);
+                    const auto packed_columns = r_count * count;
+                    validate_dense_dimensions(frequencies.size(), packed_columns);
+                    ComplexMatrix samples(static_cast<int>(frequencies.size()),
+                                          static_cast<int>(packed_columns));
+                    for (std::size_t m = 0; m < frequencies.size(); ++m)
+                    {
+                        const auto& rmap = frequency_r.at(frequencies[m]);
+                        for (std::size_t ir = 0; ir < r_count; ++ir)
+                            std::copy_n(rmap.at(pbc.Rlist[r_offset + ir]).ptr() + offset, count,
+                                        samples.c + m * packed_columns + ir * count);
+                    }
+                    const auto transformed = coefficients * samples;
+                    for (std::size_t k = 0; k < packed_columns; ++k)
+                        if (!finite(transformed.c[k]))
+                            throw std::overflow_error(
+                                "thermal Wc time transform produced a nonfinite result");
+                    for (std::size_t ir = 0; ir < r_count; ++ir)
+                        std::copy_n(transformed.c + ir * count, count,
+                                    time_r.at(pbc.Rlist[r_offset + ir]).ptr() + offset);
+                }
+            }
+        }
+        catch (...)
+        {
+            error = std::current_exception();
+        }
+        collective_rethrow(comm_h, error);
+        consume(time_index, transform.get_times()[time_index], std::move(time_r));
+    }
+}
 }  // namespace librpa_int

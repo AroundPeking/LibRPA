@@ -247,6 +247,36 @@ void check_success(const MpiCommHandler& comm, MAJOR major, int rows = 2, int co
     unchanged(wc, before);
 }
 
+void check_stream_matches_full(const MpiCommHandler& comm)
+{
+    const auto pbc = make_pbc(2, 2, 2);
+    const auto transform = make_transform();
+    const auto wc = make_samples(pbc, transform, comm.myid, 2, 3, COL, true);
+    const auto full = thermal_Wc_freq_q_to_tau_R(comm, wc, pbc, transform);
+    auto streamed_input = wc;
+    std::size_t callbacks = 0;
+    thermal_Wc_freq_q_to_tau_R_stream(
+        comm, streamed_input, pbc, transform,
+        [&](std::size_t index, double time, std::map<Vector3_Order<int>, Matz>&& streamed)
+        {
+            require(index == callbacks, "stream callback time index is not ordered");
+            const auto& expected = full.at(time);
+            require(streamed.size() == expected.size(), "stream callback dropped an R block");
+            for (const auto& [r, matrix] : streamed)
+            {
+                const auto& reference = expected.at(r);
+                require(matrix.nr() == reference.nr() && matrix.nc() == reference.nc() &&
+                            matrix.major() == reference.major(),
+                        "stream callback changed an R block shape");
+                for (std::size_t element = 0; element < matrix.size(); ++element)
+                    close(matrix.ptr()[element], reference.ptr()[element]);
+            }
+            ++callbacks;
+        });
+    require(callbacks == transform.get_times().size(), "stream callback missed a time point");
+    require(streamed_input.empty(), "stream transform retained consumed q-space matrices");
+}
+
 void check_batch_boundaries(const MpiCommHandler& comm, MAJOR major, bool empty_owner = false)
 {
     auto pbc = make_pbc(5, 13, 1);
@@ -350,6 +380,8 @@ int main(int argc, char** argv)
         {"zero local columns retain keys",
          [&] { check_success(comm, COL, 2, comm.myid == comm.nprocs - 1 ? 0 : 3); }},
         {"all ranks zero local size", [&] { check_success(comm, COL, 0, 0); }},
+        {"streaming time transform matches resident transform",
+         [&] { check_stream_matches_full(comm); }},
         {"default zero matrix needs no backing storage",
          [&]
          {
