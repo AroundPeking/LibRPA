@@ -175,13 +175,14 @@ public:
     /** Internal full-q/signed-frequency path; leaves legacy GW state untouched.
      * Requires scalar spin, replicated full SCF k grid and uncompressed W/C;
      * the existing output-only real-space symmetry filter is optional. Requires
-     * a global BLACS Wc descriptor. Inputs are preserved. No head/wing generation,
+     * a global BLACS Wc descriptor. The by-value Wc storage is consumed to bound memory;
+     * callers should move production data into this function. No head/wing generation,
      * continuation or restart. Identical physical metadata is required on all ranks.
      */
     ThermalSigcRspace build_thermal_spacetime(
         const AtomicBasis &atbasis_abf, const Cs_LRI &lri_cs,
-        const std::map<double, std::map<Vector3_Order<double>, Matz>> &wc_freq_q,
-        const ArrayDesc &ad_wc, const ThermalGWTransform &transform) const;
+        std::map<double, std::map<Vector3_Order<double>, Matz>> wc_freq_q, const ArrayDesc &ad_wc,
+        const ThermalGWTransform &transform) const;
 
     //! Build the real-space correlation self-energy matrix on imaginary frequencies with space-time
     //! method using LibRI

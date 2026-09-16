@@ -1479,8 +1479,8 @@ static void build_gf_libri_kblacs_para(
 
 ThermalSigcRspace G0W0::build_thermal_spacetime(
     const AtomicBasis &atbasis_abf, const Cs_LRI &lri_cs,
-    const std::map<double, std::map<Vector3_Order<double>, Matz>> &wc_freq_q,
-    const ArrayDesc &ad_wc, const ThermalGWTransform &transform) const
+    std::map<double, std::map<Vector3_Order<double>, Matz>> wc_freq_q, const ArrayDesc &ad_wc,
+    const ThermalGWTransform &transform) const
 {
 #ifndef LIBRPA_USE_LIBRI
     throw std::runtime_error("thermal spacetime requires LibRI");
@@ -1529,6 +1529,7 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
             for (double threshold : {libri_threshold_C, libri_threshold_Wc, libri_threshold_G})
                 if (!std::isfinite(threshold) || threshold < 0)
                     throw std::invalid_argument("invalid LibRI threshold");
+            if (wc_freq_q.empty()) throw std::invalid_argument("Wc frequency map is empty");
             for (const auto &[freq, qmap] : wc_freq_q)
                 for (const auto &[q, block] : qmap)
                     if (block.nr() != ad_wc.m_loc() || block.nc() != ad_wc.n_loc())
@@ -1635,10 +1636,9 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
             use_rspace_symmetry ? symmetry_context.count_irreducible_blocks() : n_full_blocks,
             n_full_blocks);
 
-    auto wc_tau_r = thermal_Wc_freq_q_to_tau_R(comm_h, wc_freq_q, pbc, transform);
     const auto distribution =
         get_balanced_ap_distribution_for_consec_descriptor(atbasis_abf, atbasis_abf, ad_wc);
-    const auto major = wc_tau_r.begin()->second.begin()->second.major();
+    const auto major = wc_freq_q.begin()->second.begin()->second.major();
     IndexScheduler sched_wc;
     sched_wc.init(distribution, atbasis_abf, atbasis_abf, ad_wc, major == MAJOR::ROW);
     using TensorMap =
@@ -1664,90 +1664,93 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
     const auto &labels = transform.get_fermionic_indices();
     ThermalSigcRspace result{
         transform.get_fermionic_grid(), {}, mf.get_fermi_dirac_reference().chemical_potential_ha};
-    for (std::size_t itau = 0; itau < transform.get_times().size(); ++itau)
-    {
-        const double start_time = MPI_Wtime();
-        const double tau = transform.get_times()[itau];
-        TensorMap ws;
-        for (auto &[r, mat] : wc_tau_r.at(tau))
+    thermal_Wc_freq_q_to_tau_R_stream(
+        comm_h, wc_freq_q, pbc, transform,
+        [&](const std::size_t itau, const double tau, std::map<Vector3_Order<int>, Matz> &&wc_tau_r)
         {
-            auto blocks = get_ap_map_from_blacs_dist_scheduler(mat, sched_wc, atbasis_abf,
-                                                               atbasis_abf, ad_wc);
-            for (auto &[ij, block] : blocks)
+            const double start_time = MPI_Wtime();
+            TensorMap ws;
+            for (auto &[r, mat] : wc_tau_r)
             {
-                if (block.is_col_major()) block.swap_to_row_major();
-                ws[as_int(ij.first)][{as_int(ij.second), {r.x, r.y, r.z}}] = RI::Tensor<cplxdb>(
-                    {atbasis_abf.get_atom_nb(ij.first), atbasis_abf.get_atom_nb(ij.second)},
-                    block.sptr());
-            }
-        }
-        wc_tau_r.erase(tau);
-        gw_libri.set_Ws(ws, libri_threshold_Wc);
-        const double w_ready_time = MPI_Wtime();
-        for (int spin = 0; spin < mf.get_n_spins(); ++spin)
-        {
-            const double g_start_time = MPI_Wtime();
-            std::map<double, TensorMap> gs;
-            collective_check(
-                [&]
+                auto blocks = get_ap_map_from_blacs_dist_scheduler(mat, sched_wc, atbasis_abf,
+                                                                   atbasis_abf, ad_wc);
+                for (auto &[ij, block] : blocks)
                 {
-                    build_gf_libri_kserial(mf, atbasis_wfc, spin, 0, 0, pbc, symmetry_context,
-                                           false, pbc.kfrac_list, {tau}, ijrs, gs);
-                });
-            gw_libri.set_Gs(gs.at(tau), libri_threshold_G);
-            const double g_ready_time = MPI_Wtime();
-            gw_libri.cal_Sigmas();
-            const double contracted_time = MPI_Wtime();
-            if (use_rspace_symmetry)
+                    if (block.is_col_major()) block.swap_to_row_major();
+                    ws[as_int(ij.first)][{as_int(ij.second), {r.x, r.y, r.z}}] = RI::Tensor<cplxdb>(
+                        {atbasis_abf.get_atom_nb(ij.first), atbasis_abf.get_atom_nb(ij.second)},
+                        block.sptr());
+                }
+            }
+            gw_libri.set_Ws(ws, libri_threshold_Wc);
+            const double w_ready_time = MPI_Wtime();
+            for (int spin = 0; spin < mf.get_n_spins(); ++spin)
+            {
+                const double g_start_time = MPI_Wtime();
+                std::map<double, TensorMap> gs;
                 collective_check(
                     [&]
                     {
-                        gw_libri.Sigmas = restore_symmetry_ao_rspace_tensor_map_gw(
-                            gw_libri.Sigmas, symmetry_context, symmetry_context.rspace_sector_stars,
-                            atbasis_wfc);
+                        build_gf_libri_kserial(mf, atbasis_wfc, spin, 0, 0, pbc, symmetry_context,
+                                               false, pbc.kfrac_list, {tau}, ijrs, gs);
                     });
-            const double restored_time = MPI_Wtime();
-            gw_libri.free_Gs();
-            // G_lib already contains the GW sign. F contains the full integral weight.
-            collective_check(
-                [&]
-                {
-                    for (const auto &[i, jrmap] : gw_libri.Sigmas)
-                        for (const auto &[jr, sigma] : jrmap)
+                gw_libri.set_Gs(gs.at(tau), libri_threshold_G);
+                const double g_ready_time = MPI_Wtime();
+                gw_libri.cal_Sigmas();
+                const double contracted_time = MPI_Wtime();
+                if (use_rspace_symmetry)
+                    collective_check(
+                        [&]
                         {
-                            const int j = jr.first;
-                            const Vector3_Order<int> r{jr.second[0], jr.second[1], jr.second[2]};
-                            const auto ni = atbasis_wfc.get_atom_nb(i),
-                                       nj = atbasis_wfc.get_atom_nb(j);
-                            for (std::size_t n = 0; n < labels.size(); ++n)
+                            gw_libri.Sigmas = restore_symmetry_ao_rspace_tensor_map_gw(
+                                gw_libri.Sigmas, symmetry_context,
+                                symmetry_context.rspace_sector_stars, atbasis_wfc);
+                        });
+                const double restored_time = MPI_Wtime();
+                gw_libri.free_Gs();
+                // G_lib already contains the GW sign. F contains the full integral weight.
+                collective_check(
+                    [&]
+                    {
+                        for (const auto &[i, jrmap] : gw_libri.Sigmas)
+                            for (const auto &[jr, sigma] : jrmap)
                             {
-                                auto &rmap = result.blocks[spin][labels[n]][{i, j}];
-                                auto entry = rmap.find(r);
-                                if (entry == rmap.end())
-                                    entry = rmap.emplace(r, Matz(ni, nj, MAJOR::ROW)).first;
-                                auto &out = entry->second;
-                                for (std::size_t a = 0; a < ni; ++a)
-                                    for (std::size_t b = 0; b < nj; ++b)
-                                    {
-                                        out(a, b) += f(n, itau) * sigma(a, b);
-                                        if (!std::isfinite(out(a, b).real()) ||
-                                            !std::isfinite(out(a, b).imag()))
-                                            throw std::overflow_error("nonfinite thermal Sigma");
-                                    }
+                                const int j = jr.first;
+                                const Vector3_Order<int> r{jr.second[0], jr.second[1],
+                                                           jr.second[2]};
+                                const auto ni = atbasis_wfc.get_atom_nb(i),
+                                           nj = atbasis_wfc.get_atom_nb(j);
+                                for (std::size_t n = 0; n < labels.size(); ++n)
+                                {
+                                    auto &rmap = result.blocks[spin][labels[n]][{i, j}];
+                                    auto entry = rmap.find(r);
+                                    if (entry == rmap.end())
+                                        entry = rmap.emplace(r, Matz(ni, nj, MAJOR::ROW)).first;
+                                    auto &out = entry->second;
+                                    for (std::size_t a = 0; a < ni; ++a)
+                                        for (std::size_t b = 0; b < nj; ++b)
+                                        {
+                                            out(a, b) += f(n, itau) * sigma(a, b);
+                                            if (!std::isfinite(out(a, b).real()) ||
+                                                !std::isfinite(out(a, b).imag()))
+                                                throw std::overflow_error(
+                                                    "nonfinite thermal Sigma");
+                                        }
+                                }
                             }
-                        }
-                });
-            if (comm_h.is_root())
-                global::lib_printf(
-                    "Thermal Sigma tau %zu/%zu spin %d: W setup %.6fs G setup %.6fs "
-                    "LibRI contraction %.6fs symmetry restore %.6fs frequency accumulation %.6fs\n",
-                    itau + 1, transform.get_times().size(), spin, w_ready_time - start_time,
-                    g_ready_time - g_start_time, contracted_time - g_ready_time,
-                    restored_time - contracted_time, MPI_Wtime() - restored_time);
-            gw_libri.Sigmas.clear();
-        }
-        gw_libri.free_Ws();
-    }
+                    });
+                if (comm_h.is_root())
+                    global::lib_printf(
+                        "Thermal Sigma tau %zu/%zu spin %d: W setup %.6fs G setup %.6fs "
+                        "LibRI contraction %.6fs symmetry restore %.6fs frequency accumulation "
+                        "%.6fs\n",
+                        itau + 1, transform.get_times().size(), spin, w_ready_time - start_time,
+                        g_ready_time - g_start_time, contracted_time - g_ready_time,
+                        restored_time - contracted_time, MPI_Wtime() - restored_time);
+                gw_libri.Sigmas.clear();
+            }
+            gw_libri.free_Ws();
+        });
     return result;
 #endif
 }

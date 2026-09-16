@@ -1,5 +1,6 @@
 #pragma once
 #include <complex>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -156,6 +157,18 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
     const MpiCommHandler &comm_h,
     const std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
     const PeriodicBoundaryData &pbc, const ThermalGWTransform &transform);
+
+using ThermalWcTimeConsumer =
+    std::function<void(std::size_t, double, std::map<Vector3_Order<int>, Matz> &&)>;
+
+//! Convert q to R once per frequency, then emit and release one complete time slice at a time.
+//! Wc_freq_q is consumed to keep the resident numerical storage bounded by one frequency-space
+//! representation plus one time slice.
+void thermal_Wc_freq_q_to_tau_R_stream(
+    const MpiCommHandler &comm_h,
+    std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
+    const PeriodicBoundaryData &pbc, const ThermalGWTransform &transform,
+    const ThermalWcTimeConsumer &consume);
 
 //! Fourier transform screened Coulomb in q-space to R-space, but still in frequency domain
 std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(

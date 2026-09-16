@@ -1095,8 +1095,8 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
                                    pds->desc_abf, use_shrink_abfs ? &pds->sinvS : nullptr,
                                    &chi0.qpoint_view(), &pds->symmetry_context, &pds->basis_aux);
             Wc_freq_q.clear();
-            auto sigma = pds->p_g0w0->build_thermal_spacetime(pds->basis_aux, pds->cs_data,
-                                                              signed_wc, pds->desc_abf, transform);
+            auto sigma = pds->p_g0w0->build_thermal_spacetime(
+                pds->basis_aux, pds->cs_data, std::move(signed_wc), pds->desc_abf, transform);
             pds->p_g0w0->set_thermal_sigc(std::move(sigma));
         }
         catch (...)
