@@ -17,13 +17,16 @@ double occupation_number_from_kpoint_weight(const double weighted_occupation,
 void write_energy_qp(const librpa_int::MeanField &mf,
                      const std::vector<librpa_int::Vector3_Order<double>> &kfrac_output,
                      const std::vector<int> &output_to_input_kpoint,
-                     const std::vector<librpa_int::matrix> &vxc, const std::vector<double> &vexx,
-                     const std::vector<librpa_int::cplxdb> &sigc, const int n_kpoints_data,
+                     const std::vector<double> &eqp, const int n_kpoints_data,
                      const int i_state_low, const int n_states_calc,
                      const std::vector<double> &kpoint_weights)
 {
     if (kpoint_weights.size() != static_cast<std::size_t>(mf.get_n_kpoints()))
         throw std::invalid_argument("k-point weight count does not match mean-field data");
+    const auto expected_qp_size = static_cast<std::size_t>(mf.get_n_spins()) * n_kpoints_data *
+                                  n_states_calc;
+    if (eqp.size() != expected_qp_size)
+        throw std::invalid_argument("QP energy count does not match requested k-point/state window");
     const std::string sep =
         "-----------------------------------------"
         "----------------------------------------------------------";
@@ -54,12 +57,10 @@ void write_energy_qp(const librpa_int::MeanField &mf,
                     mf.get_weight()[i_spin](i_kpoint_input, i_state),
                     kpoint_weights[static_cast<std::size_t>(i_kpoint_input)]);
                 const auto eks_state = mf.get_eigenvals()[i_spin](i_kpoint_input, i_state);
-                const auto eqp = eks_state - vxc[i_spin](i_kpoint_input, i_state) +
-                                 vexx[start_k + i] + sigc[start_k + i].real();
                 ofs << "  " << std::setw(6) << i_state + 1 << "  " << std::fixed
                     << std::setprecision(4) << std::setw(8) << occ_state << std::scientific
                     << std::uppercase << std::setprecision(10) << std::setw(20) << eks_state
-                    << std::setw(20) << eqp << std::endl;
+                    << std::setw(20) << eqp[start_k + i] << std::endl;
             }
             if (mf.get_n_spins() == 2 && i_spin == 0)
             {
