@@ -3034,6 +3034,26 @@ static ComplexMatrix assemble_lri_vertex_matrix(const Cs_LRI &Cs, const AtomicBa
     return c_mu;
 }
 
+static ComplexMatrix adjoint_lri_vertex_matrix(const ComplexMatrix &matrix)
+{
+    ComplexMatrix result(matrix.nc, matrix.nr);
+    for (int i = 0; i != matrix.nr; ++i)
+        for (int j = 0; j != matrix.nc; ++j) result(j, i) = std::conj(matrix(i, j));
+    return result;
+}
+
+static ComplexMatrix add_lri_vertex_matrices(const ComplexMatrix &lhs, const ComplexMatrix &rhs)
+{
+    if (lhs.nr != rhs.nr || lhs.nc != rhs.nc)
+        throw LIBRPA_RUNTIME_ERROR(
+            "direct band-pair chi0 diagnostic found incompatible LRI blocks");
+
+    ComplexMatrix result(lhs.nr, lhs.nc);
+    for (int i = 0; i != lhs.nr; ++i)
+        for (int j = 0; j != lhs.nc; ++j) result(i, j) = lhs(i, j) + rhs(i, j);
+    return result;
+}
+
 static std::vector<std::complex<double>> contract_lri_band_vertex(const ComplexMatrix &wfc_bra,
                                                                   const ComplexMatrix &c_mu,
                                                                   const ComplexMatrix &wfc_ket,
@@ -3159,6 +3179,9 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
 
     std::vector<std::complex<double>> direct_source(n_frequencies_to_check, 0.0);
     std::vector<std::complex<double>> direct_target(n_frequencies_to_check, 0.0);
+    std::vector<std::complex<double>> direct_target_plus_source_dagger(n_frequencies_to_check, 0.0);
+    std::vector<std::complex<double>> direct_source_plus_target_dagger(n_frequencies_to_check, 0.0);
+    std::vector<std::complex<double>> direct_gamma(n_frequencies_to_check, 0.0);
     for (int ik = 0; ik != n_kpoints; ++ik)
     {
         const int ikq = kplusq[static_cast<std::size_t>(ik)];
@@ -3173,6 +3196,15 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
             Cs, atbasis_wfc, mu_atom, mu_local, pbc.kfrac_list[static_cast<std::size_t>(ikq)]);
         const auto vertex_source = contract_lri_band_vertex(*wfc_k, c_source, *wfc_kq, n_bands);
         const auto vertex_target = contract_lri_band_vertex(*wfc_k, c_target, *wfc_kq, n_bands);
+        const auto vertex_target_plus_source_dagger = contract_lri_band_vertex(
+            *wfc_k, add_lri_vertex_matrices(c_target, adjoint_lri_vertex_matrix(c_source)), *wfc_kq,
+            n_bands);
+        const auto vertex_source_plus_target_dagger = contract_lri_band_vertex(
+            *wfc_k, add_lri_vertex_matrices(c_source, adjoint_lri_vertex_matrix(c_target)), *wfc_kq,
+            n_bands);
+        const auto vertex_gamma = contract_lri_band_vertex(
+            *wfc_k, add_lri_vertex_matrices(c_source, adjoint_lri_vertex_matrix(c_source)), *wfc_k,
+            n_bands);
         for (int n = 0; n != n_bands; ++n)
         {
             const double energy_n = mf.get_eigenvals().at(0)(ik, n);
@@ -3184,12 +3216,25 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
                     static_cast<std::size_t>(m);
                 const double source_matrix_element = std::norm(vertex_source[vertex_index]);
                 const double target_matrix_element = std::norm(vertex_target[vertex_index]);
+                const double target_plus_source_dagger_matrix_element =
+                    std::norm(vertex_target_plus_source_dagger[vertex_index]);
+                const double source_plus_target_dagger_matrix_element =
+                    std::norm(vertex_source_plus_target_dagger[vertex_index]);
+                const double gamma_matrix_element = std::norm(vertex_gamma[vertex_index]);
                 for (std::size_t ifreq = 0; ifreq != n_frequencies_to_check; ++ifreq)
                 {
                     const auto factor = finite_temperature_bandpair_factor(
                         energy_n, energy_m, frequencies[ifreq], reference);
                     direct_source[ifreq] += factor * source_matrix_element;
                     direct_target[ifreq] += factor * target_matrix_element;
+                    direct_target_plus_source_dagger[ifreq] +=
+                        factor * target_plus_source_dagger_matrix_element;
+                    direct_source_plus_target_dagger[ifreq] +=
+                        factor * source_plus_target_dagger_matrix_element;
+
+                    const auto gamma_factor = finite_temperature_bandpair_factor(
+                        energy_n, mf.get_eigenvals().at(0)(ik, m), frequencies[ifreq], reference);
+                    direct_gamma[ifreq] += gamma_factor * gamma_matrix_element;
                 }
             }
         }
@@ -3200,13 +3245,28 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
         const double frequency = frequencies[ifreq];
         const auto &chi_block = chi0_q.at(frequency).at(q).at(mu_atom).at(mu_atom);
         const std::complex<double> space_time = chi_block(mu_local, mu_local);
+        const auto &gamma_block =
+            chi0_q.at(frequency).at(Vector3_Order<double>(0.0, 0.0, 0.0)).at(mu_atom).at(mu_atom);
+        const std::complex<double> gamma_space_time = gamma_block(mu_local, mu_local);
         direct_source[ifreq] *= spin_scale / static_cast<double>(n_kpoints);
         direct_target[ifreq] *= spin_scale / static_cast<double>(n_kpoints);
+        direct_target_plus_source_dagger[ifreq] *= spin_scale / static_cast<double>(n_kpoints);
+        direct_source_plus_target_dagger[ifreq] *= spin_scale / static_cast<double>(n_kpoints);
+        direct_gamma[ifreq] *= spin_scale / static_cast<double>(n_kpoints);
         global::ofs_myid << "  iw=" << frequency << " CGGC=" << space_time
                          << " direct_C(k)=" << direct_source[ifreq]
                          << " absdiff_C(k)=" << std::abs(space_time - direct_source[ifreq])
                          << " direct_C(k+q)=" << direct_target[ifreq]
                          << " absdiff_C(k+q)=" << std::abs(space_time - direct_target[ifreq])
+                         << " direct_C(k+q)+Cdag(k)=" << direct_target_plus_source_dagger[ifreq]
+                         << " absdiff_target+source_dagger="
+                         << std::abs(space_time - direct_target_plus_source_dagger[ifreq])
+                         << " direct_C(k)+Cdag(k+q)=" << direct_source_plus_target_dagger[ifreq]
+                         << " absdiff_source+target_dagger="
+                         << std::abs(space_time - direct_source_plus_target_dagger[ifreq])
+                         << " gamma_C+Cdag=" << direct_gamma[ifreq]
+                         << " gamma_CGGC=" << gamma_space_time
+                         << " absdiff_gamma=" << std::abs(gamma_space_time - direct_gamma[ifreq])
                          << "\n";
     }
 }
