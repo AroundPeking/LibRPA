@@ -80,6 +80,14 @@ static bool direct_bandpair_chi0_diagnostic_requested(const char *value)
         "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG accepts only the explicit value 'enabled'");
 }
 
+static bool direct_bandpair_vertex_export_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_DIRECT_CHI0_BANDPAIR_VERTEX_EXPORT accepts only the explicit value 'enabled'");
+}
+
 double chi0_spacetime_spin_scale(const int n_spinor, const int n_spins)
 {
     if (n_spinor <= 0 || n_spins <= 0)
@@ -3168,14 +3176,17 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
     const int n_bands = nbands_G < 0 ? mf.get_n_bands() : std::min(nbands_G, mf.get_n_bands());
     const int mu_atom = 0;
     const int mu_local = 0;
+    const bool export_vertex = direct_bandpair_vertex_export_requested(
+        std::getenv("LIBRPA_DIRECT_CHI0_BANDPAIR_VERTEX_EXPORT"));
     const auto &reference = mf.get_fermi_dirac_reference();
     const double spin_scale = chi0_spacetime_spin_scale(mf.get_n_spinor(), mf.get_n_spins());
     const auto &frequencies = tfg.get_freq_nodes();
     const std::size_t n_frequencies_to_check = std::min<std::size_t>(2, frequencies.size());
 
     global::ofs_myid << std::setprecision(16) << "Direct band-pair chi0 diagnostic: q=(" << q.x
-                     << ", " << q.y << ", " << q.z << "), nk=" << n_kpoints
-                     << ", nbands=" << n_bands << ", ABF=(atom 0, local 0), source weights=1/Nk\n";
+                     << ", " << q.y << ", " << q.z << "), qfrac=(" << qfrac.x << ", " << qfrac.y
+                     << ", " << qfrac.z << "), nk=" << n_kpoints << ", nbands=" << n_bands
+                     << ", ABF=(atom 0, local 0), source weights=1/Nk\n";
 
     std::vector<std::complex<double>> direct_source(n_frequencies_to_check, 0.0);
     std::vector<std::complex<double>> direct_target(n_frequencies_to_check, 0.0);
@@ -3205,6 +3216,21 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
         const auto vertex_gamma = contract_lri_band_vertex(
             *wfc_k, add_lri_vertex_matrices(c_source, adjoint_lri_vertex_matrix(c_source)), *wfc_k,
             n_bands);
+        if (export_vertex)
+        {
+            for (int n = 0; n != n_bands; ++n)
+            {
+                for (int m = 0; m != n_bands; ++m)
+                {
+                    const auto value =
+                        vertex_target_plus_source_dagger[static_cast<std::size_t>(n) *
+                                                             static_cast<std::size_t>(n_bands) +
+                                                         static_cast<std::size_t>(m)];
+                    global::ofs_myid << "Direct LRI band-pair vertex: ik=" << ik << " n=" << n
+                                     << " m=" << m << " value=" << value << "\n";
+                }
+            }
+        }
         for (int n = 0; n != n_bands; ++n)
         {
             const double energy_n = mf.get_eigenvals().at(0)(ik, n);
