@@ -91,6 +91,10 @@ private:
     //! and reciprocal space
     // TODO: implement the conventional method
     void build_chi0_q_conventional(const Cs_LRI &Cs, const std::vector<atpair_t> &atpairs_ABF);
+
+    // A serial, unshrunk finite-q band-pair cross-check for the space-time LRI response.
+    // It is enabled only through an explicit diagnostic environment variable.
+    void run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, bool chi0_was_shrunk);
     /*!
      * s_alpha and s_beta are the spin component of unoccupied Green's function, G_{alpha,
      * beta}(tau) correspondingly, occupied GF G_{beta, alpha}(-tau) will be used. itau must be

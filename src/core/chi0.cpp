@@ -4,9 +4,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -21,6 +24,7 @@
 #include "../math/lapack_connector.h"
 #include "../math/matrix.h"
 #include "../math/scalapack_connector.h"
+#include "../math/symmetry.h"
 #include "../math/utils_matrix_m_mpi.h"
 #include "../math/utils_matrix_mpi.h"
 #include "../mpi/base_blacs.h"
@@ -66,6 +70,14 @@ bool use_gamma_shrink_transform_diagnostic_requested(const char *value)
     if (std::string(value) == "enabled") return true;
     throw std::invalid_argument(
         "LIBRPA_USE_GAMMA_SHRINK_TRANSFORM_DIAG accepts only the explicit value 'enabled'");
+}
+
+static bool direct_bandpair_chi0_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG accepts only the explicit value 'enabled'");
 }
 
 double chi0_spacetime_spin_scale(const int n_spinor, const int n_spins)
@@ -844,6 +856,11 @@ void Chi0::build(LibrpaParallelRouting routing, const Cs_LRI &Cs,
     {
         // conventional method does not need to build Green's function explicitly
         build_chi0_q_conventional(Cs, atpairs_ABF);
+    }
+
+    if (direct_bandpair_chi0_diagnostic_requested(std::getenv("LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG")))
+    {
+        run_direct_bandpair_chi0_diagnostic(Cs, !sinvS.empty());
     }
 
     // Free the intermediate Green's functions to lower memory load
@@ -2983,6 +3000,215 @@ void Chi0::build_chi0_q_conventional(const Cs_LRI &Cs, const vector<atpair_t> &a
 {
     // TODO: low implementation priority
     throw std::logic_error("Not implemented");
+}
+
+static ComplexMatrix assemble_lri_vertex_matrix(const Cs_LRI &Cs, const AtomicBasis &atbasis_wfc,
+                                                const int mu_atom, const int mu_local,
+                                                const Vector3_Order<double> &kfrac)
+{
+    const auto it_mu = Cs.data_libri.find(mu_atom);
+    if (it_mu == Cs.data_libri.end())
+        throw LIBRPA_RUNTIME_ERROR("direct band-pair chi0 diagnostic is missing LRI coefficients");
+
+    const int n_aos = static_cast<int>(atbasis_wfc.nb_total);
+    ComplexMatrix c_mu(n_aos, n_aos);
+    c_mu.zero_out();
+    for (const auto &[j_cell, coefficients] : it_mu->second)
+    {
+        const int j_atom = j_cell.first;
+        const auto &cell = j_cell.second;
+        const double phase_angle = TWO_PI * (kfrac.x * static_cast<double>(cell[0]) +
+                                             kfrac.y * static_cast<double>(cell[1]) +
+                                             kfrac.z * static_cast<double>(cell[2]));
+        const std::complex<double> phase(std::cos(phase_angle), std::sin(phase_angle));
+        for (int i_local = 0; i_local != atbasis_wfc.get_atom_nb(mu_atom); ++i_local)
+        {
+            const int i_ao = atbasis_wfc.get_global_index(mu_atom, i_local);
+            for (int j_local = 0; j_local != atbasis_wfc.get_atom_nb(j_atom); ++j_local)
+            {
+                const int j_ao = atbasis_wfc.get_global_index(j_atom, j_local);
+                c_mu(i_ao, j_ao) += phase * coefficients(mu_local, i_local, j_local);
+            }
+        }
+    }
+    return c_mu;
+}
+
+static std::vector<std::complex<double>> contract_lri_band_vertex(const ComplexMatrix &wfc_bra,
+                                                                  const ComplexMatrix &c_mu,
+                                                                  const ComplexMatrix &wfc_ket,
+                                                                  const int n_bands)
+{
+    if (wfc_bra.nc != c_mu.nr || c_mu.nc != wfc_ket.nc || wfc_bra.nr < n_bands ||
+        wfc_ket.nr < n_bands)
+        throw LIBRPA_RUNTIME_ERROR(
+            "direct band-pair chi0 diagnostic found incompatible LRI dimensions");
+
+    std::vector<std::complex<double>> vertex(
+        static_cast<std::size_t>(n_bands) * static_cast<std::size_t>(n_bands), 0.0);
+    for (int n = 0; n != n_bands; ++n)
+    {
+        for (int m = 0; m != n_bands; ++m)
+        {
+            std::complex<double> value = 0.0;
+            for (int i_ao = 0; i_ao != c_mu.nr; ++i_ao)
+            {
+                const auto bra = std::conj(wfc_bra(n, i_ao));
+                if (std::abs(bra) == 0.0) continue;
+                for (int j_ao = 0; j_ao != c_mu.nc; ++j_ao)
+                    value += bra * c_mu(i_ao, j_ao) * wfc_ket(m, j_ao);
+            }
+            vertex[static_cast<std::size_t>(n) * static_cast<std::size_t>(n_bands) +
+                   static_cast<std::size_t>(m)] = value;
+        }
+    }
+    return vertex;
+}
+
+static std::complex<double> finite_temperature_bandpair_factor(const double energy_n,
+                                                               const double energy_m,
+                                                               const double frequency,
+                                                               const FermiDiracReference &reference)
+{
+    const double difference = energy_n - energy_m;
+    if (std::abs(difference) < 1.0e-14 && std::abs(frequency) < 1.0e-14)
+        return fermi_dirac_derivative(0.5 * (energy_n + energy_m) - reference.chemical_potential_ha,
+                                      reference.kbt_ha);
+
+    const double occupation_n =
+        fermi_dirac_occupation(energy_n - reference.chemical_potential_ha, reference.kbt_ha);
+    const double occupation_m =
+        fermi_dirac_occupation(energy_m - reference.chemical_potential_ha, reference.kbt_ha);
+    return (occupation_n - occupation_m) / std::complex<double>(difference, frequency);
+}
+
+void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0_was_shrunk)
+{
+    if (comm_h.nprocs != 1)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG currently requires one MPI rank");
+    if (chi0_was_shrunk)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG currently requires an unshrunk auxiliary basis");
+    if (is_mf_eigvec_k_distributed_)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG requires replicated eigenvectors");
+    if (!Cs.use_libri || Cs.data_libri.empty())
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG requires LibRI LRI coefficients");
+    if (mf.get_n_spins() != 1 || mf.get_n_spinor() != 1)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG currently supports one spin and one spinor");
+    if (mf.get_n_kpoints() != pbc.get_n_cells_bvk() ||
+        static_cast<int>(pbc.kfrac_list.size()) != pbc.get_n_cells_bvk())
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG requires a full, unreduced BvK k mesh");
+    if (!mf.get_fermi_dirac_reference().enabled)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG requires finite-temperature FD occupations");
+    if (atbasis_abf.n_atoms == 0 || atbasis_abf.get_atom_nb(0) == 0)
+        throw LIBRPA_RUNTIME_ERROR("direct band-pair chi0 diagnostic found no auxiliary functions");
+
+    const auto qlist = active_qpoints();
+    auto q_selected = qlist.end();
+    double qnorm2_selected = std::numeric_limits<double>::infinity();
+    for (auto qit = qlist.begin(); qit != qlist.end(); ++qit)
+    {
+        const double qnorm2 = qit->x * qit->x + qit->y * qit->y + qit->z * qit->z;
+        if (qnorm2 > 1.0e-20 && qnorm2 < qnorm2_selected)
+        {
+            q_selected = qit;
+            qnorm2_selected = qnorm2;
+        }
+    }
+    if (q_selected == qlist.end())
+        throw LIBRPA_RUNTIME_ERROR("direct band-pair chi0 diagnostic found no nonzero q point");
+    const auto q = *q_selected;
+    const auto qfrac = pbc.latvec * q;
+
+    const int n_kpoints = mf.get_n_kpoints();
+    std::vector<int> kplusq(static_cast<std::size_t>(n_kpoints), -1);
+    for (int ik = 0; ik != n_kpoints; ++ik)
+    {
+        const auto target = pbc.kfrac_list[static_cast<std::size_t>(ik)] + qfrac;
+        for (int jk = 0; jk != n_kpoints; ++jk)
+        {
+            if (same_fractional_kpoint(target, pbc.kfrac_list[static_cast<std::size_t>(jk)],
+                                       1.0e-8))
+            {
+                kplusq[static_cast<std::size_t>(ik)] = jk;
+                break;
+            }
+        }
+        if (kplusq[static_cast<std::size_t>(ik)] < 0)
+            throw LIBRPA_RUNTIME_ERROR(
+                "direct band-pair chi0 diagnostic could not map k + q on the BvK mesh");
+    }
+
+    const int n_bands = nbands_G < 0 ? mf.get_n_bands() : std::min(nbands_G, mf.get_n_bands());
+    const int mu_atom = 0;
+    const int mu_local = 0;
+    const auto &reference = mf.get_fermi_dirac_reference();
+    const double spin_scale = chi0_spacetime_spin_scale(mf.get_n_spinor(), mf.get_n_spins());
+    const auto &frequencies = tfg.get_freq_nodes();
+    const std::size_t n_frequencies_to_check = std::min<std::size_t>(2, frequencies.size());
+
+    global::ofs_myid << std::setprecision(16) << "Direct band-pair chi0 diagnostic: q=(" << q.x
+                     << ", " << q.y << ", " << q.z << "), nk=" << n_kpoints
+                     << ", nbands=" << n_bands << ", ABF=(atom 0, local 0), source weights=1/Nk\n";
+
+    std::vector<std::complex<double>> direct_source(n_frequencies_to_check, 0.0);
+    std::vector<std::complex<double>> direct_target(n_frequencies_to_check, 0.0);
+    for (int ik = 0; ik != n_kpoints; ++ik)
+    {
+        const int ikq = kplusq[static_cast<std::size_t>(ik)];
+        const auto *wfc_k = mf.find_wfc(0, 0, ik);
+        const auto *wfc_kq = mf.find_wfc(0, 0, ikq);
+        if (wfc_k == nullptr || wfc_kq == nullptr)
+            throw LIBRPA_RUNTIME_ERROR("direct band-pair chi0 diagnostic is missing eigenvectors");
+
+        const auto c_source = assemble_lri_vertex_matrix(
+            Cs, atbasis_wfc, mu_atom, mu_local, pbc.kfrac_list[static_cast<std::size_t>(ik)]);
+        const auto c_target = assemble_lri_vertex_matrix(
+            Cs, atbasis_wfc, mu_atom, mu_local, pbc.kfrac_list[static_cast<std::size_t>(ikq)]);
+        const auto vertex_source = contract_lri_band_vertex(*wfc_k, c_source, *wfc_kq, n_bands);
+        const auto vertex_target = contract_lri_band_vertex(*wfc_k, c_target, *wfc_kq, n_bands);
+        for (int n = 0; n != n_bands; ++n)
+        {
+            const double energy_n = mf.get_eigenvals().at(0)(ik, n);
+            for (int m = 0; m != n_bands; ++m)
+            {
+                const double energy_m = mf.get_eigenvals().at(0)(ikq, m);
+                const std::size_t vertex_index =
+                    static_cast<std::size_t>(n) * static_cast<std::size_t>(n_bands) +
+                    static_cast<std::size_t>(m);
+                const double source_matrix_element = std::norm(vertex_source[vertex_index]);
+                const double target_matrix_element = std::norm(vertex_target[vertex_index]);
+                for (std::size_t ifreq = 0; ifreq != n_frequencies_to_check; ++ifreq)
+                {
+                    const auto factor = finite_temperature_bandpair_factor(
+                        energy_n, energy_m, frequencies[ifreq], reference);
+                    direct_source[ifreq] += factor * source_matrix_element;
+                    direct_target[ifreq] += factor * target_matrix_element;
+                }
+            }
+        }
+    }
+
+    for (std::size_t ifreq = 0; ifreq != n_frequencies_to_check; ++ifreq)
+    {
+        const double frequency = frequencies[ifreq];
+        const auto &chi_block = chi0_q.at(frequency).at(q).at(mu_atom).at(mu_atom);
+        const std::complex<double> space_time = chi_block(mu_local, mu_local);
+        direct_source[ifreq] *= spin_scale / static_cast<double>(n_kpoints);
+        direct_target[ifreq] *= spin_scale / static_cast<double>(n_kpoints);
+        global::ofs_myid << "  iw=" << frequency << " CGGC=" << space_time
+                         << " direct_C(k)=" << direct_source[ifreq]
+                         << " absdiff_C(k)=" << std::abs(space_time - direct_source[ifreq])
+                         << " direct_C(k+q)=" << direct_target[ifreq]
+                         << " absdiff_C(k+q)=" << std::abs(space_time - direct_target[ifreq])
+                         << "\n";
+    }
 }
 
 //! Compute the real-space independent reponse function in space-time method on a particular time
