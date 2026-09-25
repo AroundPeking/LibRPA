@@ -266,6 +266,33 @@ ComplexMatrix build_symmetry_kspace_operator_transform_matrix(
     bool use_time_reversal = false,
     const Vector3_Order<double>* k_bz_target = nullptr);
 
+/*!
+ * @brief Per-atom Bloch gauge phases relating member.k_bz to an equivalent
+ * alternative target k-point.
+ *
+ * `k_bz_target - member.k_bz` must be a reciprocal lattice vector; the
+ * returned phase for atom I is the Bloch re-gauging factor of the AO basis
+ * between the two k-points. The phases are plain unitary factors applied
+ * AFTER any (anti)unitary transform: X_target(I, J) *= phase[I] * conj(phase[J]).
+ * Returns an all-ones vector when `k_bz_target` is nullptr.
+ */
+std::vector<std::complex<double>> build_symmetry_kstar_member_target_gauge_phases(
+    const SymmetryContext& ctx,
+    const SymmetryKStarMember& member,
+    std::size_t atom_count,
+    const Vector3_Order<double>* k_bz_target);
+
+/*!
+ * @brief Resolve the spin-space operation of one k-star member through the
+ * action_id -> kspace_actions -> spin_operations link.
+ *
+ * Throws LIBRPA_RUNTIME_ERROR when the link is missing or inconsistent with
+ * the member's legacy (spatial_isym, time_reversal) fields.
+ */
+const SymmetrySpinOperation& resolve_symmetry_kstar_member_spin_operation(
+    const SymmetryContext& ctx,
+    const SymmetryKStarMember& member);
+
 symmetry_irreducible_sector_t build_symmetry_rspace_irreducible_sector(
     const SymmetryContext& ctx,
     const std::vector<Vector3_Order<int>>& Rlist);
@@ -298,5 +325,84 @@ ComplexMatrix rotate_symmetry_rspace_block(const SymmetryContext& ctx,
                                            const atom_t atom_from_i,
                                            const atom_t atom_from_j,
                                            const ComplexMatrix& matrix_source);
+
+/*!
+ * @brief Whether the (g, U_s, eta) operation that generated a real-space
+ * restore member is antiunitary.
+ *
+ * Returns false for members built without spin-operation metadata
+ * (`operation_id == kOperationIdNone`) so legacy scalar contexts keep their
+ * established behavior. Charge-channel consumers (chi0, W) must complex
+ * conjugate the rotated block when this returns true.
+ */
+bool symmetry_rspace_restore_member_is_antiunitary(
+    const SymmetryContext& ctx,
+    const SymmetryRSpaceRestoreMember& member);
+
+/*!
+ * @brief Resolve the full (g, U_s, eta) operation behind a real-space restore member.
+ *
+ * Members built without spin-operation metadata (`operation_id ==
+ * kOperationIdNone`) resolve to a shared identity operation so legacy scalar
+ * contexts keep their established behavior. For metadata-bearing members the
+ * link is validated against `member.isym`; an inconsistent link throws.
+ */
+const SymmetrySpinOperation& resolve_symmetry_rspace_restore_member_spin_operation(
+    const SymmetryContext& ctx,
+    const SymmetryRSpaceRestoreMember& member);
+
+/*!
+ * @brief Jointly restore the four spin-channel real-space maps of a spinor
+ * two-point AO operator from the symmetry irreducible sector.
+ *
+ * This is the (R, tau)-domain spinor counterpart of the scalar per-channel
+ * restore used for chi0/GW self-energies. For every irreducible {I, J, R}
+ * key in the union of the four input channel maps and for every restore
+ * member it applies `transform_spinor_bilinear`:
+ *
+ * - unitary:      X' = (D orb U_s) X (D orb U_s)^dagger
+ * - antiunitary:  X' = J_AO [ ... ]* J_AO^dagger, J_AO = I orb i sigma_y
+ *
+ * with the orbital part evaluated by `rotate_symmetry_rspace_block` per
+ * member. Channels missing at an input key are zero-filled before mixing, so
+ * an antiunitary or genuinely non-collinear operation correctly populates all
+ * four output channels. Operations with identity spin action and eta = 0 take
+ * the fast path: each present channel is rotated independently and absent
+ * channels stay absent, reproducing the legacy per-channel restore exactly.
+ *
+ * `wfc_layouts` are the species basis layouts of the AO basis of the blocks
+ * and `atom_nb[atom]` gives the basis size per atom, used for zero-fill.
+ * Every full-sector target block must be reached by exactly one member; a
+ * duplicate throws, as in the scalar restore.
+ */
+std::array<symmetry_rspace_block_map_t, 4> restore_symmetry_spinor_rspace_blocks(
+    const std::array<symmetry_rspace_block_map_t, 4>& channels_ir,
+    const SymmetryContext& ctx,
+    const symmetry_rspace_sector_stars_t& sector_stars,
+    const std::vector<SpeciesBasisLayout>& wfc_layouts,
+    const std::vector<int>& atom_nb);
+
+/*!
+ * @brief Validate the spin operation table against the mean-field spin storage.
+ *
+ * Phase 8 fixed-cell spin-space-group contract:
+ * - spinor storage (n_spinor == 2) accepts every operation;
+ * - collinear storage (n_spins == 2, n_spinor == 1) accepts only operations
+ *   whose effective channel action is Keep (each collinear channel is mapped
+ *   onto itself); Swap and Incompatible actions throw, instructing spinor
+ *   storage, because the production per-channel restore paths cannot mix or
+ *   exchange channels;
+ * - scalar storage (n_spins == 1) accepts only identity spin actions
+ *   (U_s = +-I up to tolerance); any genuine spin rotation is meaningless on
+ *   a spinless density and throws.
+ *
+ * A context without a spin operation table is always accepted (legacy
+ * ordinary/grey space-group behavior).
+ */
+void validate_spin_operations_for_storage(
+    const SymmetryContext& ctx,
+    int n_spins,
+    int n_spinor,
+    double tol = 1e-8);
 
 } // namespace librpa_int

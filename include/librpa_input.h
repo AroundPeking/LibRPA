@@ -173,9 +173,10 @@ void librpa_set_symmetry_operations(LibrpaHandler* h, int n_symops, int row_conv
  *                       operation as (re,im) x 4 in row-major 2x2 order.
  * @param[in] spin_action_source 0 = Identity (null spin_u means the identity),
  *                       1 = ExplicitSpinSpace (spin_u required, unitarity
- *                       checked), 2 = DerivedFromSpatialSOC (reconstruction is
- *                       Phase 3 and not implemented yet; a provided spin_u is
- *                       validated and adopted).
+ *                       checked), 2 = DerivedFromSpatialSOC (null spin_u means
+ *                       LibRPA reconstructs U[det(Q)Q] from the spatial part,
+ *                       requiring the lattice; a provided spin_u is validated
+ *                       and adopted as the upstream authority).
  * @param[in] grey_group Nonzero to declare the table as the unitary block of a
  *                       grey group: LibRPA appends one antiunitary copy per
  *                       operation (unitary block first).

@@ -537,21 +537,16 @@ static void test_set_symmetry_spin_operations_api()
         librpa_destroy_handler(h);
     }
 
-    // DerivedFromSpatialSOC without spin_u is rejected: the SO(3)->SU(2)
-    // reconstruction is a Phase 3 feature.
+    // DerivedFromSpatialSOC without spin_u is accepted: the context
+    // reconstructs U_s = U[det(Q) Q] from the Cartesian axial rotation.
     {
         LibrpaHandler* h = librpa_create_handler(MPI_COMM_WORLD);
-        bool threw = false;
-        try
-        {
-            librpa_set_symmetry_spin_operations(h, 2, 1, rotmats_ei, nullptr,
-                                                nullptr, nullptr, 2, 0);
-        }
-        catch (const std::runtime_error&)
-        {
-            threw = true;
-        }
-        assert(threw);
+        librpa_set_symmetry_spin_operations(h, 2, 1, rotmats_ei, nullptr,
+                                            nullptr, nullptr, 2, 0);
+        const auto pds = librpa_int::api::get_dataset_instance(h);
+        assert(pds->spg_spin_ops.size() == 2);
+        assert(pds->spg_spin_ops[1].spin_source
+               == librpa_int::SymmetrySpinActionSource::DerivedFromSpatialSOC);
         librpa_destroy_handler(h);
     }
 

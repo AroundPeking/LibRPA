@@ -1,4 +1,5 @@
 #include "../core/symmetry_context.h"
+#include "../core/symmetry_spin_kernel.h"
 #include "../core/pbc.h"
 #include "../core/qpoint_view.h"
 #include "../math/rsh.h"
@@ -1417,6 +1418,680 @@ void test_rspace_block_restore_uses_stored_operation_rotation_convention()
     assert_matrix_close(restored, expected_full);
 }
 
+/*!
+ * Two-atom AFM-chain toy: atoms at fractional x=0 and x=1/2, magnetic group
+ * {E, Theta g} with g = {-1 | 1/2,0,0} (improper, swaps the two atoms).
+ * The antiunitary operation is the only one connecting sector (0,0,0) to
+ * (1,1,0), so the star must record it with eta=1 and the charge-channel
+ * restore must conjugate the rotated block.
+ */
+void test_rspace_sector_star_records_antiunitary_operation()
+{
+    SymmetryContext ctx;
+    const Matrix3 lattice(1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0,
+                          0.0, 0.0, 1.0);
+    ctx.set_crystal_structure(lattice,
+                              lattice,
+                              {{0, 0}, {1, 0}},
+                              {{0, {0.0, 0.0, 0.0}}, {1, {0.5, 0.0, 0.0}}});
+    ctx.basis_convention = {-1,
+                            0,
+                            LIBRPA_ANGULAR_ORDER_NATURAL,
+                            LIBRPA_RSH_COEFF_1_M,
+                            LIBRPA_RSH_COEFF_1_M};
+    auto g = make_row_symmetry_operation({-1, 0, 0,
+                                           0, 1, 0,
+                                           0, 0, 1});
+    g.translation = {0.5, 0.0, 0.0};
+    ctx.set_rspace_operations({SpaceGroupSymOp::IDENTITY, g});
+    SymmetrySpinOperation spin_e;  // spatial 0, unitary, identity spin
+    SymmetrySpinOperation spin_tg; // spatial 1, antiunitary: Theta g
+    spin_tg.spatial_id = 1;
+    spin_tg.antiunitary = true;
+    ctx.set_symmetry_spin_operations({spin_e, spin_tg}, false);
+    ctx.build_rsh_rotations(ctx.basis_convention, 0);
+    ctx.irreducible_sector.clear();
+    add_irreducible_sector_entry(ctx.irreducible_sector, 0, 0, {0, 0, 0});
+    ctx.set_available();
+
+    const Vector3_Order<int> period{2, 1, 1};
+    const std::vector<Vector3_Order<int>> Rlist{{0, 0, 0}};
+    ctx.ensure_operation_metadata();
+    symmetry_rspace_sector_stars_t sector_stars;
+    build_symmetry_rspace_sector_stars(ctx, period, Rlist, sector_stars);
+
+    const auto& members = sector_stars.at({0, 0}).at({0, 0, 0});
+    assert(members.size() == 2);
+    const SymmetryRSpaceRestoreMember* unitary_member = nullptr;
+    const SymmetryRSpaceRestoreMember* antiunitary_member = nullptr;
+    for (const auto& member : members)
+    {
+        if (member.full_atom_pair.first == 0)
+        {
+            unitary_member = &member;
+        }
+        else
+        {
+            antiunitary_member = &member;
+        }
+    }
+    assert(unitary_member != nullptr && antiunitary_member != nullptr);
+    assert(antiunitary_member->full_atom_pair.first == 1
+           && antiunitary_member->full_atom_pair.second == 1
+           && antiunitary_member->full_R == Vector3_Order<int>(0, 0, 0));
+    assert(!symmetry_rspace_restore_member_is_antiunitary(ctx, *unitary_member));
+    assert(symmetry_rspace_restore_member_is_antiunitary(ctx, *antiunitary_member));
+
+    // Charge-channel restore through the antiunitary member: s-orbital block
+    // is invariant under the orbital rotation, so the full block must be the
+    // complex conjugate of the irreducible source block.
+    const std::vector<SpeciesBasisLayout> layouts{{"X", {0}}};
+    ComplexMatrix block_ir(1, 1);
+    block_ir(0, 0) = std::complex<double>(0.3, -0.4);
+    ComplexMatrix block_full = rotate_symmetry_rspace_block(
+        ctx, layouts, antiunitary_member->isym, 0, 0, block_ir);
+    if (symmetry_rspace_restore_member_is_antiunitary(ctx, *antiunitary_member))
+    {
+        block_full = conj(block_full);
+    }
+    ComplexMatrix expected(1, 1);
+    expected(0, 0) = std::complex<double>(0.3, 0.4);
+    assert_matrix_close(block_full, expected);
+
+    // The unitary member restores without conjugation.
+    ComplexMatrix block_full_u = rotate_symmetry_rspace_block(
+        ctx, layouts, unitary_member->isym, 0, 0, block_ir);
+    if (symmetry_rspace_restore_member_is_antiunitary(ctx, *unitary_member))
+    {
+        block_full_u = conj(block_full_u);
+    }
+    assert_matrix_close(block_full_u, block_ir);
+}
+
+/*!
+ * Same structure but with the grey-group default spin table (no explicit
+ * magnetic input): the unitary copies come first and already cover every
+ * sector, so no restore member may be flagged antiunitary. In particular the
+ * improper operation g must not be misread as time reversal.
+ */
+void test_rspace_sector_star_grey_default_keeps_unitary_members()
+{
+    SymmetryContext ctx;
+    const Matrix3 lattice(1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0,
+                          0.0, 0.0, 1.0);
+    ctx.set_crystal_structure(lattice,
+                              lattice,
+                              {{0, 0}, {1, 0}},
+                              {{0, {0.0, 0.0, 0.0}}, {1, {0.5, 0.0, 0.0}}});
+    auto g = make_row_symmetry_operation({-1, 0, 0,
+                                           0, 1, 0,
+                                           0, 0, 1});
+    g.translation = {0.5, 0.0, 0.0};
+    ctx.set_rspace_operations({SpaceGroupSymOp::IDENTITY, g});
+    ctx.irreducible_sector.clear();
+    add_irreducible_sector_entry(ctx.irreducible_sector, 0, 0, {0, 0, 0});
+    ctx.set_available();
+
+    const Vector3_Order<int> period{2, 1, 1};
+    const std::vector<Vector3_Order<int>> Rlist{{0, 0, 0}};
+    ctx.ensure_operation_metadata();
+    symmetry_rspace_sector_stars_t sector_stars;
+    build_symmetry_rspace_sector_stars(ctx, period, Rlist, sector_stars);
+
+    const auto& members = sector_stars.at({0, 0}).at({0, 0, 0});
+    assert(members.size() == 2);
+    bool saw_atom1_sector = false;
+    for (const auto& member : members)
+    {
+        assert(!symmetry_rspace_restore_member_is_antiunitary(ctx, member));
+        saw_atom1_sector = saw_atom1_sector || member.full_atom_pair.first == 1;
+    }
+    assert(saw_atom1_sector);
+}
+
+namespace
+{
+
+//! Independent 2x2 spin-matrix reference for the rspace spinor restore driver:
+//! Y = U X U^dagger followed by the Theta remap for antiunitary operations.
+//! The toy systems below use 1x1 s-orbital blocks, so the orbital rotation is
+//! the identity and does not appear here.
+std::array<std::complex<double>, 4> reference_spinor_block_transform(
+    const SymmetrySpinOperation& op,
+    const std::array<std::complex<double>, 4>& x)
+{
+    const auto U = [&op](int r, int c) -> const std::complex<double>& {
+        return op.spin_u[2 * r + c];
+    };
+    std::array<std::complex<double>, 4> y{};
+    for (int a = 0; a != 2; ++a)
+        for (int b = 0; b != 2; ++b)
+            for (int c = 0; c != 2; ++c)
+                for (int d = 0; d != 2; ++d)
+                    y[2 * a + b] += U(a, c) * std::conj(U(b, d)) * x[2 * c + d];
+    if (!op.antiunitary)
+    {
+        return y;
+    }
+    return {std::conj(y[3]), -std::conj(y[2]), -std::conj(y[1]), std::conj(y[0])};
+}
+
+//! Shared driver check: two channel-assignment keys, distinct per-channel key
+//! sets (union + zero-fill coverage), verified against the 2x2 reference for
+//! every restore member. Presence/absence of output blocks distinguishes the
+//! identity fast path from the mixing path.
+void check_spinor_rspace_restore_driver(
+    SymmetryContext& ctx,
+    const symmetry_rspace_sector_stars_t& sector_stars)
+{
+    // Collect up to two irreducible keys.
+    std::vector<std::pair<int, std::pair<int, std::array<int, 3>>>> keys;
+    for (const auto& pair_entry : ctx.irreducible_sector)
+    {
+        for (const auto& R : pair_entry.second)
+        {
+            keys.push_back({static_cast<int>(pair_entry.first.first),
+                            {static_cast<int>(pair_entry.first.second), R}});
+        }
+    }
+    assert(keys.size() >= 2);
+
+    const auto make_block = [](double re, double im) {
+        ComplexMatrix block(1, 1);
+        block(0, 0) = std::complex<double>(re, im);
+        return block;
+    };
+    // Channel assignment: b00 {K0}, b01 {K0, K1}, b10 {K1}, b11 {}.
+    std::array<symmetry_rspace_block_map_t, 4> channels_ir;
+    channels_ir[0][keys[0].first][keys[0].second] = make_block(1.0, 0.1);
+    channels_ir[1][keys[0].first][keys[0].second] = make_block(2.0, -0.2);
+    channels_ir[1][keys[1].first][keys[1].second] = make_block(3.0, 0.3);
+    channels_ir[2][keys[1].first][keys[1].second] = make_block(4.0, -0.4);
+
+    const std::vector<SpeciesBasisLayout> layouts{{"X", {0}}};
+    const std::vector<int> atom_nb{1, 1};
+    auto channels_full = restore_symmetry_spinor_rspace_blocks(
+        channels_ir, ctx, sector_stars, layouts, atom_nb);
+
+    const auto input_at = [&channels_ir](const auto& key, std::size_t channel,
+                                         bool& present) -> std::complex<double>
+    {
+        const auto i_iter = channels_ir[channel].find(key.first);
+        if (i_iter == channels_ir[channel].end())
+        {
+            present = false;
+            return {0.0, 0.0};
+        }
+        const auto jr_iter = i_iter->second.find(key.second);
+        if (jr_iter == i_iter->second.end())
+        {
+            present = false;
+            return {0.0, 0.0};
+        }
+        present = true;
+        return jr_iter->second(0, 0);
+    };
+
+    for (const auto& key : keys)
+    {
+        const atpair_t ir_pair{static_cast<atom_t>(key.first),
+                               static_cast<atom_t>(key.second.first)};
+        const Vector3_Order<int> ir_R{
+            key.second.second[0], key.second.second[1], key.second.second[2]};
+        std::array<std::complex<double>, 4> x{};
+        std::array<bool, 4> present{};
+        for (std::size_t channel = 0; channel != 4; ++channel)
+        {
+            x[channel] = input_at(key, channel, present[channel]);
+        }
+        for (const auto& member : sector_stars.at(ir_pair).at(ir_R))
+        {
+            const auto& op =
+                resolve_symmetry_rspace_restore_member_spin_operation(ctx, member);
+            const int full_I = static_cast<int>(member.full_atom_pair.first);
+            const int full_J = static_cast<int>(member.full_atom_pair.second);
+            const std::array<int, 3> full_R{
+                member.full_R.x, member.full_R.y, member.full_R.z};
+            const bool fast_path =
+                op.spin_source == SymmetrySpinActionSource::Identity && !op.antiunitary;
+            const auto expected = reference_spinor_block_transform(op, x);
+            for (std::size_t channel = 0; channel != 4; ++channel)
+            {
+                const auto i_iter = channels_full[channel].find(full_I);
+                const bool output_present =
+                    i_iter != channels_full[channel].end()
+                    && i_iter->second.count({full_J, full_R}) != 0;
+                if (fast_path && !present[channel])
+                {
+                    // Identity fast path keeps absent channels absent.
+                    assert(!output_present);
+                    continue;
+                }
+                assert(output_present);
+                ComplexMatrix expected_block(1, 1);
+                expected_block(0, 0) = expected[channel];
+                assert_matrix_close(
+                    i_iter->second.at({full_J, full_R}), expected_block);
+            }
+        }
+    }
+}
+
+} // anonymous namespace
+
+/*!
+ * Phase 6 driver test on the AFM-chain magnetic group {E, Theta g}: the
+ * antiunitary member mixes the four spin channels through the Theta remap,
+ * so the restore must run jointly with key union and zero-fill. Verified
+ * against the independent 2x2 spin-matrix reference.
+ */
+void test_rspace_spinor_four_channel_restore_antiunitary()
+{
+    SymmetryContext ctx;
+    const Matrix3 lattice(1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0,
+                          0.0, 0.0, 1.0);
+    ctx.set_crystal_structure(lattice,
+                              lattice,
+                              {{0, 0}, {1, 0}},
+                              {{0, {0.0, 0.0, 0.0}}, {1, {0.5, 0.0, 0.0}}});
+    ctx.basis_convention = {-1,
+                            0,
+                            LIBRPA_ANGULAR_ORDER_NATURAL,
+                            LIBRPA_RSH_COEFF_1_M,
+                            LIBRPA_RSH_COEFF_1_M};
+    auto g = make_row_symmetry_operation({-1, 0, 0,
+                                           0, 1, 0,
+                                           0, 0, 1});
+    g.translation = {0.5, 0.0, 0.0};
+    ctx.set_rspace_operations({SpaceGroupSymOp::IDENTITY, g});
+    SymmetrySpinOperation spin_e;  // spatial 0, unitary, identity spin
+    SymmetrySpinOperation spin_tg; // spatial 1, antiunitary: Theta g
+    spin_tg.spatial_id = 1;
+    spin_tg.antiunitary = true;
+    ctx.set_symmetry_spin_operations({spin_e, spin_tg}, false);
+    ctx.build_rsh_rotations(ctx.basis_convention, 0);
+
+    const Vector3_Order<int> period{2, 1, 1};
+    const std::vector<Vector3_Order<int>> Rlist{{0, 0, 0}};
+    ctx.irreducible_sector = build_symmetry_rspace_irreducible_sector(ctx, Rlist);
+    ctx.set_available();
+
+    ctx.ensure_operation_metadata();
+    symmetry_rspace_sector_stars_t sector_stars;
+    build_symmetry_rspace_sector_stars(ctx, period, Rlist, sector_stars);
+
+    check_spinor_rspace_restore_driver(ctx, sector_stars);
+}
+
+/*!
+ * Same toy structure, but the second operation is a unitary spin flip
+ * (U_s = i sigma_y, an explicit spin-space action distinct from the spatial
+ * rotation): the SU(2) mixing path must populate all four channels without
+ * any complex conjugation.
+ */
+void test_rspace_spinor_four_channel_restore_su2_mixing()
+{
+    SymmetryContext ctx;
+    const Matrix3 lattice(1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0,
+                          0.0, 0.0, 1.0);
+    ctx.set_crystal_structure(lattice,
+                              lattice,
+                              {{0, 0}, {1, 0}},
+                              {{0, {0.0, 0.0, 0.0}}, {1, {0.5, 0.0, 0.0}}});
+    ctx.basis_convention = {-1,
+                            0,
+                            LIBRPA_ANGULAR_ORDER_NATURAL,
+                            LIBRPA_RSH_COEFF_1_M,
+                            LIBRPA_RSH_COEFF_1_M};
+    auto g = make_row_symmetry_operation({-1, 0, 0,
+                                           0, 1, 0,
+                                           0, 0, 1});
+    g.translation = {0.5, 0.0, 0.0};
+    ctx.set_rspace_operations({SpaceGroupSymOp::IDENTITY, g});
+    SymmetrySpinOperation spin_e;
+    SymmetrySpinOperation spin_flip; // spatial 1, unitary, U_s = i sigma_y
+    spin_flip.spatial_id = 1;
+    spin_flip.spin_u = {0.0, 1.0, -1.0, 0.0};
+    spin_flip.spin_source = SymmetrySpinActionSource::ExplicitSpinSpace;
+    ctx.set_symmetry_spin_operations({spin_e, spin_flip}, false);
+    ctx.build_rsh_rotations(ctx.basis_convention, 0);
+
+    const Vector3_Order<int> period{2, 1, 1};
+    const std::vector<Vector3_Order<int>> Rlist{{0, 0, 0}};
+    ctx.irreducible_sector = build_symmetry_rspace_irreducible_sector(ctx, Rlist);
+    ctx.set_available();
+
+    ctx.ensure_operation_metadata();
+    symmetry_rspace_sector_stars_t sector_stars;
+    build_symmetry_rspace_sector_stars(ctx, period, Rlist, sector_stars);
+
+    check_spinor_rspace_restore_driver(ctx, sector_stars);
+}
+
+/*!
+ * Legacy members without spin-operation metadata resolve to the shared
+ * identity operation; a metadata-bearing member whose isym disagrees with
+ * the operation spatial_id is rejected.
+ */
+void test_rspace_restore_member_spin_operation_resolution()
+{
+    SymmetryContext ctx;
+    ctx.set_rspace_operations({SpaceGroupSymOp::IDENTITY,
+                               make_row_symmetry_operation({-1, 0, 0,
+                                                            0, 1, 0,
+                                                            0, 0, 1})});
+    SymmetrySpinOperation spin_e;
+    SymmetrySpinOperation spin_tg;
+    spin_tg.spatial_id = 1;
+    spin_tg.antiunitary = true;
+    ctx.set_symmetry_spin_operations({spin_e, spin_tg}, false);
+
+    SymmetryRSpaceRestoreMember legacy_member;
+    legacy_member.isym = 1;
+    const auto& identity_op =
+        resolve_symmetry_rspace_restore_member_spin_operation(ctx, legacy_member);
+    assert(identity_op.spin_source == SymmetrySpinActionSource::Identity);
+    assert(!identity_op.antiunitary);
+
+    SymmetryRSpaceRestoreMember linked_member;
+    linked_member.isym = 1;
+    linked_member.operation_id = 1;
+    const auto& resolved =
+        resolve_symmetry_rspace_restore_member_spin_operation(ctx, linked_member);
+    assert(resolved.antiunitary);
+
+    SymmetryRSpaceRestoreMember mismatched_member;
+    mismatched_member.isym = 0;
+    mismatched_member.operation_id = 1;
+    bool threw = false;
+    try
+    {
+        resolve_symmetry_rspace_restore_member_spin_operation(ctx, mismatched_member);
+    }
+    catch (const std::exception&)
+    {
+        threw = true;
+    }
+    assert(threw);
+}
+
+/*!
+ * Test matrix #8: collinear spin-space group of an AFM chain without SOC.
+ * The non-trivial operation is a spin flip combined with a half-cell
+ * translation, {U_s = i sigma_y | {E | 1/2,0,0}}, which exchanges both the
+ * sublattices and the collinear spin channels. On collinear storage only the
+ * diagonal channels exist; the driver must restore the swapped channels and
+ * keep the off-diagonal channels zero.
+ */
+void test_collinear_ssg_spin_flip_translation_restore()
+{
+    SymmetryContext ctx;
+    const Matrix3 lattice(1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0,
+                          0.0, 0.0, 1.0);
+    ctx.set_crystal_structure(lattice,
+                              lattice,
+                              {{0, 0}, {1, 0}},
+                              {{0, {0.0, 0.0, 0.0}}, {1, {0.5, 0.0, 0.0}}});
+    ctx.basis_convention = {-1,
+                            0,
+                            LIBRPA_ANGULAR_ORDER_NATURAL,
+                            LIBRPA_RSH_COEFF_1_M,
+                            LIBRPA_RSH_COEFF_1_M};
+    auto half_translation = make_row_symmetry_operation({1, 0, 0,
+                                                         0, 1, 0,
+                                                         0, 0, 1});
+    half_translation.translation = {0.5, 0.0, 0.0};
+    ctx.set_rspace_operations({SpaceGroupSymOp::IDENTITY, half_translation});
+    SymmetrySpinOperation spin_e;
+    SymmetrySpinOperation spin_flip_t; // {i sigma_y | {E | 1/2}}: swap
+    spin_flip_t.spatial_id = 1;
+    spin_flip_t.spin_u = {0.0, 1.0, -1.0, 0.0};
+    spin_flip_t.spin_source = SymmetrySpinActionSource::ExplicitSpinSpace;
+    ctx.set_symmetry_spin_operations({spin_e, spin_flip_t}, false);
+    ctx.build_rsh_rotations(ctx.basis_convention, 0);
+
+    assert(classify_collinear_action_effective(spin_flip_t.spin_u, false, 1e-8)
+           == CollinearChannelAction::Swap);
+
+    const Vector3_Order<int> period{2, 1, 1};
+    const std::vector<Vector3_Order<int>> Rlist{{0, 0, 0}};
+    ctx.irreducible_sector = build_symmetry_rspace_irreducible_sector(ctx, Rlist);
+    ctx.set_available();
+    ctx.ensure_operation_metadata();
+    symmetry_rspace_sector_stars_t sector_stars;
+    build_symmetry_rspace_sector_stars(ctx, period, Rlist, sector_stars);
+
+    // Collinear input: only the diagonal channels, both at the irreducible
+    // (0, 0, R=0) key.
+    const auto make_block = [](double re, double im) {
+        ComplexMatrix block(1, 1);
+        block(0, 0) = std::complex<double>(re, im);
+        return block;
+    };
+    std::array<symmetry_rspace_block_map_t, 4> channels_ir;
+    channels_ir[0][0][{0, {0, 0, 0}}] = make_block(1.0, 0.5);   // up channel
+    channels_ir[3][0][{0, {0, 0, 0}}] = make_block(-2.0, 0.25); // down channel
+
+    const std::vector<SpeciesBasisLayout> layouts{{"X", {0}}};
+    const std::vector<int> atom_nb{1, 1};
+    auto channels_full = restore_symmetry_spinor_rspace_blocks(
+        channels_ir, ctx, sector_stars, layouts, atom_nb);
+
+    const auto& members = sector_stars.at({0, 0}).at({0, 0, 0});
+    assert(members.size() == 2);
+    for (const auto& member : members)
+    {
+        const auto& op =
+            resolve_symmetry_rspace_restore_member_spin_operation(ctx, member);
+        const int full_I = static_cast<int>(member.full_atom_pair.first);
+        const int full_J = static_cast<int>(member.full_atom_pair.second);
+        const std::array<int, 3> full_R{member.full_R.x, member.full_R.y, member.full_R.z};
+        const std::array<std::complex<double>, 4> x{{
+            {1.0, 0.5}, {0.0, 0.0}, {0.0, 0.0}, {-2.0, 0.25}}};
+        const auto expected = reference_spinor_block_transform(op, x);
+        const bool fast_path =
+            op.spin_source == SymmetrySpinActionSource::Identity && !op.antiunitary;
+        for (std::size_t channel = 0; channel != 4; ++channel)
+        {
+            const auto i_iter = channels_full[channel].find(full_I);
+            const bool output_present =
+                i_iter != channels_full[channel].end()
+                && i_iter->second.count({full_J, full_R}) != 0;
+            if (fast_path && channel >= 1 && channel <= 2)
+            {
+                assert(!output_present);  // off-diagonals stay absent on Keep
+                continue;
+            }
+            assert(output_present);
+            ComplexMatrix expected_block(1, 1);
+            expected_block(0, 0) = expected[channel];
+            assert_matrix_close(i_iter->second.at({full_J, full_R}), expected_block);
+        }
+        if (!fast_path)
+        {
+            // The swapped restore must not leak into the off-diagonal channels.
+            ComplexMatrix zero(1, 1);
+            zero(0, 0) = 0.0;
+            assert_matrix_close(channels_full[1].at(full_I).at({full_J, full_R}), zero);
+            assert_matrix_close(channels_full[2].at(full_I).at({full_J, full_R}), zero);
+        }
+    }
+}
+
+/*!
+ * Test matrix #9: noncollinear finite spin-space group with U_s != U[Q]
+ * (here a pi/2 spin rotation about x attached to an improper spatial
+ * operation). The driver restores through the explicit SU(2) action, and the
+ * storage validation must flag the operation as incompatible with collinear
+ * storage.
+ */
+void test_noncollinear_finite_ssg_restore_and_validation()
+{
+    SymmetryContext ctx;
+    const Matrix3 lattice(1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0,
+                          0.0, 0.0, 1.0);
+    ctx.set_crystal_structure(lattice,
+                              lattice,
+                              {{0, 0}, {1, 0}},
+                              {{0, {0.0, 0.0, 0.0}}, {1, {0.5, 0.0, 0.0}}});
+    ctx.basis_convention = {-1,
+                            0,
+                            LIBRPA_ANGULAR_ORDER_NATURAL,
+                            LIBRPA_RSH_COEFF_1_M,
+                            LIBRPA_RSH_COEFF_1_M};
+    auto g = make_row_symmetry_operation({-1, 0, 0,
+                                           0, 1, 0,
+                                           0, 0, 1});
+    g.translation = {0.5, 0.0, 0.0};
+    ctx.set_rspace_operations({SpaceGroupSymOp::IDENTITY, g});
+    SymmetrySpinOperation spin_e;
+    SymmetrySpinOperation spin_ncl; // U_s = exp(-i pi/4 sigma_x) != U[Q]
+    spin_ncl.spatial_id = 1;
+    const double c = std::cos(M_PI / 4.0), s = std::sin(M_PI / 4.0);
+    spin_ncl.spin_u = {c, {0.0, -s}, {0.0, -s}, c};
+    spin_ncl.spin_source = SymmetrySpinActionSource::ExplicitSpinSpace;
+    ctx.set_symmetry_spin_operations({spin_e, spin_ncl}, false);
+    ctx.build_rsh_rotations(ctx.basis_convention, 0);
+
+    assert(classify_collinear_action_effective(spin_ncl.spin_u, false, 1e-8)
+           == CollinearChannelAction::Incompatible);
+    // Collinear storage rejects it, spinor storage accepts it.
+    bool threw = false;
+    try
+    {
+        validate_spin_operations_for_storage(ctx, 2, 1);
+    }
+    catch (const std::exception&)
+    {
+        threw = true;
+    }
+    assert(threw);
+    validate_spin_operations_for_storage(ctx, 1, 2);
+
+    const Vector3_Order<int> period{2, 1, 1};
+    const std::vector<Vector3_Order<int>> Rlist{{0, 0, 0}};
+    ctx.irreducible_sector = build_symmetry_rspace_irreducible_sector(ctx, Rlist);
+    ctx.set_available();
+    ctx.ensure_operation_metadata();
+    symmetry_rspace_sector_stars_t sector_stars;
+    build_symmetry_rspace_sector_stars(ctx, period, Rlist, sector_stars);
+
+    check_spinor_rspace_restore_driver(ctx, sector_stars);
+}
+
+/*!
+ * Storage validation matrix: effective Keep/Swap/Incompatible classification
+ * against collinear and scalar storage, including the antiunitary Theta
+ * channel exchange.
+ */
+void test_spin_operation_storage_validation()
+{
+    const auto make_ctx = [](const SymmetrySpinOperation& op) {
+        SymmetryContext ctx;
+        ctx.set_rspace_operations({SpaceGroupSymOp::IDENTITY,
+                                   make_row_symmetry_operation({-1, 0, 0,
+                                                                0, 1, 0,
+                                                                0, 0, 1})});
+        SymmetrySpinOperation spin_e;
+        ctx.set_symmetry_spin_operations({spin_e, op}, false);
+        return ctx;
+    };
+    const auto throws_on = [](const SymmetryContext& ctx, int n_spins, int n_spinor) {
+        try
+        {
+            validate_spin_operations_for_storage(ctx, n_spins, n_spinor);
+        }
+        catch (const std::exception&)
+        {
+            return true;
+        }
+        return false;
+    };
+
+    SymmetrySpinOperation keep;      // diagonal U_s, unitary
+    keep.spatial_id = 1;
+    keep.spin_u = {1.0, 0.0, 0.0, -1.0};
+    keep.spin_source = SymmetrySpinActionSource::ExplicitSpinSpace;
+    assert(!throws_on(make_ctx(keep), 2, 1));
+
+    SymmetrySpinOperation swap;      // off-diagonal U_s, unitary
+    swap.spatial_id = 1;
+    swap.spin_u = {0.0, 1.0, -1.0, 0.0};
+    swap.spin_source = SymmetrySpinActionSource::ExplicitSpinSpace;
+    assert(throws_on(make_ctx(swap), 2, 1));
+
+    SymmetrySpinOperation tr;        // antiunitary with U_s = I: Theta swaps
+    tr.spatial_id = 1;
+    tr.antiunitary = true;
+    assert(throws_on(make_ctx(tr), 2, 1));
+
+    SymmetrySpinOperation tr_flip;   // antiunitary spin flip: Theta and U_s
+    tr_flip.spatial_id = 1;          // swaps cancel -> effective Keep
+    tr_flip.spin_u = {0.0, 1.0, -1.0, 0.0};
+    tr_flip.spin_source = SymmetrySpinActionSource::ExplicitSpinSpace;
+    tr_flip.antiunitary = true;
+    assert(!throws_on(make_ctx(tr_flip), 2, 1));
+
+    // Scalar storage rejects any non-identity spin rotation, keeps +-I.
+    assert(throws_on(make_ctx(keep), 1, 1));
+    assert(throws_on(make_ctx(swap), 1, 1));
+    SymmetrySpinOperation minus_identity;
+    minus_identity.spatial_id = 1;
+    minus_identity.spin_u = {-1.0, 0.0, 0.0, -1.0};
+    minus_identity.spin_source = SymmetrySpinActionSource::ExplicitSpinSpace;
+    assert(!throws_on(make_ctx(minus_identity), 1, 1));
+
+    // Spinor storage and an empty table accept everything.
+    assert(!throws_on(make_ctx(swap), 1, 2));
+    const SymmetryContext empty_ctx;
+    assert(!throws_on(empty_ctx, 2, 1));
+}
+
+/*!
+ * DerivedFromSpatialSOC: the context reconstructs U_s = U[det(Q) Q] from the
+ * Cartesian axial rotation of the spatial operation (hexagonal cell, so the
+ * fractional-to-Cartesian conversion is exercised), while identity-source
+ * operations are left untouched.
+ */
+void test_derived_soc_spin_action_reconstruction()
+{
+    SymmetryContext ctx;
+    const double rt3half = std::sqrt(3.0) / 2.0;
+    const Matrix3 lattice(1.0, 0.0, 0.0,
+                          0.5, rt3half, 0.0,
+                          0.0, 0.0, 2.0);
+    ctx.set_crystal_structure(lattice, lattice, {{0, 0}}, {{0, {0.0, 0.0, 0.0}}});
+    auto g = make_row_symmetry_operation({-1, 0, 0,
+                                           0, 1, 0,
+                                           0, 0, 1});
+    ctx.set_rspace_operations({SpaceGroupSymOp::IDENTITY, g});
+    SymmetrySpinOperation spin_e;
+    SymmetrySpinOperation derived;
+    derived.spatial_id = 1;
+    derived.spin_source = SymmetrySpinActionSource::DerivedFromSpatialSOC;
+    ctx.set_symmetry_spin_operations({spin_e, derived}, false);
+
+    // Compare against the operation as stored in the pool (set_rspace_operations
+    // may normalize the convention), not the caller-side copy.
+    const Matrix3 cartesian = fractional_rotation_to_cartesian(
+        ctx.rspace_operations.at(1), lattice);
+    const auto expected = so3_to_su2(axial_rotation_of(cartesian));
+    const auto& actual = ctx.spin_operations.at(1).spin_u;
+    for (std::size_t i = 0; i != 4; ++i)
+    {
+        assert(std::abs(actual[i] - expected[i]) < 1e-12);
+    }
+    const auto& first = ctx.spin_operations.at(0).spin_u;
+    assert(std::abs(first[0] - 1.0) < 1e-12 && std::abs(first[1]) < 1e-12
+           && std::abs(first[2]) < 1e-12 && std::abs(first[3] - 1.0) < 1e-12);
+}
+
 void test_mgo_k333_irreducible_sector_matches_both()
 {
     SymmetryContext ctx;
@@ -2137,6 +2812,15 @@ int main()
     test_mgo_k333_irreducible_sector_matches_single();
     test_rspace_sector_star_member_isym_maps_full_to_ir_r();
     test_rspace_block_restore_uses_stored_operation_rotation_convention();
+    test_rspace_sector_star_records_antiunitary_operation();
+    test_rspace_sector_star_grey_default_keeps_unitary_members();
+    test_rspace_spinor_four_channel_restore_antiunitary();
+    test_rspace_spinor_four_channel_restore_su2_mixing();
+    test_rspace_restore_member_spin_operation_resolution();
+    test_collinear_ssg_spin_flip_translation_restore();
+    test_noncollinear_finite_ssg_restore_and_validation();
+    test_spin_operation_storage_validation();
+    test_derived_soc_spin_action_reconstruction();
     test_mgo_k333_irreducible_sector_matches_both();
     test_bn_shrink_irreducible_sector_can_be_generated_from_symmetry();
     test_spin_operations_identity_translation();
