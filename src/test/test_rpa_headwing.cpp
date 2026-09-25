@@ -12,6 +12,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unistd.h>
 #include <valarray>
 
 #include "../core/chi0.h"
@@ -31,6 +32,7 @@
 
 using librpa_int::ArrayDesc;
 using librpa_int::AtomicBasis;
+using librpa_int::atom_mapping;
 using librpa_int::atpair_k_cplx_mat_t;
 using librpa_int::atpair_R_mat_t;
 using librpa_int::BlacsCtxtHandler;
@@ -50,6 +52,7 @@ using librpa_int::SymmetryContext;
 using librpa_int::SymmetryKAtomRotation;
 using librpa_int::SymmetryKStarMember;
 using librpa_int::SymmetryOperation;
+using librpa_int::TFGrids;
 using librpa_int::Vector3_Order;
 using librpa_int::atom_t;
 

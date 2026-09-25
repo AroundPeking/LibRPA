@@ -5,11 +5,15 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <utility>
 #include <valarray>
 
@@ -42,6 +46,55 @@ namespace librpa_int
 using RI::Tensor;
 using RI::Communicate_Tensors_Map_Judge::comm_map2;
 using RI::Communicate_Tensors_Map_Judge::comm_map2_first;
+
+std::string strict_2d_omega0_diagnostic_directory(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return {};
+    std::string directory(value);
+    if (directory.back() != '/') directory.push_back('/');
+    return directory;
+}
+
+Strict2dOmega0OverrideDirectories strict_2d_omega0_override_directories(
+    const char *coulomb_basis, const char *auxiliary_basis)
+{
+    Strict2dOmega0OverrideDirectories directories{
+        strict_2d_omega0_diagnostic_directory(coulomb_basis),
+        strict_2d_omega0_diagnostic_directory(auxiliary_basis)};
+    if (!directories.coulomb_basis.empty() && !directories.auxiliary_basis.empty())
+        throw std::invalid_argument(
+            "strict 2D Omega0 Coulomb-basis and auxiliary-basis overrides are mutually exclusive");
+    return directories;
+}
+
+std::vector<std::complex<double>> read_strict_2d_omega0_override_binary(
+    const std::string &path, const int expected_dimension)
+{
+    if (expected_dimension <= 0)
+        throw std::invalid_argument("strict 2D Omega0 override dimension must be positive");
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("cannot open strict 2D Omega0 override: " + path);
+    char magic[8]{};
+    std::int32_t rows = 0, cols = 0;
+    input.read(magic, sizeof(magic));
+    input.read(reinterpret_cast<char *>(&rows), sizeof(rows));
+    input.read(reinterpret_cast<char *>(&cols), sizeof(cols));
+    const char expected_magic[8] = {'L', 'R', '2', 'D', 'W', 'C', '0', '1'};
+    if (!input || std::memcmp(magic, expected_magic, sizeof(magic)) != 0)
+        throw std::runtime_error("invalid strict 2D Omega0 override header: " + path);
+    if (rows != expected_dimension || cols != expected_dimension)
+        throw std::runtime_error("strict 2D Omega0 override dimension mismatch: " + path);
+    const std::size_t count = static_cast<std::size_t>(rows) * cols;
+    std::vector<double> interleaved(2 * count);
+    input.read(reinterpret_cast<char *>(interleaved.data()),
+               static_cast<std::streamsize>(interleaved.size() * sizeof(double)));
+    if (!input || input.peek() != std::ifstream::traits_type::eof())
+        throw std::runtime_error("invalid strict 2D Omega0 override payload: " + path);
+    std::vector<std::complex<double>> matrix(count);
+    for (std::size_t i = 0; i != count; ++i)
+        matrix[i] = {interleaved[2 * i], interleaved[2 * i + 1]};
+    return matrix;
+}
 
 std::complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_pi, int *ipiv,
                                              int &info);
@@ -1479,6 +1532,11 @@ double diele_func::get_strict_2d_pw_to_auxiliary_scale() const
         throw std::logic_error(
             "strict 2D auxiliary-basis monopole metadata was not configured");
     return strict_2d_pw_to_auxiliary_scale_;
+}
+
+double diele_func::get_strict_2d_sheet_to_raw_scale() const
+{
+    return get_strict_2d_pw_to_auxiliary_scale();
 }
 
 double strict_2d_bare_coulomb_gamma_average(const std::vector<double> &weights,

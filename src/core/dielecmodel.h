@@ -35,6 +35,16 @@ struct DoubleHavriliakNegami
 std::vector<double> interpolate_dielec_func(int option, const std::vector<double> &frequencies_in,
                                             const std::vector<double> &df_in,
                                             const std::vector<double> &frequencies_target);
+std::string strict_2d_omega0_diagnostic_directory(const char *value);
+struct Strict2dOmega0OverrideDirectories
+{
+    std::string coulomb_basis;
+    std::string auxiliary_basis;
+};
+Strict2dOmega0OverrideDirectories strict_2d_omega0_override_directories(
+    const char *coulomb_basis, const char *auxiliary_basis);
+std::vector<std::complex<double>> read_strict_2d_omega0_override_binary(
+    const std::string &path, int expected_dimension);
 
 struct RpaHeadwingSettings
 {
@@ -256,6 +266,7 @@ public:
     void configure_strict_2d_coulomb_head(bool enabled,
                                           double auxiliary_monopole_norm_squared);
     double get_strict_2d_pw_to_auxiliary_scale() const;
+    double get_strict_2d_sheet_to_raw_scale() const;
 
     // Symmetry-aware head/wing switches. When use_symmetry is true and the
     // input symmetry context can restore the BZ from the IBZ k-grid, cal_head
