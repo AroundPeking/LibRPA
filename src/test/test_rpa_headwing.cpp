@@ -3021,6 +3021,15 @@ PeriodicBoundaryData make_bn_hexagonal_reduced_pbc(const SymmetryContext &ctx,
     return pbc;
 }
 
+std::size_t find_fractional_kpoint_index(
+    const std::vector<Vector3_Order<double>> &kpoints,
+    const Vector3_Order<double> &target)
+{
+    for (std::size_t ik = 0; ik != kpoints.size(); ++ik)
+        if (librpa_int::same_fractional_kpoint(kpoints[ik], target, 1e-8)) return ik;
+    throw std::runtime_error("failed to find a full-grid fractional k-point in the test");
+}
+
 SymmetryContext make_two_atom_inversion_context(const PeriodicBoundaryData &pbc)
 {
     SymmetryContext ctx;
