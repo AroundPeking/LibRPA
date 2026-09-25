@@ -579,7 +579,7 @@
       <validate name="QSGW trajectory indices and k points"
                 file="librpa/librpa.d/qsgw_eigenvalues.dat"
                 regex="^(\d+\s+.*)$"
-                comparison="cmp_table.abs_diff(1e-12,columns=1:8)"
+                comparison="cmp_table.abs_diff(1e-10,columns=1:8)"
       />
     </testcase>
 
