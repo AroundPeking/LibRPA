@@ -1,6 +1,8 @@
 #include "qpoint_view.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <cmath>
 #include <utility>
 
 #include "../math/symmetry.h"
@@ -12,6 +14,44 @@ namespace librpa_int
 {
 
 static constexpr double kQPointViewCoordTol = 1e-5;
+
+Vector3_Order<double> strict_2d_minimum_image_q(const PeriodicBoundaryData &pbc,
+                                                const Vector3_Order<double> &qfrac)
+{
+    // qfrac is expressed in reciprocal fractional coordinates.  Applying
+    // the nearest integer image is independent of the Cartesian lattice.
+    Vector3_Order<double> result = qfrac;
+    result.x -= std::round(result.x);
+    result.y -= std::round(result.y);
+    result.z -= std::round(result.z);
+    (void)pbc;
+    return result;
+}
+
+Strict2dQshellRegion classify_strict_2d_qshell(const double q_norm, const double first_q_norm)
+{
+    const double tolerance = 1.0e-8 * std::max(1.0, first_q_norm);
+    if (q_norm <= tolerance) return Strict2dQshellRegion::gamma;
+    if (std::abs(q_norm - first_q_norm) <= tolerance)
+        return Strict2dQshellRegion::first;
+    return Strict2dQshellRegion::rest;
+}
+
+Strict2dQradialRegion classify_strict_2d_qradial(const double q_norm,
+                                                const double first_q_norm)
+{
+    if (!(first_q_norm > 0.0) || q_norm <= 1.001 * first_q_norm)
+        return Strict2dQradialRegion::gamma_or_first;
+    const double ratio = q_norm / first_q_norm;
+    if (ratio <= 2.5) return Strict2dQradialRegion::near;
+    if (ratio <= 4.5) return Strict2dQradialRegion::middle;
+    return Strict2dQradialRegion::far;
+}
+
+bool strict_2d_qradial_is_corner(const double q_norm, const double first_q_norm)
+{
+    return first_q_norm > 0.0 && q_norm / first_q_norm > 6.5;
+}
 
 static SymmetryQPointView build_pbc_qpoint_view(const PeriodicBoundaryData& pbc)
 {

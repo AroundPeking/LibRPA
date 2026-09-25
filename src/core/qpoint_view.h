@@ -22,6 +22,16 @@ enum class SymmetryQPointRestoreMode
     FULL_CRYSTAL,
 };
 
+//! Radial partitions used by the strict-2D Gamma quadrature diagnostics.
+enum class Strict2dQshellRegion { gamma, first, rest };
+enum class Strict2dQradialRegion { gamma_or_first, near, middle, far };
+
+Vector3_Order<double> strict_2d_minimum_image_q(const PeriodicBoundaryData &pbc,
+                                                const Vector3_Order<double> &qfrac);
+Strict2dQshellRegion classify_strict_2d_qshell(double q_norm, double first_q_norm);
+Strict2dQradialRegion classify_strict_2d_qradial(double q_norm, double first_q_norm);
+bool strict_2d_qradial_is_corner(double q_norm, double first_q_norm);
+
 struct SymmetryQPointView
 {
     SymmetryQPointRestoreMode restore_mode = SymmetryQPointRestoreMode::NONE;
