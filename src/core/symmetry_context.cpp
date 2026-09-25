@@ -4,6 +4,8 @@
  */
 #include "symmetry_context.h"
 
+#include "symmetry_spin_kernel.h"
+
 #include "../math/rsh.h"
 #include "../utils/constants.h"
 #include "../utils/error.h"
@@ -680,6 +682,20 @@ void SymmetryContext::set_symmetry_spin_operations(
             throw LIBRPA_INVALID_ARGUMENT(
                 "grey-group expansion expects a unitary-only spin operation table");
         }
+        if (op.spin_source == SymmetrySpinActionSource::DerivedFromSpatialSOC)
+        {
+            // U_s = U[det(Q) Q], reconstructed from the Cartesian axial part
+            // of the spatial rotation (SOC magnetic group contract).
+            if (!lattice_available)
+            {
+                throw LIBRPA_RUNTIME_ERROR(
+                    "DerivedFromSpatialSOC spin action requires the lattice vectors "
+                    "to build the Cartesian spin rotation");
+            }
+            const auto& spatial = operation_pool.at(op.spatial_id).spatial;
+            const Matrix3 cartesian = fractional_rotation_to_cartesian(spatial, lattice_vectors);
+            op.spin_u = so3_to_su2(axial_rotation_of(cartesian));
+        }
         expanded.push_back(op);
     }
     if (grey_group)
@@ -910,6 +926,9 @@ void SymmetryContext::generate_rspace_sector_stars(
     {
         return;
     }
+    // Restore members record the generating (g, U_s, eta) operation, so the
+    // spin-operation table must be populated before stars are built.
+    ensure_operation_metadata();
     build_symmetry_rspace_sector_stars(*this, period, Rlist, rspace_sector_stars, nullptr);
 }
 
@@ -2305,6 +2324,52 @@ ComplexMatrix build_symmetry_kspace_operator_transform_matrix(
     return transpose(wavefunction_rotation, false);
 }
 
+std::vector<std::complex<double>> build_symmetry_kstar_member_target_gauge_phases(
+    const SymmetryContext& ctx,
+    const SymmetryKStarMember& member,
+    const std::size_t atom_count,
+    const Vector3_Order<double>* k_bz_target)
+{
+    std::vector<std::complex<double>> phases(atom_count, {1.0, 0.0});
+    if (k_bz_target == nullptr)
+    {
+        return phases;
+    }
+    const auto k_shift = build_symmetry_equivalent_kpoint_shift(member.k_bz, *k_bz_target);
+    for (std::size_t atom = 0; atom != atom_count; ++atom)
+    {
+        phases[atom] = build_symmetry_reciprocal_gauge_phase(
+            k_shift, static_cast<atom_t>(atom), ctx.input_coord_frac,
+            ctx.basis_convention);
+    }
+    return phases;
+}
+
+const SymmetrySpinOperation& resolve_symmetry_kstar_member_spin_operation(
+    const SymmetryContext& ctx,
+    const SymmetryKStarMember& member)
+{
+    if (member.action_id >= ctx.kspace_actions.size())
+    {
+        throw LIBRPA_RUNTIME_ERROR(
+            "spinor k-star restore found a member action_id without a geometric action");
+    }
+    const auto& action = ctx.kspace_actions[member.action_id];
+    if (action.canonical_operation_id >= ctx.spin_operations.size())
+    {
+        throw LIBRPA_RUNTIME_ERROR(
+            "spinor k-star restore found a geometric action without a spin operation");
+    }
+    const auto& op = ctx.spin_operations[action.canonical_operation_id];
+    if (op.antiunitary != member.time_reversal
+        || static_cast<int>(op.spatial_id) != member.spatial_isym)
+    {
+        throw LIBRPA_RUNTIME_ERROR(
+            "spinor k-star restore found an inconsistent member action link");
+    }
+    return op;
+}
+
 ComplexMatrix rotate_symmetry_kspace_matrix(const SymmetryContext& ctx,
                                             const std::vector<SpeciesBasisLayout>& layouts,
                                             const SymmetryKStarMember& member,
@@ -2313,8 +2378,7 @@ ComplexMatrix rotate_symmetry_kspace_matrix(const SymmetryContext& ctx,
                                             const Vector3_Order<double>& k_ibz,
                                             const bool use_time_reversal,
                                             const Vector3_Order<double>* k_bz_target)
-{
-    // -------------------------------------------------------------------------
+{    // -------------------------------------------------------------------------
     // Rotate D(k_ibz) to D(k_bz) using the input-convention Bloch rotation matrix M.
     //
     // Important: ABACUS defines the Bloch phase with k_bz, while the
@@ -2441,8 +2505,20 @@ void build_symmetry_rspace_sector_stars(const SymmetryContext& ctx,
             auto& star_members = sector_stars[ir_pair][ir_R];
             std::vector<std::string> candidate_debug;
             bool saw_duplicate_member = false;
-            for (std::size_t isym = 0; isym < ctx.rspace_operations.size(); ++isym)
+            // Iterate the full (g, U_s, eta) operation table when available so
+            // that antiunitary-only reachability (e.g. Theta{E|t} in an AFM
+            // magnetic group) generates restore members that record their
+            // operation; the `covered` dedup keeps the first table entry
+            // reaching each full sector, which is the unitary copy for the
+            // grey-group expansion (unitary copies come first there).
+            const std::size_t n_iteration = ctx.spin_operations.empty()
+                ? ctx.rspace_operations.size() : ctx.spin_operations.size();
+            for (std::size_t iop = 0; iop != n_iteration; ++iop)
             {
+                const std::size_t isym = ctx.spin_operations.empty()
+                    ? iop : ctx.spin_operations[iop].spatial_id;
+                const std::size_t operation_id = ctx.spin_operations.empty()
+                    ? SymmetryRSpaceRestoreMember::kOperationIdNone : iop;
                 const int inv = inverse_map[isym];
                 if (!use_operation[static_cast<std::size_t>(inv)])
                 {
@@ -2478,7 +2554,7 @@ void build_symmetry_rspace_sector_stars(const SymmetryContext& ctx,
                 if (covered.insert(full_key).second)
                 {
                     star_members.push_back(
-                        {static_cast<int>(isym), {full_I, full_J}, full_R});
+                        {static_cast<int>(isym), {full_I, full_J}, full_R, operation_id});
                 }
             }
 
@@ -2552,6 +2628,218 @@ ComplexMatrix rotate_symmetry_rspace_block(const SymmetryContext& ctx,
 {
     return rotate_symmetry_rspace_block(
         ctx, layouts, layouts, isym, atom_from_i, atom_from_j, matrix_source);
+}
+
+bool symmetry_rspace_restore_member_is_antiunitary(
+    const SymmetryContext& ctx,
+    const SymmetryRSpaceRestoreMember& member)
+{
+    if (member.operation_id == SymmetryRSpaceRestoreMember::kOperationIdNone
+        || member.operation_id >= ctx.spin_operations.size())
+    {
+        return false;
+    }
+    return ctx.spin_operations[member.operation_id].antiunitary;
+}
+
+const SymmetrySpinOperation& resolve_symmetry_rspace_restore_member_spin_operation(
+    const SymmetryContext& ctx,
+    const SymmetryRSpaceRestoreMember& member)
+{
+    if (member.operation_id == SymmetryRSpaceRestoreMember::kOperationIdNone)
+    {
+        // Shared identity operation for members built without spin metadata;
+        // the caller supplies the orbital rotation per member, so the default
+        // spatial_id is never consumed on the fast path.
+        static const SymmetrySpinOperation identity_operation{};
+        return identity_operation;
+    }
+    if (member.operation_id >= ctx.spin_operations.size())
+    {
+        throw LIBRPA_RUNTIME_ERROR(
+            "spinor real-space restore found a member operation_id without a spin operation");
+    }
+    const auto& op = ctx.spin_operations[member.operation_id];
+    if (static_cast<int>(op.spatial_id) != member.isym)
+    {
+        throw LIBRPA_RUNTIME_ERROR(
+            "spinor real-space restore found an inconsistent member operation link");
+    }
+    return op;
+}
+
+std::array<symmetry_rspace_block_map_t, 4> restore_symmetry_spinor_rspace_blocks(
+    const std::array<symmetry_rspace_block_map_t, 4>& channels_ir,
+    const SymmetryContext& ctx,
+    const symmetry_rspace_sector_stars_t& sector_stars,
+    const std::vector<SpeciesBasisLayout>& wfc_layouts,
+    const std::vector<int>& atom_nb)
+{
+    // Union of the irreducible keys over the four channels. Under a spin
+    // mixing operation every channel contributes to every output channel, so
+    // the union is the complete set of blocks that must be visited.
+    std::set<std::pair<int, std::pair<int, std::array<int, 3>>>> ir_keys;
+    for (const auto& channel : channels_ir)
+    {
+        for (const auto& i_entry : channel)
+        {
+            for (const auto& jr_entry : i_entry.second)
+            {
+                ir_keys.emplace(i_entry.first, jr_entry.first);
+            }
+        }
+    }
+
+    std::array<symmetry_rspace_block_map_t, 4> channels_full;
+    for (const auto& key : ir_keys)
+    {
+        const auto ir_I = static_cast<atom_t>(key.first);
+        const auto ir_J = static_cast<atom_t>(key.second.first);
+        const Vector3_Order<int> ir_R{
+            key.second.second[0], key.second.second[1], key.second.second[2]};
+        const auto pair_iter = sector_stars.find({ir_I, ir_J});
+        if (pair_iter == sector_stars.end() || pair_iter->second.count(ir_R) == 0)
+        {
+            std::ostringstream oss;
+            oss << "Failed to match a symmetry-filtered spinor block with the"
+                << " irreducible-sector restore map for I=" << ir_I
+                << " J=" << ir_J << " R=(" << ir_R.x << "," << ir_R.y << ","
+                << ir_R.z << ")";
+            throw LIBRPA_RUNTIME_ERROR(oss.str());
+        }
+
+        const int nao_I = atom_nb.at(ir_I);
+        const int nao_J = atom_nb.at(ir_J);
+
+        const auto block_at = [&channels_ir, &key](std::size_t channel) -> const ComplexMatrix*
+        {
+            const auto i_iter = channels_ir[channel].find(key.first);
+            if (i_iter == channels_ir[channel].end()) return nullptr;
+            const auto jr_iter = i_iter->second.find(key.second);
+            return jr_iter == i_iter->second.end() ? nullptr : &jr_iter->second;
+        };
+
+        for (const auto& restore_member : pair_iter->second.at(ir_R))
+        {
+            const auto& op =
+                resolve_symmetry_rspace_restore_member_spin_operation(ctx, restore_member);
+            const int full_I = static_cast<int>(restore_member.full_atom_pair.first);
+            const int full_J = static_cast<int>(restore_member.full_atom_pair.second);
+            const std::array<int, 3> full_R{
+                restore_member.full_R.x, restore_member.full_R.y, restore_member.full_R.z};
+            const auto scatter = [&channels_full, full_I, full_J, &full_R](
+                                     std::size_t channel, ComplexMatrix&& block)
+            {
+                auto& target = channels_full[channel][full_I][{full_J, full_R}];
+                if (target.nr != 0)
+                {
+                    throw LIBRPA_RUNTIME_ERROR(
+                        "Duplicate full-sector spinor block appears during symmetry restore");
+                }
+                target = std::move(block);
+            };
+
+            const auto orbit = [&ctx, &wfc_layouts, &restore_member, ir_I, ir_J](
+                                   std::size_t spatial_id, const ComplexMatrix& block)
+            {
+                (void)spatial_id;  // resolved per member, not per spatial_id
+                return rotate_symmetry_rspace_block(
+                    ctx, wfc_layouts, restore_member.isym, ir_I, ir_J, block);
+            };
+
+            if (op.spin_source == SymmetrySpinActionSource::Identity && !op.antiunitary)
+            {
+                // Fast path: channels evolve independently and absent channels
+                // stay absent, identical to the legacy per-channel restore.
+                for (std::size_t channel = 0; channel != 4; ++channel)
+                {
+                    const ComplexMatrix* block = block_at(channel);
+                    if (block == nullptr) continue;
+                    scatter(channel, orbit(op.spatial_id, *block));
+                }
+                continue;
+            }
+
+            // Spin mixing or antiunitary: zero-fill absent channels, then the
+            // four-block kernel (SU(2) mixing and, for eta = 1, the Theta
+            // remap) populates all four output channels.
+            SpinorBlocks4<ComplexMatrix> blocks_in;
+            {
+                ComplexMatrix* slots[4] = {&blocks_in.b00, &blocks_in.b01,
+                                           &blocks_in.b10, &blocks_in.b11};
+                for (std::size_t channel = 0; channel != 4; ++channel)
+                {
+                    const ComplexMatrix* block = block_at(channel);
+                    if (block != nullptr)
+                    {
+                        *slots[channel] = *block;
+                    }
+                    else
+                    {
+                        slots[channel]->create(nao_I, nao_J);
+                    }
+                }
+            }
+            auto blocks_out = transform_spinor_bilinear(
+                op, blocks_in, orbit, BilinearConvention::SourceToTarget_DXDdag);
+            scatter(0, std::move(blocks_out.b00));
+            scatter(1, std::move(blocks_out.b01));
+            scatter(2, std::move(blocks_out.b10));
+            scatter(3, std::move(blocks_out.b11));
+        }
+    }
+    return channels_full;
+}
+
+void validate_spin_operations_for_storage(
+    const SymmetryContext& ctx,
+    const int n_spins,
+    const int n_spinor,
+    const double tol)
+{
+    if (ctx.spin_operations.empty() || n_spinor >= 2)
+    {
+        return;  // legacy ordinary/grey input, or spinor storage accepts all
+    }
+    for (std::size_t iop = 0; iop != ctx.spin_operations.size(); ++iop)
+    {
+        const auto& op = ctx.spin_operations[iop];
+        if (n_spins == 2)
+        {
+            const auto action =
+                classify_collinear_action_effective(op.spin_u, op.antiunitary, tol);
+            if (action != CollinearChannelAction::Keep)
+            {
+                std::ostringstream oss;
+                oss << "Spin symmetry operation " << iop
+                    << (action == CollinearChannelAction::Swap
+                            ? " exchanges the collinear spin channels"
+                            : " is a genuine spinor rotation")
+                    << " and cannot be represented on collinear two-channel storage;"
+                    << " use spinor (n_spinor = 2) wave functions for this"
+                    << " magnetic/spin-space group";
+                throw LIBRPA_RUNTIME_ERROR(oss.str());
+            }
+        }
+        else
+        {
+            // Scalar storage: only U_s = +-I (up to tolerance) is meaningful.
+            const bool identity_spin =
+                std::abs(std::norm(op.spin_u[0]) - 1.0) < tol
+                && std::abs(op.spin_u[1]) < tol
+                && std::abs(op.spin_u[2]) < tol
+                && std::abs(std::norm(op.spin_u[3]) - 1.0) < tol
+                && std::abs(op.spin_u[0] - op.spin_u[3]) < tol;
+            if (!identity_spin)
+            {
+                std::ostringstream oss;
+                oss << "Spin symmetry operation " << iop
+                    << " carries a non-identity spin rotation and is meaningless on"
+                    << " scalar (spinless) storage";
+                throw LIBRPA_RUNTIME_ERROR(oss.str());
+            }
+        }
+    }
 }
 
 }  // namespace librpa_int

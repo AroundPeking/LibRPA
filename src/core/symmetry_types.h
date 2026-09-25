@@ -201,17 +201,28 @@ struct SymmetryFullKpointMemberEntry
 
 /*!
  * @brief One full real-space member generated from an irreducible {atom pair, R}.
+ *
+ * `isym` indexes `SymmetryContext::rspace_operations` (the spatial part) and is
+ * kept for all pre-magnetic consumers. `operation_id` indexes
+ * `SymmetryContext::spin_operations` and records which full (g, U_s, eta)
+ * operation generated this member; it equals `kSymmetryRSpaceOperationIdNone`
+ * when the star was built without spin-operation metadata (legacy contexts).
  */
 struct SymmetryRSpaceRestoreMember
 {
+    static constexpr std::size_t kOperationIdNone = ~static_cast<std::size_t>(0);
     int isym = -1;
     atpair_t full_atom_pair;
     Vector3_Order<int> full_R{0, 0, 0};
+    std::size_t operation_id = kOperationIdNone;
 };
 
 using symmetry_rspace_sector_stars_t =
     std::map<atpair_t, std::map<Vector3_Order<int>, std::vector<SymmetryRSpaceRestoreMember>>>;
 using symmetry_atom_block_matrix_map_t = std::map<atom_t, std::map<atom_t, ComplexMatrix>>;
+//! One spin-channel real-space tensor map keyed {I, {J, R}} with dense AO blocks.
+using symmetry_rspace_block_map_t =
+    std::map<int, std::map<std::pair<int, std::array<int, 3>>, ComplexMatrix>>;
 using symmetry_kstar_member_kfrac_targets_t =
     std::vector<std::vector<Vector3_Order<double>>>;
 using symmetry_kstar_representative_indices_t = std::vector<int>;

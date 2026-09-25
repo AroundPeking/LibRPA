@@ -62,3 +62,6 @@ add_executable(
   ../rpa_qsum.cpp
 )
 add_test(NAME test_rpa_qsum COMMAND $<TARGET_FILE:test_rpa_qsum>)
+add_executable(test_stru_symops_parser test_stru_symops_parser.cpp ../stru_symops_parser.cpp)
+target_link_libraries(test_stru_symops_parser PRIVATE rpa_lib)
+add_test(NAME test_stru_symops_parser COMMAND $<TARGET_FILE:test_stru_symops_parser>)

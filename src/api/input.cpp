@@ -630,10 +630,9 @@ void librpa_set_symmetry_spin_operations(
                                    "1 (ExplicitSpinSpace), or 2 (DerivedFromSpatialSOC)");
     if (spin_action_source == 1 && spin_u == nullptr)
         throw LIBRPA_RUNTIME_ERROR("ExplicitSpinSpace spin action requires a non-null spin_u");
-    if (spin_action_source == 2 && spin_u == nullptr)
-        throw LIBRPA_RUNTIME_ERROR("DerivedFromSpatialSOC without spin_u requires the "
-                                   "SO(3)->SU(2) reconstruction, which belongs to Phase 3 "
-                                   "and is not implemented yet");
+    // DerivedFromSpatialSOC with spin_u == nullptr is reconstructed inside
+    // SymmetryContext as U_s = U[det(Q) Q] from the Cartesian axial rotation;
+    // when spin_u is provided it is used as given (upstream authority).
 
     const std::string tname = "api_set_symmetry_spin_operations";
     profiler.start(tname, LIBRPA_VERBOSE_DEBUG);
