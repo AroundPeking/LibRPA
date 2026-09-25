@@ -55,6 +55,124 @@ using std::vector;
 
 namespace librpa_int {
 
+Strict2dQshellRegion classify_strict_2d_qshell(const double q_norm, const double first_q_norm)
+{
+    if (!(first_q_norm > 0.0) || !std::isfinite(first_q_norm))
+        throw LIBRPA_RUNTIME_ERROR("strict 2D q-shell diagnostic requires positive first q");
+    if (q_norm < 0.0 || !std::isfinite(q_norm))
+        throw LIBRPA_RUNTIME_ERROR("strict 2D q-shell diagnostic encountered invalid q");
+    const double tolerance = 1.0e-8 * std::max(1.0, first_q_norm);
+    if (q_norm <= tolerance) return Strict2dQshellRegion::gamma;
+    if (std::abs(q_norm - first_q_norm) <= tolerance) return Strict2dQshellRegion::first;
+    return Strict2dQshellRegion::rest;
+}
+
+Strict2dQradialRegion classify_strict_2d_qradial(const double q_norm,
+                                                  const double first_q_norm)
+{
+    if (!(first_q_norm > 0.0) || !std::isfinite(first_q_norm))
+        throw LIBRPA_RUNTIME_ERROR("strict 2D radial-q diagnostic requires positive first q");
+    if (q_norm < 0.0 || !std::isfinite(q_norm))
+        throw LIBRPA_RUNTIME_ERROR("strict 2D radial-q diagnostic encountered invalid q");
+    const double absolute_tolerance = 1.0e-8 * std::max(1.0, first_q_norm);
+    const double first_shell_tolerance = std::max(absolute_tolerance, 5.0e-4 * first_q_norm);
+    if (q_norm <= first_q_norm + first_shell_tolerance)
+        return Strict2dQradialRegion::gamma_or_first;
+    const double ratio = q_norm / first_q_norm;
+    if (ratio <= 2.5) return Strict2dQradialRegion::near;
+    if (ratio <= 4.5) return Strict2dQradialRegion::middle;
+    return Strict2dQradialRegion::far;
+}
+
+bool strict_2d_qradial_is_corner(const double q_norm, const double first_q_norm)
+{
+    (void)classify_strict_2d_qradial(q_norm, first_q_norm);
+    return q_norm / first_q_norm > 6.5;
+}
+
+Strict2dWcBlock strict_2d_first_shell_wc_block_diagnostic(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return Strict2dWcBlock::full;
+    const std::string mode(value);
+    if (mode == "head") return Strict2dWcBlock::head;
+    if (mode == "wing") return Strict2dWcBlock::wing;
+    if (mode == "body") return Strict2dWcBlock::body;
+    throw std::invalid_argument(
+        "LIBRPA_STRICT2D_FIRST_SHELL_WC_BLOCK_DIAG must be head, wing, or body");
+}
+
+bool strict_2d_wc_block_keeps(const Strict2dWcBlock block, const int row, const int column,
+                              const int head_index)
+{
+    if (row < 0 || column < 0 || head_index < 0)
+        throw std::invalid_argument("strict 2D Wc block indices must be nonnegative");
+    const bool row_is_head = row == head_index;
+    const bool column_is_head = column == head_index;
+    switch (block)
+    {
+        case Strict2dWcBlock::full: return true;
+        case Strict2dWcBlock::head: return row_is_head && column_is_head;
+        case Strict2dWcBlock::wing: return row_is_head != column_is_head;
+        case Strict2dWcBlock::body: return !row_is_head && !column_is_head;
+    }
+    throw std::invalid_argument("unknown strict 2D Wc block diagnostic mode");
+}
+
+Vector3_Order<double> strict_2d_minimum_image_q(const PeriodicBoundaryData &pbc,
+                                                const Vector3_Order<double> &q)
+{
+    const Vector3_Order<double> qfrac{pbc.latvec * q};
+    const int center_x = static_cast<int>(std::llround(qfrac.x));
+    const int center_y = static_cast<int>(std::llround(qfrac.y));
+    Vector3_Order<double> minimum_q = q;
+    double minimum_norm = std::hypot(q.x, q.y);
+    for (int ix = center_x - 1; ix <= center_x + 1; ++ix)
+        for (int iy = center_y - 1; iy <= center_y + 1; ++iy)
+        {
+            const Vector3_Order<double> candidate_frac{qfrac.x - ix, qfrac.y - iy, qfrac.z};
+            const Vector3_Order<double> candidate{candidate_frac * pbc.G};
+            const double candidate_norm = std::hypot(candidate.x, candidate.y);
+            if (candidate_norm < minimum_norm)
+            {
+                minimum_q = candidate;
+                minimum_norm = candidate_norm;
+            }
+        }
+    return minimum_q;
+}
+
+bool strict_2d_alpha_wc_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "0.25") return true;
+    throw std::invalid_argument(
+        "LIBRPA_STRICT2D_ALPHA_WC_DIAG only accepts the fixed reference 0.25");
+}
+
+bool strict_2d_first_shell_analytic_wc_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_STRICT2D_FIRST_SHELL_ANALYTIC_WC_DIAG only accepts enabled");
+}
+
+bool disable_chi0_qspace_symmetry_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_DISABLE_CHI0_QSPACE_SYMMETRY_DIAG only accepts enabled");
+}
+
+bool strict_2d_should_dump_finite_q_matrix(const int iq, const int ifreq,
+                                           const bool gamma_point, const int maximum_iq)
+{
+    if (maximum_iq < 1)
+        throw std::invalid_argument("strict 2D finite-q matrix dump requires maximum_iq >= 1");
+    return !gamma_point && ifreq == 0 && iq >= 1 && iq <= maximum_iq;
+}
+
 bool strict_2d_complete_wc_requested(const bool replace_w_head, const int option_dielect_func,
                                      const bool use_2d_dielectric)
 {
@@ -88,6 +206,12 @@ std::string strict_2d_finite_q_diagnostics_header()
            "weighted_wc_body_body_fro";
 }
 
+std::string strict_2d_raw_gamma_chi0_diagnostics_header()
+{
+    return "ifreq,frequency,head_column,chi0_head_real,chi0_head_imag,"
+           "chi0_head_body_fro,chi0_body_head_fro,chi0_body_body_fro,n_auxiliary";
+}
+
 std::string strict_2d_gamma_wc_diagnostics_header()
 {
     return "ifreq,frequency,q_weight,gamma_area,wc_head_real,wc_head_imag,"
@@ -96,6 +220,29 @@ std::string strict_2d_gamma_wc_diagnostics_header()
            "alpha_wc_body_head_fro,alpha_wc_body_body_fro,weighted_wc_head_real,"
            "weighted_wc_head_imag,weighted_wc_head_body_fro,weighted_wc_body_head_fro,"
            "weighted_wc_body_body_fro";
+}
+
+std::string strict_2d_gamma_wc_transform_diagnostics_header()
+{
+    return "ifreq,frequency,pw_to_auxiliary_scale,pw_head_analytic_real,"
+           "pw_head_analytic_imag,aux_head_expected_real,aux_head_expected_imag,"
+           "aux_head_roundtrip_real,aux_head_roundtrip_imag,pw_head_roundtrip_real,"
+           "pw_head_roundtrip_imag,roundtrip_relative_error";
+}
+
+int strict_2d_head_eigenvector_column(const double *eigenvalues, const int count)
+{
+    if (eigenvalues == nullptr || count < 1)
+        throw std::logic_error("strict 2D diagnostic Coulomb eigenvalues are unavailable");
+    return static_cast<int>(std::max_element(eigenvalues, eigenvalues + count) - eigenvalues);
+}
+
+int strict_2d_diagnostic_head_first_index(const int index, const int head_index)
+{
+    if (index < 0 || head_index < 0)
+        throw std::logic_error("strict 2D diagnostic basis index is invalid");
+    if (index == head_index) return 0;
+    return index < head_index ? index + 1 : index;
 }
 
 std::vector<Vector3_Order<double>> strict_2d_diagnostic_qpoint_order(
@@ -252,6 +399,13 @@ bool strict_2d_qmember_diagnostic_keeps(const Vector3_Order<double>& q_member_fr
 {
     return !diagnostics_enabled
            || are_equivalent_symmetry_qpoints(q_member_frac, selected_q_frac);
+}
+
+bool strict_2d_qmember_diagnostic_selection_valid(const std::size_t local_count,
+                                                  const std::size_t global_max_count,
+                                                  const bool diagnostics_enabled)
+{
+    return !diagnostics_enabled || (local_count > 0 && local_count == global_max_count);
 }
 
 template <typename QMap>

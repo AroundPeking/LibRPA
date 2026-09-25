@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <complex>
 #include <map>
 #include <string>
@@ -17,17 +18,41 @@
 
 namespace librpa_int {
 
+enum class Strict2dQshellRegion { gamma, first, rest };
+enum class Strict2dQradialRegion { gamma_or_first, near, middle, far };
+enum class Strict2dWcBlock { full, head, wing, body };
+
+Strict2dQshellRegion classify_strict_2d_qshell(double q_norm, double first_q_norm);
+Strict2dQradialRegion classify_strict_2d_qradial(double q_norm, double first_q_norm);
+bool strict_2d_qradial_is_corner(double q_norm, double first_q_norm);
+Strict2dWcBlock strict_2d_first_shell_wc_block_diagnostic(const char *value);
+bool strict_2d_wc_block_keeps(Strict2dWcBlock block, int row, int column, int head_index);
+Vector3_Order<double> strict_2d_minimum_image_q(const PeriodicBoundaryData &pbc,
+                                                const Vector3_Order<double> &q);
+bool strict_2d_alpha_wc_diagnostic_requested(const char *value);
+bool strict_2d_first_shell_analytic_wc_diagnostic_requested(const char *value);
+bool disable_chi0_qspace_symmetry_diagnostic_requested(const char *value);
+bool strict_2d_should_dump_finite_q_matrix(int iq, int ifreq, bool gamma_point,
+                                           int maximum_iq = 12);
+
 bool strict_2d_complete_wc_requested(bool replace_w_head, int option_dielect_func,
                                      bool use_2d_dielectric);
 void validate_strict_2d_complete_wc_runtime(bool strict_2d_requested, bool headwing_data_available,
                                             bool use_scalapack_gw_wc);
 std::string strict_2d_finite_q_diagnostics_header();
+std::string strict_2d_raw_gamma_chi0_diagnostics_header();
 std::string strict_2d_gamma_wc_diagnostics_header();
+std::string strict_2d_gamma_wc_transform_diagnostics_header();
+int strict_2d_head_eigenvector_column(const double *eigenvalues, int count);
+int strict_2d_diagnostic_head_first_index(int index, int head_index);
 std::vector<Vector3_Order<double>> strict_2d_diagnostic_qpoint_order(
     const std::vector<Vector3_Order<double>> &qpoints, bool diagnostics_enabled);
 bool strict_2d_qmember_diagnostic_keeps(const Vector3_Order<double>& q_member_frac,
                                         const Vector3_Order<double>& selected_q_frac,
                                         bool diagnostics_enabled);
+bool strict_2d_qmember_diagnostic_selection_valid(std::size_t local_count,
+                                                  std::size_t global_max_count,
+                                                  bool diagnostics_enabled);
 bool use_strict_2d_complete_wc_gamma_route(bool replace_w_head, int option_dielect_func,
                                            bool use_2d_dielectric, bool gamma_point,
                                            bool headwing_data_available);
