@@ -52,6 +52,7 @@ using librpa_int::SymmetryContext;
 using librpa_int::SymmetryKAtomRotation;
 using librpa_int::SymmetryKStarMember;
 using librpa_int::SymmetryOperation;
+using librpa_int::SymmetryQPointRestoreMode;
 using librpa_int::TFGrids;
 using librpa_int::Vector3_Order;
 using librpa_int::atom_t;
@@ -2894,6 +2895,129 @@ PeriodicBoundaryData make_wq_reduced_pbc()
         {{0.0, 0.0, 0.0}},
         {{1.0 / 3.0, 0.0, 0.0}, {-1.0 / 3.0, 0.0, 0.0}}};
     pbc.set_irreducible_kgrids_kvec(3, 1, 1, kvecs_ibz, full_kstars);
+    return pbc;
+}
+
+void test_spacetime_fourier_phases_form_k_minus_q_convolution()
+{
+    constexpr int mesh = 3;
+    const std::array<std::complex<double>, mesh> wc_q{{{1.2, -0.3}, {-0.4, 0.7}, {0.9, 0.2}}};
+    const std::array<std::complex<double>, mesh> weighted_green_k{{{0.13, 0.04},
+                                                                    {-0.08, 0.02},
+                                                                    {0.05, -0.06}}};
+    std::array<std::complex<double>, mesh> wc_R{};
+    std::array<std::complex<double>, mesh> green_R{};
+    for (int iR = 0; iR != mesh; ++iR)
+        for (int iq = 0; iq != mesh; ++iq)
+        {
+            const double angle = -librpa_int::TWO_PI * static_cast<double>(iq * iR) / mesh;
+            const std::complex<double> phase{std::cos(angle), std::sin(angle)};
+            wc_R[iR] += wc_q[iq] * phase / static_cast<double>(mesh);
+            green_R[iR] += weighted_green_k[iq] * phase;
+        }
+    for (int ik = 0; ik != mesh; ++ik)
+    {
+        std::complex<double> spacetime_sigma_k{};
+        std::complex<double> direct_k_minus_q{};
+        std::complex<double> direct_k_plus_q{};
+        for (int iR = 0; iR != mesh; ++iR)
+        {
+            const double angle = librpa_int::TWO_PI * static_cast<double>(ik * iR) / mesh;
+            const std::complex<double> phase{std::cos(angle), std::sin(angle)};
+            spacetime_sigma_k += wc_R[iR] * green_R[iR] * phase;
+        }
+        for (int iq = 0; iq != mesh; ++iq)
+        {
+            direct_k_minus_q += wc_q[iq] * weighted_green_k[(ik - iq + mesh) % mesh];
+            direct_k_plus_q += wc_q[iq] * weighted_green_k[(ik + iq) % mesh];
+        }
+        assert_complex_close(spacetime_sigma_k, direct_k_minus_q, 1.0e-13);
+        if (std::abs(spacetime_sigma_k - direct_k_plus_q) < 1.0e-5)
+            throw std::runtime_error("synthetic data do not distinguish k-q from k+q");
+    }
+}
+
+std::vector<SymmetryOperation> make_bn_hexagonal_operations()
+{
+    const std::array<std::array<int, 9>, 12> rotations{{
+        {{1, 0, 0, 0, 1, 0, 0, 0, 1}}, {{0, 1, 0, -1, -1, 0, 0, 0, -1}},
+        {{-1, -1, 0, 1, 0, 0, 0, 0, 1}}, {{1, 0, 0, 0, 1, 0, 0, 0, -1}},
+        {{0, 1, 0, -1, -1, 0, 0, 0, 1}}, {{-1, -1, 0, 1, 0, 0, 0, 0, -1}},
+        {{-1, 0, 0, 1, 1, 0, 0, 0, 1}}, {{1, 1, 0, 0, -1, 0, 0, 0, -1}},
+        {{0, -1, 0, -1, 0, 0, 0, 0, 1}}, {{-1, 0, 0, 1, 1, 0, 0, 0, -1}},
+        {{1, 1, 0, 0, -1, 0, 0, 0, 1}}, {{0, -1, 0, -1, 0, 0, 0, 0, -1}}}};
+    std::vector<SymmetryOperation> operations;
+    operations.reserve(rotations.size());
+    for (const auto &rotation : rotations)
+    {
+        SymmetryOperation operation;
+        operation.rotation = Matrix3(rotation[0], rotation[1], rotation[2], rotation[3],
+                                     rotation[4], rotation[5], rotation[6], rotation[7],
+                                     rotation[8]);
+        operation.translation = {0.0, 0.0, 0.0};
+        operation.use_row_convention = true;
+        operations.push_back(operation);
+    }
+    return operations;
+}
+
+void set_bn_hexagonal_lattice(PeriodicBoundaryData &pbc)
+{
+    const double sqrt_three = std::sqrt(3.0);
+    pbc.set_latvec({0.5, -0.5 * sqrt_three, 0.0, 0.5, 0.5 * sqrt_three, 0.0, 0.0, 0.0,
+                    8.0});
+}
+
+SymmetryContext make_bn_hexagonal_context(const PeriodicBoundaryData &pbc, const int max_l = 0)
+{
+    SymmetryContext ctx;
+    ctx.set_crystal_structure(pbc.latvec, pbc.G, {{0, 0}, {1, 1}},
+                              {{0, {1.0 / 3.0, 2.0 / 3.0, 0.5}},
+                               {1, {2.0 / 3.0, 1.0 / 3.0, 0.5}}});
+    ctx.set_rspace_operations(make_bn_hexagonal_operations());
+    ctx.set_available();
+    ctx.build_periodic_mappings(pbc, pbc.Rlist);
+    ctx.build_rsh_rotations(
+        {-1, 0, LIBRPA_ANGULAR_ORDER_NATURAL, LIBRPA_RSH_COEFF_1_M, LIBRPA_RSH_COEFF_1_M},
+        max_l);
+    ctx.build_kstar_member_rotations(max_l);
+    return ctx;
+}
+
+PeriodicBoundaryData make_bn_hexagonal_full_pbc(const int mesh = 3)
+{
+    PeriodicBoundaryData pbc;
+    set_bn_hexagonal_lattice(pbc);
+    std::vector<double> kvecs;
+    for (const auto &kfrac : librpa_int::build_uniform_kmesh_frac({mesh, mesh, 1}))
+    {
+        const auto kvec = kfrac * pbc.G;
+        kvecs.insert(kvecs.end(), {librpa_int::TWO_PI * kvec.x, librpa_int::TWO_PI * kvec.y,
+                                   librpa_int::TWO_PI * kvec.z});
+    }
+    pbc.set_kgrids_kvec(mesh, mesh, 1, kvecs);
+    return pbc;
+}
+
+PeriodicBoundaryData make_bn_hexagonal_reduced_pbc(const SymmetryContext &ctx,
+                                                   const int mesh = 3)
+{
+    PeriodicBoundaryData pbc;
+    set_bn_hexagonal_lattice(pbc);
+    std::vector<double> kvecs_ibz;
+    std::vector<std::vector<Vector3_Order<double>>> full_kstars;
+    for (const auto &star : ctx.kstars)
+    {
+        const auto kvec = librpa_int::restrict_fractional_coordinate(star.k_ibz) * pbc.G;
+        kvecs_ibz.insert(kvecs_ibz.end(), {librpa_int::TWO_PI * kvec.x,
+                                           librpa_int::TWO_PI * kvec.y,
+                                           librpa_int::TWO_PI * kvec.z});
+        full_kstars.emplace_back();
+        for (const auto &member : star.members)
+            full_kstars.back().push_back(
+                librpa_int::restrict_fractional_coordinate(member.k_bz) * pbc.G);
+    }
+    pbc.set_irreducible_kgrids_kvec(mesh, mesh, 1, kvecs_ibz, full_kstars);
     return pbc;
 }
 
