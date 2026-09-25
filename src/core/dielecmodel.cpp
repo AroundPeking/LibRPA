@@ -1536,7 +1536,9 @@ double diele_func::get_strict_2d_pw_to_auxiliary_scale() const
 
 double diele_func::get_strict_2d_sheet_to_raw_scale() const
 {
-    return get_strict_2d_pw_to_auxiliary_scale();
+    // The legacy diagnostic reports the dimensionless sheet-to-raw factor;
+    // the reader-v1 auxiliary normalization is exposed separately above.
+    return use_2d_dielectric ? 1.0 : 0.0;
 }
 
 double strict_2d_bare_coulomb_gamma_average(const std::vector<double> &weights,
