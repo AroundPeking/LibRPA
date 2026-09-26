@@ -113,7 +113,15 @@ jobs:
             build/CMakeFiles/CMakeError.log \
             build/CMakeFiles/CMakeOutput.log \
             build/Testing/Temporary/LastTest.log \
-            regression_tests/test_np4.log; do
+            build_libri/CMakeFiles/CMakeError.log \
+            build_libri/CMakeFiles/CMakeOutput.log \
+            build_libri/Testing/Temporary/LastTest.log \
+            build_fortran_bind/CMakeFiles/CMakeError.log \
+            build_fortran_bind/CMakeFiles/CMakeOutput.log \
+            build_fortran_bind/Testing/Temporary/LastTest.log \
+            regression_tests/test_np4.log \
+            regression_tests/test_libri_np4.log \
+            regression_tests/test_libri_si_np1.log; do
             if [[ -f "$log" ]]; then
               message=$(tail -n 100 "$log" | tr '\n' ' ' | cut -c1-5000)
               echo "::error file=$log,line=1,title=CI diagnostics::$message"
