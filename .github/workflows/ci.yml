@@ -123,10 +123,12 @@ jobs:
             regression_tests/test_libri_np4.log \
             regression_tests/test_libri_si_np1.log; do
             if [[ -f "$log" ]]; then
-              message=$( {
-                grep -Ein 'FAILED|FAIL|ERROR|Error|No results|exit code|Some tests' "$log" || true
-                tail -n 80 "$log"
-              } | tr '\n' ' ' | cut -c1-5000)
+              if [[ "$log" == *LastTest.log ]]; then
+                message=$(grep -Ein -B 24 -A 12 'Test Failed|terminate called|std::runtime_error|tests failed' "$log" || true)
+              else
+                message=$(grep -Ein 'FAILED|FAIL|ERROR|Error|No results|exit code|Some tests' "$log" || true)
+              fi
+              message=$(printf '%s\n' "$message" | tail -n 120 | tr '\n' ' ' | cut -c1-5000)
               echo "::error file=$log,line=1,title=CI diagnostics::$message"
             fi
           done
