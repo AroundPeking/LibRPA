@@ -10,6 +10,10 @@ on:
 
 env:
   LINUX_CPP_COMPONENTS: intel-oneapi-dpcpp-cpp-compiler_intel-oneapi-compiler-fortran_intel-oneapi-mkl_intel-oneapi-mkl-devel_intel-oneapi-mpi_intel-oneapi-mpi-devel
+  # The CI tests launch all MPI ranks on one runner.  Newer Intel MPI
+  # releases may select OFI by default, which fails during MPI_Init_thread
+  # on the GitHub runner.  Force the intra-node transport used by this job.
+  I_MPI_FABRICS: shm
 
 jobs:
   ONEAPI:
