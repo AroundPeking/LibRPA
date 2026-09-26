@@ -949,9 +949,11 @@ std::map<Vector3_Order<int>, Matz> get_symmetry_restored_dmat_cplx_Rs_kblacs_par
             if ((wfc_bra == nullptr || wfc_ket == nullptr) && wfc_size_loc > 0)
                 throw LIBRPA_RUNTIME_ERROR("missing local wave-function block for k-point " +
                                           std::to_string(ik));
-            if (wfc_bra != nullptr && static_cast<size_t>(wfc_bra->size) != wfc_size_loc)
+            if (wfc_size_loc > 0 && wfc_bra != nullptr &&
+                static_cast<size_t>(wfc_bra->size) != wfc_size_loc)
                 throw LIBRPA_RUNTIME_ERROR("wave-function bra block size is inconsistent with descriptor");
-            if (wfc_ket != nullptr && static_cast<size_t>(wfc_ket->size) != wfc_size_loc)
+            if (wfc_size_loc > 0 && wfc_ket != nullptr &&
+                static_cast<size_t>(wfc_ket->size) != wfc_size_loc)
                 throw LIBRPA_RUNTIME_ERROR("wave-function ket block size is inconsistent with descriptor");
 
             int nocc = 0;
@@ -1199,10 +1201,12 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> get_gf_cplx_imagtimes_Rs_kb
             if ((wfc_bra == nullptr || wfc_ket == nullptr) && wfc_size_loc > 0)
                 throw LIBRPA_RUNTIME_ERROR("missing local wave-function block for k-point " +
                                           std::to_string(ik));
-            if (wfc_bra != nullptr && static_cast<size_t>(wfc_bra->size) != wfc_size_loc)
-                throw LIBRPA_RUNTIME_ERROR("wave-function bra block size is inconsistent with descriptor");
-            if (wfc_ket != nullptr && static_cast<size_t>(wfc_ket->size) != wfc_size_loc)
-                throw LIBRPA_RUNTIME_ERROR("wave-function ket block size is inconsistent with descriptor");
+        if (wfc_size_loc > 0 && wfc_bra != nullptr &&
+            static_cast<size_t>(wfc_bra->size) != wfc_size_loc)
+            throw LIBRPA_RUNTIME_ERROR("wave-function bra block size is inconsistent with descriptor");
+        if (wfc_size_loc > 0 && wfc_ket != nullptr &&
+            static_cast<size_t>(wfc_ket->size) != wfc_size_loc)
+            throw LIBRPA_RUNTIME_ERROR("wave-function ket block size is inconsistent with descriptor");
 
             global::profiler.start("gf_scale_wfc", LIBRPA_VERBOSE_DEBUG);
             std::vector<double> scales(n_states);
