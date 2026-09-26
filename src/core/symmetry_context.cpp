@@ -1440,8 +1440,21 @@ void SymmetryContext::generate_kstar_grid_mapping(const PeriodicBoundaryData& pb
                                      kfrac.x * G.e13 + kfrac.y * G.e23 + kfrac.z * G.e33};
     };
 
+    // `PeriodicBoundaryData::klist` and `map_irk_ks` store Cartesian/internal
+    // wave vectors, whereas `same_fractional_kpoint` compares fractional
+    // coordinates modulo integer reciprocal translations.  Convert the
+    // internal vectors back through the direct lattice before comparing; using
+    // the Cartesian components directly can make distinct q points appear
+    // equal or fail to match equivalent boundary points.
+    const auto same_internal_kpoint = [this](const Vector3_Order<double>& lhs,
+                                             const Vector3_Order<double>& rhs) {
+        return same_fractional_kpoint(Vector3_Order<double>{lattice_vectors * lhs},
+                                      Vector3_Order<double>{lattice_vectors * rhs},
+                                      kSymmetryCoordTol);
+    };
+
     auto find_matching_ibz_full_list =
-        [&irk_to_full_kpoints](const Vector3_Order<double>& q_ibz_key)
+        [&irk_to_full_kpoints, &same_internal_kpoint](const Vector3_Order<double>& q_ibz_key)
         -> std::map<Vector3_Order<double>, std::vector<Vector3_Order<double>>>::const_iterator {
         const auto exact_iter = irk_to_full_kpoints.find(q_ibz_key);
         if (exact_iter != irk_to_full_kpoints.end())
@@ -1450,9 +1463,9 @@ void SymmetryContext::generate_kstar_grid_mapping(const PeriodicBoundaryData& pb
         }
 
         return std::find_if(irk_to_full_kpoints.begin(), irk_to_full_kpoints.end(),
-                            [&q_ibz_key](const auto& entry) {
-                                return same_fractional_kpoint(
-                                    entry.first, q_ibz_key, kSymmetryCoordTol);
+                            [&q_ibz_key, &same_internal_kpoint](const auto& entry) {
+                                return same_internal_kpoint(
+                                    entry.first, q_ibz_key);
                             });
     };
 
@@ -1498,8 +1511,7 @@ void SymmetryContext::generate_kstar_grid_mapping(const PeriodicBoundaryData& pb
             for (std::size_t ifull = 0; ifull < full_q_keys->size(); ++ifull)
             {
                 if (matched_full_q[ifull]
-                    || !same_fractional_kpoint(
-                        (*full_q_keys)[ifull], member_q_internal, kSymmetryCoordTol))
+                    || !same_internal_kpoint((*full_q_keys)[ifull], member_q_internal))
                 {
                     continue;
                 }
