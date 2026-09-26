@@ -80,7 +80,8 @@ jobs:
             -DLIBRPA_USE_LIBRI=OFF -DLIBRPA_ENABLE_FORTRAN_BIND=OFF -DLIBRPA_ENABLE_TEST=ON -DENABLE_GREENX_CTEST=OFF
           cmake --build $BUILDDIR -j 2
           cmake --build $BUILDDIR --target test
-          cd regression_tests && ./run_regression.py full ../$BUILDDIR/chi0_main.exe -d workspace_np4 -n 4 | tee test_np4.log
+          cd regression_tests && ./run_regression.py full ../$BUILDDIR/chi0_main.exe \
+            -d workspace_np4 -n 4 --mpiexec "$I_MPI_ROOT/bin/mpiexec -n 4" | tee test_np4.log
       - name: Build/test LibRPA with LibRI
         run: |
           source /opt/intel/oneapi/setvars.sh
@@ -90,8 +91,12 @@ jobs:
             -DLIBRPA_USE_LIBRI=ON -DLIBRPA_ENABLE_FORTRAN_BIND=OFF -DLIBRPA_ENABLE_TEST=ON -DENABLE_GREENX_CTEST=OFF
           cmake --build $BUILDDIR -j 2
           cmake --build $BUILDDIR --target test
-          cd regression_tests && ./run_regression.py full ../$BUILDDIR/chi0_main.exe -d workspace_libri_np4 --use-libri -n 4 | tee test_libri_np4.log
-          ./run_regression.py full ../$BUILDDIR/chi0_main.exe -d workspace_libri_si_np1 --use-libri -n 1 --only g0w0_aims_Si_sym_libri | tee test_libri_si_np1.log
+          cd regression_tests && ./run_regression.py full ../$BUILDDIR/chi0_main.exe \
+            -d workspace_libri_np4 --use-libri -n 4 \
+            --mpiexec "$I_MPI_ROOT/bin/mpiexec -n 4" | tee test_libri_np4.log
+          ./run_regression.py full ../$BUILDDIR/chi0_main.exe \
+            -d workspace_libri_si_np1 --use-libri -n 1 \
+            --only g0w0_aims_Si_sym_libri | tee test_libri_si_np1.log
       - name: Build Fortran binding (with LibRI), static library, and binding test
         run: |
           source /opt/intel/oneapi/setvars.sh
