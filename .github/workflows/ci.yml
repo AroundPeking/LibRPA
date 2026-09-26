@@ -74,6 +74,7 @@ jobs:
       - name: Build/test LibRPA without LibRI
         run: |
           source /opt/intel/oneapi/setvars.sh
+          export I_MPI_FABRICS=shm
           export BUILDDIR="build"
           CXX=mpiicpx FC=ifx cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=ON -B $BUILDDIR \
             -DLIBRPA_USE_LIBRI=OFF -DLIBRPA_ENABLE_FORTRAN_BIND=OFF -DLIBRPA_ENABLE_TEST=ON -DENABLE_GREENX_CTEST=OFF
@@ -83,6 +84,7 @@ jobs:
       - name: Build/test LibRPA with LibRI
         run: |
           source /opt/intel/oneapi/setvars.sh
+          export I_MPI_FABRICS=shm
           export BUILDDIR="build_libri"
           CXX=mpiicpx FC=ifx cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=ON -B $BUILDDIR \
             -DLIBRPA_USE_LIBRI=ON -DLIBRPA_ENABLE_FORTRAN_BIND=OFF -DLIBRPA_ENABLE_TEST=ON -DENABLE_GREENX_CTEST=OFF
@@ -93,6 +95,7 @@ jobs:
       - name: Build Fortran binding (with LibRI), static library, and binding test
         run: |
           source /opt/intel/oneapi/setvars.sh
+          export I_MPI_FABRICS=shm
           export BUILDDIR="build_fortran_bind"
           CXX=mpiicpx FC=mpiifx cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF -B $BUILDDIR \
             -DLIBRPA_USE_LIBRI=ON -DLIBRPA_ENABLE_FORTRAN_BIND=ON -DLIBRPA_ENABLE_TEST=ON -DENABLE_GREENX_CTEST=OFF -DLIBRPA_ENABLE_CPP_TEST=OFF
