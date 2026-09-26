@@ -101,6 +101,19 @@ jobs:
             -DLIBRPA_USE_LIBRI=ON -DLIBRPA_ENABLE_FORTRAN_BIND=ON -DLIBRPA_ENABLE_TEST=ON -DENABLE_GREENX_CTEST=OFF -DLIBRPA_ENABLE_CPP_TEST=OFF
           cmake --build $BUILDDIR -j 2
           cmake --build $BUILDDIR --target test
+      - name: Report failure diagnostics
+        if: failure()
+        run: |
+          for log in \
+            build/CMakeFiles/CMakeError.log \
+            build/CMakeFiles/CMakeOutput.log \
+            build/Testing/Temporary/LastTest.log \
+            regression_tests/test_np4.log; do
+            if [[ -f "$log" ]]; then
+              message=$(tail -n 100 "$log" | tr '\n' ' ' | cut -c1-5000)
+              echo "::error file=$log,line=1,title=CI diagnostics::$message"
+            fi
+          done
       - name: Save last test log for check
         if: always()
         uses: actions/upload-artifact@v4
