@@ -62,6 +62,9 @@ void driver::task_sternheimer_rpa()
     const bool replace_gamma_headwing =
         driver::get_bool(driver::opts.replace_w_head) &&
         (driver::opts.option_dielect_func == 3 || driver::opts.option_dielect_func == 4);
+    // Analytic head/wing is the Gamma replacement, so it must keep Gamma in the q sum
+    // even when the ordinary direct Gamma route is disabled.
+    const bool include_gamma_in_rpa = driver_params.use_rpa_gamma || replace_gamma_headwing;
     const std::string headwing_mode(driver::opts.rpa_headwing_mode);
     if (replace_gamma_headwing && headwing_mode == "qavg" && driver::opts.option_dielect_func != 3)
     {
@@ -123,7 +126,7 @@ void driver::task_sternheimer_rpa()
                                                     driver_params.fn_sternheimer_qpoints);
         qpoints = read_sternheimer_qpoint_manifest(manifest_path);
     }
-    if (!driver_params.use_rpa_gamma && manifest_path.empty())
+    if (!include_gamma_in_rpa && manifest_path.empty())
     {
         throw std::runtime_error(
             "use_rpa_gamma=false requires fn_sternheimer_qpoints with the full q mesh");
@@ -132,7 +135,7 @@ void driver::task_sternheimer_rpa()
     {
         if (!matrix_only)
         {
-            validate_sternheimer_gamma_contract(qpoints, driver_params.use_rpa_gamma);
+            validate_sternheimer_gamma_contract(qpoints, include_gamma_in_rpa);
         }
         partial_manifest_path =
             librpa_int::is_absolute_path(driver_params.fn_sternheimer_partial_manifest)
@@ -144,7 +147,7 @@ void driver::task_sternheimer_rpa()
     {
         validate_sternheimer_qpoint_input_files(
             qpoints, driver_params.input_dir, driver_params.prefix_coul_full,
-            driver_params.prefix_sternheimer_chi0, driver::opts.nfreq, driver_params.use_rpa_gamma);
+            driver_params.prefix_sternheimer_chi0, driver::opts.nfreq, include_gamma_in_rpa);
     }
 
     SternheimerPartialResponseGroups partial_groups;
@@ -287,14 +290,14 @@ void driver::task_sternheimer_rpa()
         }
         const auto reconstructed = reconstruct_sternheimer_partial_responses(
             symmetry, layouts, atom_nabf, full_kpoints, qpoints, groups, driver::opts.nfreq,
-            driver_params.use_rpa_gamma, lmax, fixed_q_routes.empty() ? nullptr : &fixed_q_routes,
+            include_gamma_in_rpa, lmax, fixed_q_routes.empty() ? nullptr : &fixed_q_routes,
             matrix_only, qstar_routes.empty() ? nullptr : &qstar_routes);
 
         if (write_symmetry_diagnostic && mpi_comm_global_h.is_root())
         {
             for (const auto &point : qpoints)
             {
-                if (!driver_params.use_rpa_gamma && is_rpa_gamma_point(point.q))
+                if (!include_gamma_in_rpa && is_rpa_gamma_point(point.q))
                 {
                     continue;
                 }
@@ -359,7 +362,7 @@ void driver::task_sternheimer_rpa()
 
         for (const auto &point : qpoints)
         {
-            if (!driver_params.use_rpa_gamma && is_rpa_gamma_point(point.q))
+            if (!include_gamma_in_rpa && is_rpa_gamma_point(point.q))
             {
                 continue;
             }
@@ -478,7 +481,7 @@ void driver::task_sternheimer_rpa()
     {
         for (const auto &point : qpoints)
         {
-            if (!driver_params.use_rpa_gamma && is_rpa_gamma_point(point.q))
+            if (!include_gamma_in_rpa && is_rpa_gamma_point(point.q))
             {
                 continue;
             }
@@ -574,7 +577,7 @@ void driver::task_sternheimer_rpa()
         {
             lib_printf("| RPA head/wing mode = %s\n", headwing_mode.c_str());
         }
-        if (!driver_params.use_rpa_gamma)
+        if (!include_gamma_in_rpa)
         {
             for (const auto &point : qpoints)
             {
@@ -624,7 +627,7 @@ void driver::task_sternheimer_rpa()
             lib_printf("| q Sternheimer EcRPA: %20.12e %20.12e\n", qresult.energy.real(),
                        qresult.energy.imag());
         }
-        if (!driver_params.use_rpa_gamma)
+        if (!include_gamma_in_rpa)
         {
             lib_printf("| Total Sternheimer EcRPA excluding q=0: %20.12e %20.12e\n",
                        total_energy.real(), total_energy.imag());
