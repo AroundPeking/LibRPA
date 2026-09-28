@@ -42,7 +42,7 @@ computed, not supplied as an adjustable physical parameter.
 | Fixed-Gamma-basis finite-`q` diagnostics | `output_2d_finite_q_diagnostics` | 37/19-column schema, Gamma-first ordering, and projection tests | `strict2d_finite_q_scaling.csv` and `strict2d_gamma_wc_blocks.csv` | Connected as opt-in diagnostics; disabled state leaves the production q ordering unchanged. |
 | `q`-shell classification | post-processing of diagnostic CSV | post-processing tests | shell-resolved table/plot | Diagnostic only; keep out of default physics path. |
 | Alpha-response and omega-zero overrides | archived diagnostic snapshots | archived tests only | explicitly named diagnostic files | Diagnostic experiments only; do not merge environment overrides into production. |
-| ABACUS high-`L` Ewald central term | ABACUS producer executable, outside LibRPA | producer regression | executable hash and `librpa_2d_coulomb_head.dat` | External producer gate; audit exact executable for every material. |
+| ABACUS high-`L` Ewald central term | ABACUS producer executable, outside LibRPA | producer regression | executable hash and `librpa_2d_coulomb_head.txt` | External producer gate; audit exact executable for every material. |
 
 ## Historical Snapshot Fingerprints
 
