@@ -30,6 +30,12 @@ void driver::task_rpa()
     // Using the internal work function, avoid copying between vector and double*
     double corr = 0.0;
     std::vector<std::complex<double>> corr_irk(n_ibz_kpoints);
+    const bool finite_temperature =
+        driver::opts.tfgrids_type == LIBRPA_TFGRID_FD_MATSUBARA;
+    const char *correlation_label = finite_temperature
+                                        ? "Finite-temperature RPA correlation grand potential Omega_c"
+                                        : "RPA correlation energy";
+    const char *total_label = finite_temperature ? "Omega_c^RPA" : "EcRPA";
 
     const bool compute_headwing =
         driver::get_bool(driver::opts.replace_w_head) &&
@@ -71,7 +77,7 @@ void driver::task_rpa()
     mpi_comm_global_h.barrier();
     if (mpi_comm_global_h.is_root() && librpa_int::global::should_output())
     {
-        lib_printf("RPA correlation energy (Hartree)\n");
+        lib_printf("%s (Hartree)\n", correlation_label);
         lib_printf("| Weighted contribution from each k:\n");
 
         const auto old_precision = std::cout.precision();
@@ -90,13 +96,14 @@ void driver::task_rpa()
         std::cout.precision(old_precision);
         if (have_q_coordinates)
         {
-            lib_printf("| Gamma EcRPA contribution: %20.12e %20.12e\n", qtotals.gamma.real(),
-                       qtotals.gamma.imag());
-            lib_printf("| Total EcRPA including q=0: %20.12e\n", corr);
-            lib_printf("| Total EcRPA excluding q=0: %20.12e\n", corr_excluding_gamma);
+            lib_printf("| Gamma %s contribution: %20.12e %20.12e\n", total_label,
+                       qtotals.gamma.real(), qtotals.gamma.imag());
+            lib_printf("| Total %s including q=0: %20.12e\n", total_label, corr);
+            lib_printf("| Total %s excluding q=0: %20.12e\n", total_label,
+                       corr_excluding_gamma);
         }
         lib_printf("| use_rpa_gamma = %s\n", driver_params.use_rpa_gamma ? "true" : "false");
-        lib_printf("| Total EcRPA: %18.9f\n", selected_corr);
+        lib_printf("| Total %s: %18.9f\n", total_label, selected_corr);
     }
     if (mpi_comm_global_h.is_root())
     {
@@ -106,8 +113,8 @@ void driver::task_rpa()
             if (std::abs(im) > 1.e-3)
                 lib_printf(
                     LIBRPA_VERBOSE_WARN,
-                    "Warning: considerable imaginary part of EcRPA = %f\n at IBZ k-point %d\n", im,
-                    i_irk + 1);
+                    "Warning: considerable imaginary part of %s = %f\n at IBZ k-point %d\n",
+                    total_label, im, i_irk + 1);
         }
     }
     mpi_comm_global_h.barrier();

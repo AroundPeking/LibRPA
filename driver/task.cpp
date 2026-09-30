@@ -28,7 +28,7 @@ static std::map<std::string, task_t> map_lowstr_task{
 };
 
 static std::map<task_t, std::string> map_task_lowstr{
-    {task_t::RPA,           "RPA correlation energy"},
+    {task_t::RPA,           "RPA trace-log correlation quantity"},
     {task_t::SternheimerRPA, "Sternheimer RPA correlation energy from response matrices"},
     {task_t::G0W0,          "One-shot GW for quasi-paricle energies"},
     {task_t::G0W0_band,     "One-shot GW for quasi-paricle energies"},
