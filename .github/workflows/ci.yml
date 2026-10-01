@@ -69,8 +69,30 @@ jobs:
           export BUILDDIR="build"
           CXX=mpiicpx FC=ifx cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=ON -B $BUILDDIR \
             -DLIBRPA_USE_LIBRI=OFF -DLIBRPA_ENABLE_FORTRAN_BIND=OFF -DLIBRPA_ENABLE_TEST=ON -DENABLE_GREENX_CTEST=OFF
-          cmake --build $BUILDDIR -j 2
-          cmake --build $BUILDDIR --target test
+          set +e
+          cmake --build $BUILDDIR -j 2 2>&1 | tee ci_no_libri_build.log
+          build_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$build_status" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          for line in Path("ci_no_libri_build.log").read_text(errors="replace").splitlines()[-120:]:
+              print("::error file=.github/workflows/ci.yml,line=72::" + line)
+          PY
+            exit "$build_status"
+          fi
+          set +e
+          cmake --build $BUILDDIR --target test 2>&1 | tee ci_no_libri_test.log
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$test_status" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          for line in Path("ci_no_libri_test.log").read_text(errors="replace").splitlines()[-120:]:
+              print("::error file=.github/workflows/ci.yml,line=73::" + line)
+          PY
+            exit "$test_status"
+          fi
           cd regression_tests && ./run_regression.py full ../$BUILDDIR/chi0_main.exe -d workspace_np4 -n 4 | tee test_np4.log
       - name: Build/test LibRPA with LibRI
         run: |
