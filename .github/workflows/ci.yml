@@ -78,9 +78,46 @@ jobs:
           export BUILDDIR="build_libri"
           CXX=mpiicpx FC=ifx cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=ON -B $BUILDDIR \
             -DLIBRPA_USE_LIBRI=ON -DLIBRPA_ENABLE_FORTRAN_BIND=OFF -DLIBRPA_ENABLE_TEST=ON -DENABLE_GREENX_CTEST=OFF
-          cmake --build $BUILDDIR -j 2
-          cmake --build $BUILDDIR --target test
-          cd regression_tests && ./run_regression.py full ../$BUILDDIR/chi0_main.exe -d workspace_libri_np4 --use-libri -n 4 | tee test_libri_np4.log
+          set +e
+          cmake --build $BUILDDIR -j 2 2>&1 | tee ci_libri_build.log
+          build_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$build_status" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          lines = Path("ci_libri_build.log").read_text(errors="replace").splitlines()
+          hits = [i for i, line in enumerate(lines) if " error:" in line.lower() or "fatal error" in line.lower() or "undefined reference" in line.lower()]
+          for i in hits[-12:]:
+              block = "\n".join(lines[max(0, i - 8):min(len(lines), i + 36)])
+              block = block.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print("::error file=.github/workflows/ci.yml,line=103::" + block)
+          PY
+            exit "$build_status"
+          fi
+          set +e
+          cmake --build $BUILDDIR --target test 2>&1 | tee ci_libri_test.log
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$test_status" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          for line in Path("ci_libri_test.log").read_text(errors="replace").splitlines()[-160:]:
+              print("::error file=.github/workflows/ci.yml,line=104::" + line)
+          PY
+            exit "$test_status"
+          fi
+          set +e
+          cd regression_tests && ./run_regression.py full ../$BUILDDIR/chi0_main.exe -d workspace_libri_np4 --use-libri -n 4 2>&1 | tee test_libri_np4.log
+          regression_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$regression_status" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          for line in Path("test_libri_np4.log").read_text(errors="replace").splitlines()[-160:]:
+              print("::error file=.github/workflows/ci.yml,line=105::" + line)
+          PY
+            exit "$regression_status"
+          fi
       - name: Build Fortran binding (with LibRI), static library, and binding test
         run: |
           source /opt/intel/oneapi/setvars.sh
