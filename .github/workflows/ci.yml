@@ -77,7 +77,7 @@ jobs:
             python3 - <<'PY'
           from pathlib import Path
           lines = Path("ci_no_libri_build.log").read_text(errors="replace").splitlines()
-          hits = [i for i, line in enumerate(lines) if any(word in line.lower() for word in ("error", "fatal", "failed", "undefined reference", "ninja:"))]
+          hits = [i for i, line in enumerate(lines) if any(word in line.lower() for word in ("error:", "fatal error", "undefined reference", "failed:", "failed to", "ninja:", "make: ***"))]
           selected = sorted(set(j for i in hits[-40:] for j in range(max(0, i - 2), min(len(lines), i + 3))))
           for i in selected:
               print("::error file=.github/workflows/ci.yml,line=72::" + lines[i])
