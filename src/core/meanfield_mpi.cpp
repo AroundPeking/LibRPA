@@ -394,6 +394,11 @@ std::map<double, std::map<Vector3_Order<int>, ComplexMatrix>> get_gf_cplx_imagti
 
     const int n_aos = mf.get_n_aos();
     const size_t size = n_aos * n_aos;
+    const bool use_tetrahedron_transform = tetrahedron_source_g_requested();
+    std::map<Vector3_Order<int>, std::vector<std::complex<double>>> tetra_weights;
+    if (use_tetrahedron_transform)
+        for (const auto& R : Rs)
+            tetra_weights.emplace(R, build_tetrahedron_fourier_weights(kfrac_list, R));
 
     const auto iks_local = mf.get_iks_local();
     // global::ofs_myid << "iks_local " << iks_local << std::endl;
@@ -435,8 +440,18 @@ std::map<double, std::map<Vector3_Order<int>, ComplexMatrix>> get_gf_cplx_imagti
                 {
                     const auto R_this = Rs_all.data() + pid * nR_max * 3 + iR * 3;
                     const auto &kf = kfrac_list[iks_local[ik]];
-                    auto ang = - (kf.x * R_this[0] + kf.y * R_this[1] + kf.z * R_this[2]) * TWO_PI;
-                    transmat(ik, iR) = cplxdb{cos(ang), sin(ang)};
+                    if (use_tetrahedron_transform)
+                    {
+                        const Vector3_Order<int> R{R_this[0], R_this[1], R_this[2]};
+                        transmat(ik, iR) =
+                            tetra_weights.at(R).at(iks_local[ik]) *
+                            static_cast<double>(mf.get_n_kpoints());
+                    }
+                    else
+                    {
+                        auto ang = -(kf.x * R_this[0] + kf.y * R_this[1] + kf.z * R_this[2]) * TWO_PI;
+                        transmat(ik, iR) = cplxdb{cos(ang), sin(ang)};
+                    }
                 }
             }
             rmat = 0.0;

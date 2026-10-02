@@ -534,6 +534,11 @@ static int get_k_index_(const std::vector<Vector3_Order<double>> &klist, const V
     return -1;
 }
 
+int PeriodicBoundaryData::get_k_index_scf(const Vector3_Order<double> &k) const
+{
+    return get_k_index_(this->klist, k);
+}
+
 int PeriodicBoundaryData::get_k_index_full(const Vector3_Order<double> &k) const
 {
     return get_k_index_(this->klist_full, k);

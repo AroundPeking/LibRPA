@@ -697,6 +697,23 @@ void test_static_intraband_auxiliary_response_is_complete_outer_product()
     }
 }
 
+void test_finite_temperature_static_metallic_2d_radial_weights()
+{
+    matrix_m<std::complex<double>> regular_schur(3, 3, MAJOR::COL);
+    regular_schur.zero_out();
+    const std::vector<double> qx{1.0};
+    const std::vector<double> qy{0.0};
+    const std::vector<double> weights{2.0 * librpa_int::PI};
+    const std::vector<double> qmax{1.0};
+    const auto result = librpa_int::compute_metallic_static_2d_inverse_weights(
+        regular_schur, 2.0, 0.0, {}, qx, qy, weights, qmax, librpa_int::PI, 64);
+    require_double_close(result.bare_qminus1, 2.0, 1.0e-12);
+    require_double_close(result.volume, 1.0, 1.0e-12);
+    require_double_close(result.inverse_q1.real(), 0.5, 1.0e-12);
+    require_double_close(result.inverse_q2[0].real(), 1.0 / 3.0, 1.0e-12);
+    require_double_close(result.inverse_q3(0, 0).real(), 0.25, 1.0e-12);
+}
+
 double midpoint_radial_integral(const double qmax, const int intervals,
                                 const std::function<double(double)> &integrand)
 {
@@ -2536,10 +2553,14 @@ void test_fd_degenerate_headwing_is_basis_invariant(const BlacsCtxtHandler &blac
 {
 #ifdef LIBRPA_USE_LIBRI
     const std::vector<double> omega{0.0, 0.5, 1.0};
-    const double kbt = 0.25;
+    const double kbt = 1.0e-4;
     const double unit = 2.0 * std::sqrt(2.0 * librpa_int::TWO_PI);
-    for (const double angle : {0.0, 0.37, librpa_int::PI / 4.0})
-        for (const bool time_reversal_pair : {false, true})
+    const double minus_fd_derivative = -librpa_int::fermi_dirac_derivative(0.0, kbt);
+    // 4.2e-7 Ha reproduces a numerical Dirac-point splitting while remaining
+    // far below the finite-temperature scale used in this test.
+    for (const double splitting : {0.0, 4.2e-7})
+        for (const double angle : {0.0, 0.37, librpa_int::PI / 4.0})
+            for (const bool time_reversal_pair : {false, true})
         {
             const int nk = time_reversal_pair ? 4 : 1;
             const int active_k = time_reversal_pair ? 1 : 0;
@@ -2553,6 +2574,8 @@ void test_fd_degenerate_headwing_is_basis_invariant(const BlacsCtxtHandler &blac
                 }
             mf.set_fermi_dirac_reference(
                 librpa_int::make_fermi_dirac_reference(kbt, 0.0, 2.0, 1.e-12));
+            mf.get_eigenvals()[0](active_k, 0) = -splitting / 2.0;
+            mf.get_eigenvals()[0](active_k, 1) = splitting / 2.0;
             auto &wfc = mf.get_eigenvectors()[0][0][active_k];
             wfc.create(2, 2);
             const auto phase = std::polar(1.0, 0.43);
@@ -2607,10 +2630,10 @@ void test_fd_degenerate_headwing_is_basis_invariant(const BlacsCtxtHandler &blac
             df.init(0.0, empty_vq);
             df.cal_head();
             df.cal_wing(coefficients, 0.0, empty_vq);
-            assert_complex_close(df.get_static_intraband_chi0v_wing_mu().at(0), -4.0 * unit,
-                                 1.e-11);
+            assert_complex_close(df.get_static_intraband_chi0v_wing_mu().at(0),
+                                 -4.0 * unit * minus_fd_derivative, 1.e-7);
             require_double_close(df.get_static_intraband_screening_wavevector_squared(),
-                                 16.0 * librpa_int::PI, 1.e-11);
+                                 16.0 * librpa_int::PI * minus_fd_derivative, 1.e-7);
             librpa_int::RpaHeadwingSettings settings;
             for (int iw = 1; iw < 3; ++iw)
             {
@@ -2618,14 +2641,16 @@ void test_fd_degenerate_headwing_is_basis_invariant(const BlacsCtxtHandler &blac
                 const auto input = df.get_sternheimer_rpa_headwing_input(iw, settings);
                 for (int a = 0; a < 3; ++a)
                 {
-                    const auto expected_wing = std::complex<double>(0., 4.0 * unit) *
+                    const auto expected_wing =
+                        std::complex<double>(0., 4.0 * unit * minus_fd_derivative) *
                                                (time_reversal_pair ? 0.0 : a + 1.0) / omega[iw];
-                    assert_complex_close(input.wing_mu(0, a), expected_wing, 1.e-10);
+                    assert_complex_close(input.wing_mu(0, a), expected_wing, 1.e-7);
                     for (int b = 0; b < 3; ++b)
                         assert_complex_close(head(a, b),
                                              (time_reversal_pair ? -8.0 : -16.0) * librpa_int::PI *
-                                                 (a + 1.0) * (b + 1.0) / (omega[iw] * omega[iw]),
-                                             1.e-10);
+                                                 minus_fd_derivative * (a + 1.0) * (b + 1.0) /
+                                                 (omega[iw] * omega[iw]),
+                                             1.e-7);
                 }
             }
         }
@@ -4067,6 +4092,7 @@ int main(int argc, char *argv[])
         test_strict_2d_radial_integrals_match_analytic_values();
         test_strict_2d_radial_integrals_are_stable_at_zero_and_small_a();
         test_static_intraband_auxiliary_response_is_complete_outer_product();
+        test_finite_temperature_static_metallic_2d_radial_weights();
         test_metallic_static_3d_head_only_radial_integrals_match_direct_quadrature();
         test_metallic_static_3d_converts_internal_reciprocal_units();
         test_metallic_static_3d_inverse_weights_recover_head_only_wc();

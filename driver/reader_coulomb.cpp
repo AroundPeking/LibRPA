@@ -45,6 +45,34 @@ static const librpa_int::AtomicBasis &target_coulomb_basis(const bool use_shrink
     return use_shrink_basis ? ds->basis_aux_shrink : ds->basis_aux;
 }
 
+// Coulomb-v1 file.iq is one-based in the Coulomb representative list.  The
+// public input API takes an index in the loaded SCF k-list, so translate once
+// at this boundary instead of allowing the two index spaces to be confused.
+static int scf_k_index_for_coulomb_v1_iq(const int iq0)
+{
+    const auto ds = librpa_int::api::get_dataset_instance(driver::h.get_c_handler());
+    const auto &pbc = ds->pbc;
+    if (iq0 < 0 || static_cast<std::size_t>(iq0) >= pbc.klist_coul.size())
+    {
+        std::ostringstream ss;
+        ss << "Coulomb v1 iq=" << (iq0 + 1)
+           << " is outside klist_coul (size=" << pbc.klist_coul.size() << ")";
+        throw std::logic_error(ss.str());
+    }
+
+    const auto &qvec = pbc.klist_coul[static_cast<std::size_t>(iq0)];
+    const int ik = pbc.get_k_index_scf(qvec);
+    if (ik < 0)
+    {
+        std::ostringstream ss;
+        ss << "Coulomb v1 representative iq=" << (iq0 + 1)
+           << " is not present in the loaded SCF k-list: ("
+           << qvec.x << ", " << qvec.y << ", " << qvec.z << ")";
+        throw std::logic_error(ss.str());
+    }
+    return ik;
+}
+
 //! Check if Coulomb matrix data file is in ASCII text or unformatted binary format
 bool check_coulomb_file_binary(const string &file_path)
 {
@@ -638,7 +666,7 @@ std::vector<CoulombV1CollectedRead> collect_coulomb_v1_reads(
     return collected;
 }
 
-void set_coulomb_v1_atom_pair(const int iq0,
+void set_coulomb_v1_atom_pair(const int ik,
                               const std::size_t I,
                               const std::size_t J,
                               const int naux_i,
@@ -650,12 +678,12 @@ void set_coulomb_v1_atom_pair(const int iq0,
     if (is_cut_coulomb)
     {
         driver::h.set_aux_cut_coulomb_k_atom_pair_packed(
-            iq0, I, J, naux_i, naux_j, block, threshold);
+            ik, I, J, naux_i, naux_j, block, threshold);
     }
     else
     {
         driver::h.set_aux_bare_coulomb_k_atom_pair_packed(
-            iq0, I, J, naux_i, naux_j, block, threshold);
+            ik, I, J, naux_i, naux_j, block, threshold);
     }
 }
 
@@ -675,6 +703,7 @@ void process_complex_coulomb_v1_read(const CoulombV1File &file,
     std::vector<std::complex<double>> buffer(nvalues);
     file.read_bytes(read.offset, buffer.data(),
                     checked_size_from_offset(read.nbytes, file.path));
+    const int ik = scf_k_index_for_coulomb_v1_iq(iq0);
 
     for (const auto &block: read.blocks)
     {
@@ -682,7 +711,7 @@ void process_complex_coulomb_v1_read(const CoulombV1File &file,
             (block.offset - read.offset) /
                 static_cast<MPI_Offset>(sizeof(std::complex<double>)),
             file.path);
-        set_coulomb_v1_atom_pair(iq0, block.I, block.J,
+        set_coulomb_v1_atom_pair(ik, block.I, block.J,
                                  file.atom_naux[block.I],
                                  file.atom_naux[block.J],
                                  buffer.data() + value_offset,
@@ -705,6 +734,7 @@ void process_real_coulomb_v1_read(const CoulombV1File &file,
     std::vector<double> buffer(nvalues);
     file.read_bytes(read.offset, buffer.data(),
                     checked_size_from_offset(read.nbytes, file.path));
+    const int ik = scf_k_index_for_coulomb_v1_iq(iq0);
 
     for (const auto &block: read.blocks)
     {
@@ -716,7 +746,7 @@ void process_real_coulomb_v1_read(const CoulombV1File &file,
         {
             complex_block[i] = std::complex<double>(buffer[value_offset + i], 0.0);
         }
-        set_coulomb_v1_atom_pair(iq0, block.I, block.J,
+        set_coulomb_v1_atom_pair(ik, block.I, block.J,
                                  file.atom_naux[block.I],
                                  file.atom_naux[block.J],
                                  complex_block.data(),
@@ -822,6 +852,7 @@ size_t read_Vq_full_v1(const string &dir_path, const string &vq_fprefix,
         CoulombV1File file(path);
         validate_coulomb_v1_basis(file, basis_aux);
         const int iq0 = file.iq - 1;
+        const int ik = scf_k_index_for_coulomb_v1_iq(iq0);
 
         for (std::size_t I = 0; I != basis_aux.n_atoms; ++I)
         {
@@ -832,13 +863,13 @@ size_t read_Vq_full_v1(const string &dir_path, const string &vq_fprefix,
                 if (is_cut_coulomb)
                 {
                     driver::h.set_aux_cut_coulomb_k_atom_pair_packed(
-                        iq0, I, J, basis_aux[I], basis_aux[J],
+                        ik, I, J, basis_aux[I], basis_aux[J],
                         block.data(), driver::opts.vq_threshold);
                 }
                 else
                 {
                     driver::h.set_aux_bare_coulomb_k_atom_pair_packed(
-                        iq0, I, J, basis_aux[I], basis_aux[J],
+                        ik, I, J, basis_aux[I], basis_aux[J],
                         block.data(), driver::opts.vq_threshold);
                 }
             }

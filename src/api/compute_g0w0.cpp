@@ -690,6 +690,7 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
         std::string preflight_error;
         try
         {
+            const bool strict_2d = opts.use_2d_dielectric == LIBRPA_SWITCH_ON;
             const auto unsupported = [](const char *reason)
             {
                 throw LIBRPA_RUNTIME_ERROR(
@@ -710,13 +711,12 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
                 pds->basis_aux.n_atoms != pds->basis_wfc.n_atoms ||
                 pds->basis_wfc.nb_total != pds->mf.get_n_aos())
                 unsupported("complete geometry and atom-local AO/auxiliary bases are required");
-            if (opts.use_2d_dielectric == LIBRPA_SWITCH_ON || opts.option_dielect_func == 4 ||
-                opts.read_sigc_mat_rf == LIBRPA_SWITCH_ON ||
-                opts.use_scalapack_gw_wc != LIBRPA_SWITCH_ON ||
+            if (opts.option_dielect_func == 4 ||
+                (!strict_2d && opts.use_scalapack_gw_wc != LIBRPA_SWITCH_ON) ||
                 opts.use_gpu_replace_scalapack == LIBRPA_SWITCH_ON ||
-                std::getenv("LIBRPA_DIRECT_COMPRESSED_SIGC_DIAG"))
+                (!strict_2d && std::getenv("LIBRPA_DIRECT_COMPRESSED_SIGC_DIAG")))
                 unsupported(
-                    "use the 3D CPU screened-matrix route without legacy restart or diagnostics");
+                    "use the 3D CPU screened-matrix route without unsupported diagnostics");
             if (opts.parallel_routing != LIBRPA_ROUTING_AUTO &&
                 opts.parallel_routing != LIBRPA_ROUTING_LIBRI)
                 unsupported("the thermal self-energy uses LibRI routing");

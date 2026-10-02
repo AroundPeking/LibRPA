@@ -481,6 +481,8 @@ typedef struct
     int rpa_headwing_body_start;
 
     //! Flag of reading NAO correlation self-energy matrix in real-space/frequency form.
+    //! A finite-temperature restart also requires its independent fermionic grid and
+    //! collected SigcRF block-ownership metadata.
     //! @par Default
     //! false
     //! @par Status

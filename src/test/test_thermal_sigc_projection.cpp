@@ -226,6 +226,9 @@ void check_projection(MAJOR major, int ownership, bool k_distributed = false)
                         }
         return result;
     };
+    // A restartable SigcRF checkpoint must contain fully collected rather than
+    // rank-local additive blocks. The writer performs that collection.
+    gw.output_sigc_mat_rf = ownership == 0;
     gw.sigc_diag_is_ik_f_KS[9][7][123] = {Z(3, 4)};
     auto caller_result = make_result();
     mf.set_fermi_dirac_reference(make_fermi_dirac_reference(std::nextafter(1 / BETA, 1.0),
@@ -368,18 +371,43 @@ void check_projection(MAJOR major, int ownership, bool k_distributed = false)
                                 error = std::max(error, std::abs(expected - block(a, b)));
                 }
     require(error < 3e-12, "complex KS projection differs from explicit ordered-pair MPI sum");
+
+    if (ownership == 0)
+    {
+        G0W0 restarted(mf, ao, pbc, symmetry, response_grid, context, context, desc, k_distributed,
+                       false);
+        restarted.read_sigc(output_directory);
+        require(restarted.is_rspace_built() && restarted.get_sigc_frequency_nodes() == positive,
+                "thermal SigcRF restart did not restore its independent fermionic grid");
+        restarted.build_sigc_matrix_KS_band_blacs(mf.get_eigenvectors(), targets, remap,
+                                                  global_blacs);
+        double restart_error = 0;
+        if (rank == 0)
+            for (int spin = 0; spin < 2; ++spin)
+                for (int k = 0; k < 2; ++k)
+                    for (const double omega : positive)
+                        for (int band = 0; band < 3; ++band)
+                            restart_error = std::max(
+                                restart_error,
+                                std::abs(gw.sigc_diag_is_ik_f_KS.at(spin).at(k).at(omega).at(band) -
+                                         restarted.sigc_diag_is_ik_f_KS.at(spin).at(k).at(omega).at(
+                                             band)));
+        require(restart_error < 3e-12, "thermal SigcRF restart changed the projected self-energy");
+    }
+
     bool grid_ok = true;
     const auto grid_path = std::string(output_directory) + "/Sigc_fermionic_grid.dat";
     if (rank == 0)
     {
         std::ifstream grid(grid_path);
         std::string line;
-        bool independent = false, beta_ok = false, mu_ok = false;
+        bool independent = false, collected = false, beta_ok = false, mu_ok = false;
         int rows = 0;
         while (std::getline(grid, line))
         {
             independent =
                 independent || line.find("Independent positive fermionic") != std::string::npos;
+            collected = collected || line.find("collected_unique_blocks true") != std::string::npos;
             std::istringstream values(line);
             if (!line.empty() && line[0] == '#')
             {
@@ -398,7 +426,8 @@ void check_projection(MAJOR major, int ownership, bool k_distributed = false)
                       rows < 2 && label == (rows == 0 ? 0 : 2) && omega == frequency(label);
             ++rows;
         }
-        grid_ok = grid_ok && independent && beta_ok && mu_ok && rows == 2;
+        grid_ok = grid_ok && independent && (ownership != 0 || collected) && beta_ok && mu_ok &&
+                  rows == 2;
     }
     require(grid_ok, "thermal Sigma output did not identify its independent FD frequency grid");
     require(response_grid.get_freq_nodes() == bosons && response_grid.get_time_nodes() == times &&
@@ -410,6 +439,17 @@ void check_projection(MAJOR major, int ownership, bool k_distributed = false)
             "reset did not restore legacy frequency selection");
     mf.clear_fermi_dirac_reference();
     rejects([&] { gw.set_thermal_sigc(make_result()); }, "thermal import accepted no FD reference");
+    if (ownership == 0)
+        for (int spin = 0; spin < 2; ++spin)
+            for (int ifreq = 0; ifreq < 2; ++ifreq)
+            {
+                char filename[160];
+                std::snprintf(filename, sizeof(filename),
+                              "%s/SigcRF_ispin_%02d_s_00_iomega_%03d_myid_%05d.dat",
+                              output_directory, spin, ifreq, rank);
+                std::remove(filename);
+            }
+    MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0)
     {
         std::remove(grid_path.c_str());

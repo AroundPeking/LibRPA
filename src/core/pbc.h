@@ -102,6 +102,8 @@ public:
 
     // Getting
     int get_R_index(const Vector3_Order<int> &R) const;
+    //! Get the index of a loaded SCF k-point in klist.
+    int get_k_index_scf(const Vector3_Order<double> &k) const;
     int get_k_index_full(const Vector3_Order<double> &k) const;
     int get_k_index_ibz(const Vector3_Order<double> &k) const;
     int get_n_cells_bvk() const { return period.x * period.y * period.z; }

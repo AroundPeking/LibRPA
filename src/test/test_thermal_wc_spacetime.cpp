@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -21,6 +23,124 @@ using Complex = std::complex<double>;
 using WcFrequency = std::map<double, std::map<Vector3_Order<double>, Matz>>;
 using WcTime = std::map<double, std::map<Vector3_Order<int>, Matz>>;
 const double PI = std::acos(-1.0);
+
+void require(bool condition, const std::string& message);
+
+double sinc(const double value)
+{
+    return std::abs(value) < 1.0e-14 ? 1.0 : std::sin(value) / value;
+}
+
+double gamma_cell_fourier_moment(const PeriodicBoundaryData& pbc,
+                                 const Vector3_Order<int>& r)
+{
+    return sinc(PI * r.x / pbc.period.x) * sinc(PI * r.y / pbc.period.y) *
+           sinc(PI * r.z / pbc.period.z);
+}
+
+int wrap_periodic_index(const int index, const int period)
+{
+    const int remainder = index % period;
+    return remainder < 0 ? remainder + period : remainder;
+}
+
+std::map<Vector3_Order<int>, Complex> high_order_tetra_q_to_r_reference(
+    const PeriodicBoundaryData& pbc, const std::vector<Complex>& nodal_values)
+{
+    using GridKey = std::array<int, 3>;
+    require(nodal_values.size() == pbc.klist_full.size(),
+            "high-order tetrahedron reference has inconsistent nodal values");
+
+    std::map<GridKey, std::size_t> q_index;
+    for (std::size_t iq = 0; iq < pbc.kfrac_list_full.size(); ++iq)
+    {
+        const auto& q = pbc.kfrac_list_full[iq];
+        const std::array<double, 3> scaled{
+            q.x * pbc.period.x, q.y * pbc.period.y, q.z * pbc.period.z};
+        GridKey key{};
+        for (int axis = 0; axis != 3; ++axis)
+        {
+            const double nearest = std::round(scaled[axis]);
+            require(std::abs(scaled[axis] - nearest) < 1.0e-10,
+                    "high-order tetrahedron reference requires a mesh-aligned q point");
+            const int period = axis == 0 ? pbc.period.x : axis == 1 ? pbc.period.y : pbc.period.z;
+            key[axis] = wrap_periodic_index(static_cast<int>(nearest), period);
+        }
+        require(q_index.emplace(key, iq).second,
+                "high-order tetrahedron reference found duplicate q point");
+    }
+    require(q_index.size() == nodal_values.size(),
+            "high-order tetrahedron reference did not index the complete q grid");
+
+    static constexpr std::array<std::array<std::array<int, 3>, 4>, 6> tetra_vertices{{
+        {{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {1, 1, 1}}},
+        {{{0, 0, 0}, {1, 1, 0}, {0, 1, 0}, {1, 1, 1}}},
+        {{{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {1, 1, 1}}},
+        {{{0, 0, 0}, {0, 1, 1}, {0, 0, 1}, {1, 1, 1}}},
+        {{{0, 0, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}}},
+        {{{0, 0, 0}, {1, 0, 1}, {1, 0, 0}, {1, 1, 1}}}}};
+    static constexpr std::array<double, 8> gauss_x{{
+        -0.9602898564975363, -0.7966664774136267, -0.5255324099163290,
+        -0.1834346424956498, 0.1834346424956498,  0.5255324099163290,
+        0.7966664774136267,  0.9602898564975363}};
+    static constexpr std::array<double, 8> gauss_w{{
+        0.1012285362903763, 0.2223810344533745, 0.3137066458778873,
+        0.3626837833783620, 0.3626837833783620, 0.3137066458778873,
+        0.2223810344533745, 0.1012285362903763}};
+
+    std::map<Vector3_Order<int>, Complex> result;
+    for (const auto& r : pbc.Rlist) result.emplace(r, Complex{0.0, 0.0});
+    const double cell_jacobian = 1.0 / static_cast<double>(nodal_values.size());
+    for (int ix = 0; ix < pbc.period.x; ++ix)
+        for (int iy = 0; iy < pbc.period.y; ++iy)
+            for (int iz = 0; iz < pbc.period.z; ++iz)
+                for (const auto& tetra : tetra_vertices)
+                {
+                    std::array<std::size_t, 4> vertices{};
+                    std::array<Vector3_Order<double>, 4> coordinates{};
+                    for (int vertex = 0; vertex != 4; ++vertex)
+                    {
+                        const auto& offset = tetra[vertex];
+                        const GridKey key{wrap_periodic_index(ix + offset[0], pbc.period.x),
+                                          wrap_periodic_index(iy + offset[1], pbc.period.y),
+                                          wrap_periodic_index(iz + offset[2], pbc.period.z)};
+                        vertices[vertex] = q_index.at(key);
+                        coordinates[vertex] = {
+                            static_cast<double>(ix + offset[0]) / pbc.period.x,
+                            static_cast<double>(iy + offset[1]) / pbc.period.y,
+                            static_cast<double>(iz + offset[2]) / pbc.period.z};
+                    }
+                    for (std::size_t iu = 0; iu < gauss_x.size(); ++iu)
+                        for (std::size_t iv = 0; iv < gauss_x.size(); ++iv)
+                            for (std::size_t iw = 0; iw < gauss_x.size(); ++iw)
+                            {
+                                const double u = 0.5 * (gauss_x[iu] + 1.0);
+                                const double v = 0.5 * (gauss_x[iv] + 1.0);
+                                const double w = 0.5 * (gauss_x[iw] + 1.0);
+                                const std::array<double, 4> lambda{{
+                                    1.0 - u, u * (1.0 - v), u * v * (1.0 - w), u * v * w}};
+                                Vector3_Order<double> point{0.0, 0.0, 0.0};
+                                Complex value{0.0, 0.0};
+                                for (int vertex = 0; vertex != 4; ++vertex)
+                                {
+                                    point.x += lambda[vertex] * coordinates[vertex].x;
+                                    point.y += lambda[vertex] * coordinates[vertex].y;
+                                    point.z += lambda[vertex] * coordinates[vertex].z;
+                                    value += lambda[vertex] * nodal_values[vertices[vertex]];
+                                }
+                                const double weight = cell_jacobian * gauss_w[iu] * gauss_w[iv] *
+                                                      gauss_w[iw] * u * u * v / 8.0;
+                                for (auto& [r, integral] : result)
+                                {
+                                    const double angle = -2.0 * PI *
+                                                         (point.x * r.x + point.y * r.y +
+                                                          point.z * r.z);
+                                    integral += weight * std::exp(Complex(0.0, angle)) * value;
+                                }
+                            }
+                }
+    return result;
+}
 
 void require(bool condition, const std::string& message)
 {
@@ -277,6 +397,140 @@ void check_stream_matches_full(const MpiCommHandler& comm)
     require(streamed_input.empty(), "stream transform retained consumed q-space matrices");
 }
 
+void check_unfolded_rlist_preserves_bvk_values(const MpiCommHandler& comm)
+{
+    const auto pbc = make_pbc(2, 2, 2);
+    const auto transform = make_transform();
+    const auto wc = make_samples(pbc, transform, comm.myid, 2, 3, COL, true);
+    const auto reference = thermal_Wc_freq_q_to_tau_R(comm, wc, pbc, transform);
+    const auto unfolded_grid = build_tetrahedron_unfolded_grid(pbc.period, {3, 3, 3});
+    const auto unfolded =
+        thermal_Wc_freq_q_to_tau_R(comm, wc, pbc, transform, unfolded_grid.Rlist);
+
+    for (const auto& time : transform.get_times())
+    {
+        const auto& expanded_blocks = unfolded.at(time);
+        require(expanded_blocks.size() == unfolded_grid.Rlist.size(),
+                "unfolded Wc transform dropped a real-space image");
+        for (const auto& r : pbc.Rlist)
+        {
+            const auto& actual = expanded_blocks.at(r);
+            const auto& expected = reference.at(time).at(r);
+            for (std::size_t element = 0; element < actual.size(); ++element)
+                close(actual.ptr()[element], expected.ptr()[element]);
+        }
+        for (const auto& r : unfolded_grid.Rlist)
+        {
+            const auto& block = expanded_blocks.at(r);
+            for (std::size_t element = 0; element < block.size(); ++element)
+                require(std::isfinite(block.ptr()[element].real()) &&
+                            std::isfinite(block.ptr()[element].imag()),
+                        "unfolded Wc transform produced a nonfinite image");
+        }
+    }
+}
+
+void check_tetra_q2r_diagnostic(const MpiCommHandler& comm)
+{
+    auto pbc = make_pbc(2, 2, 2);
+    for (const auto& q : pbc.klist_full) pbc.kfrac_list_full.push_back(pbc.latvec * q);
+    const auto transform = ThermalGWTransform::from_quadrature(
+        2.0, {0.4}, {1.0}, {0}, {0});
+    WcFrequency wc;
+    for (const auto& q : pbc.klist_full)
+    {
+        const auto qfrac = pbc.latvec * q;
+        Matz matrix(1, 1, ROW);
+        matrix(0, 0) = 0.7 + 0.31 * qfrac.x * qfrac.x + 0.17 * qfrac.y * qfrac.z;
+        wc[0.0].emplace(q, std::move(matrix));
+    }
+
+    unsetenv("LIBRPA_TETRA_Q2R_DIAG");
+    const auto uniform = thermal_Wc_freq_q_to_tau_R(comm, wc, pbc, transform);
+    setenv("LIBRPA_TETRA_Q2R_DIAG", "enabled", 1);
+    const auto tetra = thermal_Wc_freq_q_to_tau_R(comm, wc, pbc, transform);
+
+    const Vector3_Order<int> gamma_r{0, 0, 0};
+    require(std::isfinite(tetra.at(0.4).at(gamma_r)(0, 0).real()) &&
+                std::isfinite(tetra.at(0.4).at(gamma_r)(0, 0).imag()),
+            "tetra q->R diagnostic produced a nonfinite Gamma-R value");
+    const auto nonzero_iter = std::find_if(
+        pbc.Rlist.cbegin(), pbc.Rlist.cend(), [](const auto& r) { return r != Vector3_Order<int>{0, 0, 0}; });
+    require(nonzero_iter != pbc.Rlist.cend(), "tetra diagnostic needs a nonzero R point");
+    const auto& nonzero_r = *nonzero_iter;
+    require(std::abs(tetra.at(0.4).at(nonzero_r)(0, 0) - uniform.at(0.4).at(nonzero_r)(0, 0)) >
+                1.0e-8,
+            "tetra q->R diagnostic did not change the nonzero-R quadrature");
+
+    // A metallic static Gamma sample is a Gamma-cell average, not a nodal value.
+    // With all other q samples zero, a corrected transform must keep the average as
+    // a single Gamma-cell contribution instead of spreading it through adjacent tetrahedra.
+    WcFrequency gamma_cell_average;
+    for (const auto& q : pbc.klist_full)
+    {
+        Matz matrix(1, 1, ROW);
+        matrix(0, 0) = q == Vector3_Order<double>{0.0, 0.0, 0.0} ? 1.0 : 0.0;
+        gamma_cell_average[0.0].emplace(q, std::move(matrix));
+    }
+    unsetenv("LIBRPA_TETRA_GAMMA_CELL_AVERAGE");
+    const auto naive_gamma = thermal_Wc_freq_q_to_tau_R(comm, gamma_cell_average, pbc, transform);
+    setenv("LIBRPA_TETRA_GAMMA_CELL_AVERAGE", "enabled", 1);
+    const auto corrected_gamma =
+        thermal_Wc_freq_q_to_tau_R(comm, gamma_cell_average, pbc, transform);
+    close(corrected_gamma.at(0.4).at(nonzero_r)(0, 0),
+          Complex(gamma_cell_fourier_moment(pbc, nonzero_r) /
+                      static_cast<double>(pbc.klist_full.size()) /
+                      transform.get_beta_ha_inv(),
+                  0.0));
+    require(std::abs(naive_gamma.at(0.4).at(nonzero_r)(0, 0) -
+                    corrected_gamma.at(0.4).at(nonzero_r)(0, 0)) >
+                1.0e-8,
+            "Gamma-cell average was still treated as an ordinary tetrahedron vertex");
+
+    unsetenv("LIBRPA_TETRA_GAMMA_CELL_AVERAGE");
+    auto streamed_input = wc;
+    std::map<Vector3_Order<int>, Matz> streamed;
+    thermal_Wc_freq_q_to_tau_R_stream(
+        comm, streamed_input, pbc, transform,
+        [&](std::size_t index, double time, std::map<Vector3_Order<int>, Matz>&& value)
+        {
+            require(index == 0 && time == 0.4, "tetra stream callback metadata changed");
+            streamed = std::move(value);
+        });
+    close(streamed.at(nonzero_r)(0, 0), tetra.at(0.4).at(nonzero_r)(0, 0));
+    require(streamed_input.empty(), "tetra stream did not consume q-space samples");
+    unsetenv("LIBRPA_TETRA_Q2R_DIAG");
+    unsetenv("LIBRPA_TETRA_GAMMA_CELL_AVERAGE");
+}
+
+void check_tetra_q2r_matches_high_order_reference(const MpiCommHandler& comm)
+{
+    auto pbc = make_pbc(2, 2, 2);
+    for (const auto& q : pbc.klist_full) pbc.kfrac_list_full.push_back(pbc.latvec * q);
+    const auto transform = ThermalGWTransform::from_quadrature(2.0, {0.4}, {1.0}, {0}, {0});
+    WcFrequency wc;
+    std::vector<Complex> nodal_values;
+    nodal_values.reserve(pbc.klist_full.size());
+    for (const auto& q : pbc.klist_full)
+    {
+        const auto qfrac = pbc.latvec * q;
+        const Complex value{0.7 + 0.31 * qfrac.x * qfrac.x + 0.17 * qfrac.y * qfrac.z,
+                            -0.23 + 0.29 * qfrac.x - 0.11 * qfrac.y * qfrac.z};
+        nodal_values.push_back(value);
+        Matz matrix(1, 1, ROW);
+        matrix(0, 0) = value;
+        wc[0.0].emplace(q, std::move(matrix));
+    }
+    const auto expected = high_order_tetra_q_to_r_reference(pbc, nodal_values);
+
+    setenv("LIBRPA_TETRA_Q2R_DIAG", "enabled", 1);
+    unsetenv("LIBRPA_TETRA_GAMMA_CELL_AVERAGE");
+    const auto tetra = thermal_Wc_freq_q_to_tau_R(comm, wc, pbc, transform);
+    for (const auto& r : pbc.Rlist)
+        close(tetra.at(0.4).at(r)(0, 0), expected.at(r) / transform.get_beta_ha_inv());
+    unsetenv("LIBRPA_TETRA_Q2R_DIAG");
+}
+
 void check_batch_boundaries(const MpiCommHandler& comm, MAJOR major, bool empty_owner = false)
 {
     auto pbc = make_pbc(5, 13, 1);
@@ -382,6 +636,12 @@ int main(int argc, char** argv)
         {"all ranks zero local size", [&] { check_success(comm, COL, 0, 0); }},
         {"streaming time transform matches resident transform",
          [&] { check_stream_matches_full(comm); }},
+        {"unfolded R-list preserves BvK Wc values",
+         [&] { check_unfolded_rlist_preserves_bvk_values(comm); }},
+        {"periodic tetra q-to-R diagnostic",
+         [&] { check_tetra_q2r_diagnostic(comm); }},
+        {"tetra q-to-R matches independent high-order reference",
+         [&] { check_tetra_q2r_matches_high_order_reference(comm); }},
         {"default zero matrix needs no backing storage",
          [&]
          {

@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <utility>
 
 #include "../math/fitting.h"
@@ -43,9 +44,110 @@ using RI::Communicate_Tensors_Map_Judge::comm_map2_first;
 
 static bool headwing_numerically_degenerate(double first, double second)
 {
-    // Resolve equality at floating-point precision, not at a smearing/broadening scale.
+    // The optical-limit velocity formula is singular within a numerically split
+    // degenerate subspace.  This absolute energy threshold is far below thermal
+    // broadening and covers eigensolver/file-serialization splittings only.
     const double scale = std::max({1.0, std::abs(first), std::abs(second)});
-    return std::abs(first - second) <= 64.0 * std::numeric_limits<double>::epsilon() * scale;
+    constexpr double numerical_splitting_ha = 1.0e-6;
+    return std::abs(first - second) <=
+           std::max(64.0 * std::numeric_limits<double>::epsilon() * scale,
+                    numerical_splitting_ha * scale);
+}
+
+// The optical-limit intraband expression is a trace over each degenerate
+// subspace. Once a numerical splitting is classified as degenerate, all of
+// its states must share one Fermi-Dirac derivative; otherwise the result
+// depends on the arbitrary eigenvectors returned inside that subspace.
+class HeadwingDegenerateGroups
+{
+  public:
+    HeadwingDegenerateGroups() = default;
+
+    HeadwingDegenerateGroups(const matrix &eigenvalues, const int ik, const int n_states)
+        : group_for_band_(as_size(n_states), -1), group_energy_()
+    {
+        if (ik < 0 || ik >= eigenvalues.nr || eigenvalues.nc != n_states)
+            throw std::invalid_argument("head/wing degenerate groups have inconsistent eigenvalues");
+
+        for (int seed = 0; seed != n_states; ++seed)
+        {
+            if (group_for_band_.at(as_size(seed)) >= 0) continue;
+            const int group = static_cast<int>(group_energy_.size());
+            std::vector<int> members{seed};
+            group_for_band_.at(as_size(seed)) = group;
+            for (std::size_t cursor = 0; cursor != members.size(); ++cursor)
+            {
+                const int member = members.at(cursor);
+                for (int candidate = 0; candidate != n_states; ++candidate)
+                {
+                    if (group_for_band_.at(as_size(candidate)) >= 0 ||
+                        !headwing_numerically_degenerate(eigenvalues(ik, member),
+                                                          eigenvalues(ik, candidate)))
+                        continue;
+                    group_for_band_.at(as_size(candidate)) = group;
+                    members.push_back(candidate);
+                }
+            }
+
+            double mean_energy = 0.0;
+            for (const int member : members) mean_energy += eigenvalues(ik, member);
+            group_energy_.push_back(mean_energy / static_cast<double>(members.size()));
+        }
+    }
+
+    bool same(const int first, const int second) const
+    {
+        return group_for_band_.at(as_size(first)) == group_for_band_.at(as_size(second));
+    }
+
+    double mean_energy(const int band) const
+    {
+        return group_energy_.at(as_size(group_for_band_.at(as_size(band))));
+    }
+
+  private:
+    std::vector<int> group_for_band_;
+    std::vector<double> group_energy_;
+};
+
+bool metallic_static_2d_body_audit_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_METAL_2D_STATIC_BODY_AUDIT accepts only the explicit value 'enabled'");
+}
+
+std::size_t checked_static_body_audit_vertex_count(const int n_spin, const int n_kpoints,
+                                                   const int n_auxiliary, const int n_states)
+{
+    if (n_spin <= 0 || n_kpoints <= 0 || n_auxiliary <= 0 || n_states <= 0)
+        throw std::invalid_argument("static 2D body audit dimensions must be positive");
+    const auto checked_multiply = [](const std::size_t lhs, const std::size_t rhs) {
+        if (lhs > std::numeric_limits<std::size_t>::max() / rhs)
+            throw std::overflow_error("static 2D body audit vertex count overflows size_t");
+        return lhs * rhs;
+    };
+    const auto count = checked_multiply(
+        checked_multiply(checked_multiply(static_cast<std::size_t>(n_spin),
+                                          static_cast<std::size_t>(n_kpoints)),
+                         static_cast<std::size_t>(n_auxiliary)),
+        checked_multiply(static_cast<std::size_t>(n_states), static_cast<std::size_t>(n_states)));
+    constexpr std::size_t maximum_vertices = 48ULL * 1024ULL * 1024ULL;
+    if (count > maximum_vertices)
+        throw std::runtime_error(
+            "static 2D body audit exceeds its 48M-complex diagnostic vertex limit");
+    return count;
+}
+
+std::size_t static_body_audit_vertex_index(const int ispin, const int ik, const int mu,
+                                           const int iband, const int jband, const int n_kpoints,
+                                           const int n_auxiliary, const int n_states)
+{
+    return (((static_cast<std::size_t>(ispin) * n_kpoints + ik) * n_auxiliary + mu) * n_states +
+            iband) *
+               n_states +
+           jband;
 }
 
 std::string strict_2d_omega0_diagnostic_directory(const char *value)
@@ -563,6 +665,131 @@ std::complex<double> compute_metallic_static_3d_rpa_trace_log_average(
         integral += angular_weights[idir] * radial_integral;
     }
     return integral / gamma_cell_volume;
+}
+
+MetallicStatic2dInverseWeights compute_metallic_static_2d_inverse_weights(
+    const matrix_m<std::complex<double>> &regular_schur, const std::complex<double> schur_qminus1,
+    const std::complex<double> schur_q0_constant,
+    const std::array<std::complex<double>, 3> &schur_q0, const std::vector<double> &qx,
+    const std::vector<double> &qy, const std::vector<double> &angular_weights,
+    const std::vector<double> &qmax, const double gamma_cell_area, const int radial_order)
+{
+    if (regular_schur.nr() != 3 || regular_schur.nc() != 3)
+        throw std::invalid_argument("metallic static 2D inverse weights require a 3x3 Schur tensor");
+    if (qx.empty() || qx.size() != qy.size() || qx.size() != angular_weights.size() ||
+        qx.size() != qmax.size())
+        throw std::invalid_argument("metallic static 2D inverse-weight grids are inconsistent");
+    if (!std::isfinite(gamma_cell_area) || gamma_cell_area <= 0.0 ||
+        std::abs(schur_qminus1) <= std::numeric_limits<double>::min())
+        throw std::invalid_argument("metallic static 2D inverse-weight coefficients are invalid");
+
+    const auto radial_grid = gauss_legendre_unit_interval(radial_order);
+    const auto &radial_nodes = radial_grid.first;
+    const auto &radial_weights = radial_grid.second;
+    MetallicStatic2dInverseWeights result;
+    result.inverse_q3.zero_out();
+    for (std::size_t idir = 0; idir != qx.size(); ++idir)
+    {
+        const double nx = qx[idir], ny = qy[idir];
+        const double norm_squared = nx * nx + ny * ny;
+        if (!std::isfinite(angular_weights[idir]) || angular_weights[idir] < 0.0 ||
+            !std::isfinite(qmax[idir]) || qmax[idir] <= 0.0 ||
+            std::abs(norm_squared - 1.0) > 1.0e-10)
+            throw std::invalid_argument("metallic static 2D angular grid contains invalid data");
+
+        const auto schur_regular_direction =
+            nx * (nx * regular_schur(0, 0) + ny * regular_schur(0, 1)) +
+            ny * (nx * regular_schur(1, 0) + ny * regular_schur(1, 1));
+        const auto schur_q0_direction = schur_q0_constant + nx * schur_q0[0] + ny * schur_q0[1];
+        const double upper_q = qmax[idir];
+        const double angular_weight = angular_weights[idir];
+        result.bare_qminus1 += angular_weight * upper_q / gamma_cell_area;
+        result.volume += angular_weight * upper_q * upper_q / (2.0 * gamma_cell_area);
+        for (int irad = 0; irad != radial_order; ++irad)
+        {
+            const double q = upper_q * radial_nodes[as_size(irad)];
+            const auto denominator = schur_qminus1 + schur_q0_direction * q +
+                                     schur_regular_direction * q * q;
+            if (std::abs(denominator) <= std::numeric_limits<double>::min())
+                throw std::runtime_error("metallic static 2D inverse-weight Schur denominator is singular");
+            const double common = angular_weight * upper_q * radial_weights[as_size(irad)] /
+                                  gamma_cell_area;
+            const auto inverse_denominator = common / denominator;
+            const double q2 = q * q;
+            const double q3 = q2 * q;
+            result.inverse_q1 += inverse_denominator * q;
+            for (int alpha = 0; alpha != 3; ++alpha)
+            {
+                const double direction_alpha = alpha == 0 ? nx : (alpha == 1 ? ny : 0.0);
+                result.inverse_q2[as_size(alpha)] += inverse_denominator * q2 * direction_alpha;
+                for (int beta = 0; beta != 3; ++beta)
+                {
+                    const double direction_beta = beta == 0 ? nx : (beta == 1 ? ny : 0.0);
+                    result.inverse_q3(alpha, beta) +=
+                        inverse_denominator * q3 * direction_alpha * direction_beta;
+                }
+            }
+        }
+    }
+    return result;
+}
+
+std::complex<double> compute_metallic_static_2d_rpa_trace_log_average(
+    const matrix_m<std::complex<double>> &regular_chi0v_head,
+    const matrix_m<std::complex<double>> &regular_schur, const std::complex<double> trace_body,
+    const std::complex<double> logdet_body, const double screening_coefficient,
+    const std::complex<double> schur_qminus1, const std::complex<double> schur_q0_constant,
+    const std::array<std::complex<double>, 3> &schur_q0, const std::vector<double> &qx,
+    const std::vector<double> &qy, const std::vector<double> &angular_weights,
+    const std::vector<double> &qmax, const double gamma_cell_area, const int radial_order)
+{
+    if (regular_chi0v_head.nr() != 3 || regular_chi0v_head.nc() != 3 ||
+        regular_schur.nr() != 3 || regular_schur.nc() != 3)
+        throw std::invalid_argument("metallic static 2D RPA average requires 3x3 head tensors");
+    if (qx.empty() || qx.size() != qy.size() || qx.size() != angular_weights.size() ||
+        qx.size() != qmax.size())
+        throw std::invalid_argument("metallic static 2D RPA Gamma-cell grids are inconsistent");
+    if (!std::isfinite(screening_coefficient) || screening_coefficient <= 0.0 ||
+        !std::isfinite(gamma_cell_area) || gamma_cell_area <= 0.0 ||
+        std::abs(schur_qminus1) <= std::numeric_limits<double>::min())
+        throw std::invalid_argument("metallic static 2D RPA screening coefficients are invalid");
+
+    const auto radial_grid = gauss_legendre_unit_interval(radial_order);
+    const auto &radial_nodes = radial_grid.first;
+    const auto &radial_weights = radial_grid.second;
+    std::complex<double> integral = 0.0;
+    for (std::size_t idir = 0; idir != qx.size(); ++idir)
+    {
+        const double nx = qx[idir], ny = qy[idir];
+        const double norm_squared = nx * nx + ny * ny;
+        if (!std::isfinite(angular_weights[idir]) || angular_weights[idir] < 0.0 ||
+            !std::isfinite(qmax[idir]) || qmax[idir] <= 0.0 ||
+            std::abs(norm_squared - 1.0) > 1.0e-10)
+            throw std::invalid_argument("metallic static 2D RPA angular grid contains invalid data");
+        const auto head_direction =
+            nx * (nx * regular_chi0v_head(0, 0) + ny * regular_chi0v_head(0, 1)) +
+            ny * (nx * regular_chi0v_head(1, 0) + ny * regular_chi0v_head(1, 1));
+        const auto schur_regular_direction =
+            nx * (nx * regular_schur(0, 0) + ny * regular_schur(0, 1)) +
+            ny * (nx * regular_schur(1, 0) + ny * regular_schur(1, 1));
+        const auto schur_q0_direction = schur_q0_constant + nx * schur_q0[0] + ny * schur_q0[1];
+        const double upper_q = qmax[idir];
+        const double common_prefactor = angular_weights[idir] * upper_q / gamma_cell_area;
+        for (int irad = 0; irad != radial_order; ++irad)
+        {
+            const double q = upper_q * radial_nodes[as_size(irad)];
+            const auto denominator = schur_qminus1 + schur_q0_direction * q +
+                                     schur_regular_direction * q * q;
+            if (std::abs(denominator) <= std::numeric_limits<double>::min())
+                throw std::runtime_error("metallic static 2D RPA Schur denominator is singular");
+            const auto remainder = denominator / schur_qminus1;
+            const auto integrand = trace_body + logdet_body + head_direction * q +
+                                   std::log(schur_qminus1 / q) + std::log(remainder) -
+                                   screening_coefficient / q;
+            integral += common_prefactor * radial_weights[as_size(irad)] * q * integrand;
+        }
+    }
+    return integral;
 }
 
 static void print_wing_mu_k_contribution_gram(
@@ -1705,6 +1932,8 @@ void diele_func::init_wing(double coulomb_eigen_threshold, const atpair_k_cplx_m
     this->wing.clear();
     this->static_intraband_chi0v_wing_mu_.clear();
     this->static_intraband_chi0v_wing_.clear();
+    this->static_intraband_chi0_mu_body_audit_.clear();
+    this->static_intraband_chi0v_body_audit_.clear();
     this->n_nonsingular = n_abf;
     this->Lind.resize(3, 3, MAJOR::COL);
     this->strict_2d_lind_by_freq.clear();
@@ -1828,20 +2057,23 @@ void diele_func::cal_head_full_bz()
         const auto &velocity = this->velocity_[ispin];
         for (const int ik : kpoints)
         {
+            const auto degenerate_groups =
+                fd_reference.enabled
+                    ? HeadwingDegenerateGroups(eigenvalues, ik, n_states)
+                    : HeadwingDegenerateGroups{};
             if (fd_reference.enabled)
             {
                 for (int iband = 0; iband != n_states; ++iband)
                 {
                     const double minus_fd_derivative = -fermi_dirac_derivative(
-                        eigenvalues(ik, iband) - fd_reference.chemical_potential_ha,
+                        degenerate_groups.mean_energy(iband) - fd_reference.chemical_potential_ha,
                         fd_reference.kbt_ha);
                     static_intraband_screening_wavevector_squared_ +=
                         full_bz_kpoint_weight * minus_fd_derivative;
                     // Tr_P(v_alpha v_beta) includes off-diagonal degenerate states.
                     for (int jband = 0; jband != n_states; ++jband)
                     {
-                        if (!headwing_numerically_degenerate(eigenvalues(ik, iband),
-                                                             eigenvalues(ik, jband)))
+                        if (!degenerate_groups.same(iband, jband))
                             continue;
                         for (int alpha = 0; alpha != 3; ++alpha)
                         {
@@ -1870,9 +2102,7 @@ void diele_func::cal_head_full_bz()
                 {
                     if (iocc < iunocc)
                     {
-                        if (fd_reference.enabled &&
-                            headwing_numerically_degenerate(eigenvalues(ik, iocc),
-                                                            eigenvalues(ik, iunocc)))
+                        if (fd_reference.enabled && degenerate_groups.same(iocc, iunocc))
                             continue;
                         double egap =
                             (eigenvalues(ik, iocc) - eigenvalues(ik, iunocc));  // * HA2EV;
@@ -1964,6 +2194,11 @@ void diele_func::cal_head_symmetric()
             const auto &star = librpa_int::find_symmetry_kstar_for_ibz_kpoint(ctx, k_ibz);
             if (star.members.empty()) throw std::runtime_error("cal_head_symmetric: empty k-star");
 
+            const auto degenerate_groups =
+                fd_reference.enabled
+                    ? HeadwingDegenerateGroups(eigenvalues, ik_ibz, n_states)
+                    : HeadwingDegenerateGroups{};
+
             const int ispinor_bra = 0;
             const ComplexMatrix *C_ibz_ptr = meanfield_df.find_wfc(ispin, ispinor_bra, ik_ibz);
             const int have_local = (C_ibz_ptr != nullptr) ? 1 : 0;
@@ -2006,15 +2241,14 @@ void diele_func::cal_head_symmetric()
                     for (int iband = 0; iband != n_states; ++iband)
                     {
                         const double minus_fd_derivative = -fermi_dirac_derivative(
-                            eigenvalues(ik_ibz, iband)
+                            degenerate_groups.mean_energy(iband)
                                 - fd_reference.chemical_potential_ha,
                             fd_reference.kbt_ha);
                         static_intraband_screening_wavevector_squared_ +=
                             full_bz_kpoint_weight * minus_fd_derivative;
                         for (int jband = 0; jband != n_states; ++jband)
                         {
-                            if (!headwing_numerically_degenerate(eigenvalues(ik_ibz, iband),
-                                                                 eigenvalues(ik_ibz, jband)))
+                            if (!degenerate_groups.same(iband, jband))
                                 continue;
                             for (int alpha = 0; alpha != 3; ++alpha)
                             {
@@ -2047,9 +2281,7 @@ void diele_func::cal_head_symmetric()
                     for (int iunocc = 0; iunocc != n_states; iunocc++)
                     {
                         if (iocc >= iunocc) continue;
-                        if (fd_reference.enabled &&
-                            headwing_numerically_degenerate(eigenvalues(ik_ibz, iocc),
-                                                            eigenvalues(ik_ibz, iunocc)))
+                        if (fd_reference.enabled && degenerate_groups.same(iocc, iunocc))
                             continue;
                         const double factor =
                             bz_weight_scale * headwing_transition_weight(wg(ik_ibz, iocc),
@@ -2267,6 +2499,13 @@ void diele_func::cal_wing(const Cs_LRI &Cs_data, double coulomb_eigen_threshold,
     const bool can_sym =
         can_try_sym && librpa_int::can_restore_symmetry_kstar_meanfield(
                            *symmetry_context_, wfc_layouts, meanfield_df, kfrac_band, atom_nw);
+    if (metallic_static_2d_body_audit_requested(
+            std::getenv("LIBRPA_METAL_2D_STATIC_BODY_AUDIT")) &&
+        can_sym)
+    {
+        throw std::runtime_error(
+            "static 2D body audit currently requires an explicit full-BZ head/wing path");
+    }
 
     if (debug && use_symmetry && comm_h.is_root())
     {
@@ -2317,6 +2556,16 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
     const auto kpoints_local = headwing_local_kpoints(nk, use_kblacs ? kblacs_ctxt_ : nullptr);
     const auto &fd_reference = meanfield_df.get_fermi_dirac_reference();
     const double full_bz_kpoint_weight = 1.0 / static_cast<double>(nk);
+    const bool static_body_audit =
+        metallic_static_2d_body_audit_requested(std::getenv("LIBRPA_METAL_2D_STATIC_BODY_AUDIT"));
+    std::vector<std::complex<double>> static_body_vertices;
+    if (static_body_audit)
+    {
+        if (!fd_reference.enabled)
+            throw std::logic_error("static 2D body audit requires finite-temperature occupations");
+        static_body_vertices.assign(
+            checked_static_body_audit_vertex_count(n_spin, nk, n_abf, n_states), 0.0);
+    }
 
     // IJR distribution to IJ distribution
     ArrayDesc desc_nao_nao(wing_blacs_h);
@@ -2340,10 +2589,30 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
                 auto &desc_nband_nband = desc_C_mnk.first;
                 auto &C_mnk = desc_C_mnk.second;
                 print_wing_cmnk_probe("full_bz", mu, kfrac_band[ik], desc_nband_nband, C_mnk);
+                if (static_body_audit)
+                {
+                    for (int iband = 0; iband != n_states; ++iband)
+                    {
+                        const int loc_m = desc_nband_nband.indx_g2l_r(iband);
+                        if (loc_m < 0) continue;
+                        for (int jband = 0; jband != n_states; ++jband)
+                        {
+                            const int loc_n = desc_nband_nband.indx_g2l_c(jband);
+                            if (loc_n < 0) continue;
+                            static_body_vertices.at(static_body_audit_vertex_index(
+                                isp, ik, mu, iband, jband, nk, n_abf, n_states)) =
+                                C_mnk(loc_m, loc_n);
+                        }
+                    }
+                }
                 const bool use_soc_wing = meanfield_df.get_n_spinor() > 1;
                 const auto &eigenvalues = this->meanfield_df.get_eigenvals();
                 const auto &wg = this->meanfield_df.get_weight()[isp];
                 const auto &velocity = this->velocity_[isp][ik];
+                const auto degenerate_groups =
+                    fd_reference.enabled
+                        ? HeadwingDegenerateGroups(eigenvalues[isp], ik, n_states)
+                        : HeadwingDegenerateGroups{};
                 auto *wing_mu_for_mu = local_wing_mu.data() + as_size(mu) * this->omega.size() * 3;
                 auto *wing_mu_k_iomega0_for_mu =
                     local_wing_mu_k_iomega0.data() + as_size(ik * n_abf + mu) * 3;
@@ -2355,15 +2624,14 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
                         const int loc_m = desc_nband_nband.indx_g2l_r(iband);
                         if (loc_m < 0) continue;
                         const double minus_fd_derivative = -fermi_dirac_derivative(
-                            eigenvalues[isp](ik, iband) - fd_reference.chemical_potential_ha,
+                            degenerate_groups.mean_energy(iband)
+                                - fd_reference.chemical_potential_ha,
                             fd_reference.kbt_ha);
                         // Tr_P(C_mu v_alpha), with each distributed C_mn owned once.
                         for (int jband = 0; jband != n_states; ++jband)
                         {
                             const int loc_n = desc_nband_nband.indx_g2l_c(jband);
-                            if (loc_n < 0 ||
-                                !headwing_numerically_degenerate(eigenvalues[isp](ik, iband),
-                                                                 eigenvalues[isp](ik, jband)))
+                            if (loc_n < 0 || !degenerate_groups.same(iband, jband))
                                 continue;
                             if (iband == jband)
                                 local_static_intraband_wing_mu[as_size(mu)] -=
@@ -2391,8 +2659,7 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
 
                         const double egap =
                             eigenvalues[isp](ik, iunocc) - eigenvalues[isp](ik, iocc);
-                        if (fd_reference.enabled && headwing_numerically_degenerate(
-                                eigenvalues[isp](ik, iocc), eigenvalues[isp](ik, iunocc))) continue;
+                        if (fd_reference.enabled && degenerate_groups.same(iocc, iunocc)) continue;
                         double factor1 = 0.0;
                         double factor2 = 0.0;
                         if (fd_reference.enabled)
@@ -2443,7 +2710,57 @@ void diele_func::cal_wing_full_bz(const Cs_LRI &Cs_data, double coulomb_eigen_th
     if (fd_reference.enabled)
         MPI_Allreduce(MPI_IN_PLACE, local_static_intraband_wing_mu.data(), n_abf,
                       MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, MPI_COMM_WORLD);
+    if (static_body_audit)
+        MPI_Allreduce(MPI_IN_PLACE, static_body_vertices.data(),
+                      static_cast<int>(static_body_vertices.size()), MPI_CXX_DOUBLE_COMPLEX,
+                      MPI_SUM, MPI_COMM_WORLD);
     profiler.stop("Comm_wing");
+
+    if (static_body_audit)
+    {
+        std::vector<std::complex<double>> body_mu(as_size(n_abf) * as_size(n_abf), 0.0);
+        for (int isp = 0; isp != n_spin; ++isp)
+        {
+            const auto &eigenvalues = meanfield_df.get_eigenvals()[isp];
+            for (int ik = 0; ik != nk; ++ik)
+            {
+                const HeadwingDegenerateGroups groups(eigenvalues, ik, n_states);
+                for (int iband = 0; iband != n_states; ++iband)
+                {
+                    const double minus_fd_derivative = -fermi_dirac_derivative(
+                        groups.mean_energy(iband) - fd_reference.chemical_potential_ha,
+                        fd_reference.kbt_ha);
+                    for (int jband = 0; jband != n_states; ++jband)
+                    {
+                        if (!groups.same(iband, jband)) continue;
+                        const double weight = -full_bz_kpoint_weight * minus_fd_derivative;
+                        for (int mu = 0; mu != n_abf; ++mu)
+                        {
+                            const auto vertex_mu = static_body_vertices.at(
+                                static_body_audit_vertex_index(isp, ik, mu, iband, jband, nk,
+                                                               n_abf, n_states));
+                            for (int nu = 0; nu != n_abf; ++nu)
+                            {
+                                const auto vertex_nu = static_body_vertices.at(
+                                    static_body_audit_vertex_index(isp, ik, nu, iband, jband, nk,
+                                                                   n_abf, n_states));
+                                body_mu.at(as_size(mu) * n_abf + nu) +=
+                                    weight * vertex_mu * std::conj(vertex_nu);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        const double spin_prefactor =
+            headwing_spin_prefactor(n_spin, meanfield_df.get_n_spinor() > 1);
+        for (auto &value : body_mu) value *= spin_prefactor;
+        this->static_intraband_chi0_mu_body_audit_ = std::move(body_mu);
+        if (comm_h.is_root())
+            global::lib_printf(
+                "Metallic static 2D body audit: constructed f' auxiliary response (%d x %d)\\n",
+                n_abf, n_abf);
+    }
     double dielectric_unit = cal_factor("wing");
     if (fd_reference.enabled)
     {
@@ -2575,6 +2892,10 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
                     const auto &eigenvalues = this->meanfield_df.get_eigenvals();
                     const auto &wg = this->meanfield_df.get_weight()[isp];
                     const auto &velocity = velocity_bz[isp];
+                    const auto degenerate_groups =
+                        fd_reference.enabled
+                            ? HeadwingDegenerateGroups(eigenvalues[isp], ik_ibz, n_states)
+                            : HeadwingDegenerateGroups{};
 
                     if (fd_reference.enabled)
                     {
@@ -2583,15 +2904,13 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
                             const int loc_m = desc_nband_nband.indx_g2l_r(iband);
                             if (loc_m < 0) continue;
                             const double minus_fd_derivative =
-                                -fermi_dirac_derivative(eigenvalues[isp](ik_ibz, iband) -
+                                -fermi_dirac_derivative(degenerate_groups.mean_energy(iband) -
                                                             fd_reference.chemical_potential_ha,
                                                         fd_reference.kbt_ha);
                             for (int jband = 0; jband != n_states; ++jband)
                             {
                                 const int loc_n = desc_nband_nband.indx_g2l_c(jband);
-                                if (loc_n < 0 || !headwing_numerically_degenerate(
-                                                     eigenvalues[isp](ik_ibz, iband),
-                                                     eigenvalues[isp](ik_ibz, jband)))
+                                if (loc_n < 0 || !degenerate_groups.same(iband, jband))
                                     continue;
                                 if (iband == jband)
                                     local_static_intraband_wing_mu[as_size(mu)] -=
@@ -2619,8 +2938,7 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
 
                             const double egap =
                                 eigenvalues[isp](ik_ibz, iunocc) - eigenvalues[isp](ik_ibz, iocc);
-                            if (fd_reference.enabled && headwing_numerically_degenerate(
-                                    eigenvalues[isp](ik_ibz, iocc), eigenvalues[isp](ik_ibz, iunocc))) continue;
+                            if (fd_reference.enabled && degenerate_groups.same(iocc, iunocc)) continue;
                             const double wg_occ = wg(ik_ibz, iocc) * bz_weight_scale_wing;
                             const double wg_unocc = wg(ik_ibz, iunocc) * bz_weight_scale_wing;
                             double factor1 = 0.0;
@@ -3096,6 +3414,59 @@ void diele_func::wing_mu_to_lambda(matrix_m<std::complex<double>> &sqrtveig_blac
         }
         MPI_Allreduce(MPI_IN_PLACE, this->static_intraband_chi0v_wing_.data(), n_lambda,
                       MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
+    }
+
+    this->static_intraband_chi0v_body_audit_.clear();
+    if (!this->static_intraband_chi0_mu_body_audit_.empty())
+    {
+        if (this->static_intraband_chi0_mu_body_audit_.size() != as_size(n_abf) * n_abf)
+            throw std::logic_error("static 2D body audit has an invalid auxiliary dimension");
+
+        auto static_mu_body =
+            init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
+        for (int iloc = 0; iloc != desc_nabf_nabf_opt.m_loc(); ++iloc)
+        {
+            const int mu = desc_nabf_nabf_opt.indx_l2g_r(iloc);
+            if (mu < 0 || mu >= n_abf) continue;
+            for (int jloc = 0; jloc != desc_nabf_nabf_opt.n_loc(); ++jloc)
+            {
+                const int nu = desc_nabf_nabf_opt.indx_l2g_c(jloc);
+                if (nu >= 0 && nu < n_abf)
+                    static_mu_body(iloc, jloc) =
+                        static_intraband_chi0_mu_body_audit_.at(as_size(mu) * n_abf + nu);
+            }
+        }
+
+        ArrayDesc desc_static_mu_lambda(blacs_h);
+        desc_static_mu_lambda.init(n_abf, n_lambda, desc_nabf_nabf_opt.mb(), desc_body.nb(), 0, 0);
+        auto static_mu_lambda =
+            init_local_mat<complex<double>>(desc_static_mu_lambda, MAJOR::COL);
+        auto static_lambda_body =
+            init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+        ScalapackConnector::pgemm_f(
+            'N', 'N', n_abf, n_lambda, n_abf, C_ONE, static_mu_body.ptr(), 1, 1,
+            desc_nabf_nabf_opt.desc, sqrtveig_blacs.ptr(), 1, 2, desc_nabf_nabf_opt.desc, C_ZERO,
+            static_mu_lambda.ptr(), 1, 1, desc_static_mu_lambda.desc);
+        ScalapackConnector::pgemm_f(
+            'C', 'N', n_lambda, n_lambda, n_abf, C_ONE, sqrtveig_blacs.ptr(), 1, 2,
+            desc_nabf_nabf_opt.desc, static_mu_lambda.ptr(), 1, 1, desc_static_mu_lambda.desc,
+            C_ZERO, static_lambda_body.ptr(), 1, 1, desc_body.desc);
+
+        this->static_intraband_chi0v_body_audit_.assign(as_size(n_lambda) * n_lambda, 0.0);
+        for (int iloc = 0; iloc != desc_body.m_loc(); ++iloc)
+        {
+            const int i = desc_body.indx_l2g_r(iloc);
+            if (i < 0 || i >= n_lambda) continue;
+            for (int jloc = 0; jloc != desc_body.n_loc(); ++jloc)
+            {
+                const int j = desc_body.indx_l2g_c(jloc);
+                if (j >= 0 && j < n_lambda)
+                    static_intraband_chi0v_body_audit_.at(as_size(i) * n_lambda + j) =
+                        static_lambda_body(iloc, jloc);
+            }
+        }
+        MPI_Allreduce(MPI_IN_PLACE, static_intraband_chi0v_body_audit_.data(),
+                      n_lambda * n_lambda, MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
     }
 
     if (!this->wing.empty())
@@ -4584,6 +4955,185 @@ bool diele_func::is_metallic_static_3d_frequency(const int ifreq) const
            static_cast<std::size_t>(ifreq) < omega.size() && omega.at(as_size(ifreq)) == 0.0;
 }
 
+bool diele_func::is_metallic_static_2d_frequency(const int ifreq) const
+{
+    return use_2d_dielectric && meanfield_df.get_fermi_dirac_reference().enabled && ifreq >= 0 &&
+           static_cast<std::size_t>(ifreq) < omega.size() && omega.at(as_size(ifreq)) == 0.0;
+}
+
+void diele_func::rewrite_metallic_static_2d_wc(
+    matrix_m<std::complex<double>> &epsilon_block, const int ifreq,
+    ArrayDesc &desc_nabf_nabf_opt, const matrix_m<std::complex<double>> &regular_coulomb_basis)
+{
+    if (!is_metallic_static_2d_frequency(ifreq))
+        throw std::logic_error(
+            "metallic static complete-Wc replacement requires a 2D finite-temperature zero "
+            "frequency");
+    if (n_nonsingular < 2 || static_cast<std::size_t>(desc_nabf_nabf_opt.m()) < n_nonsingular ||
+        static_cast<std::size_t>(desc_nabf_nabf_opt.n()) < n_nonsingular)
+        throw std::logic_error("metallic static 2D complete-Wc Coulomb subspace is inconsistent");
+    if (regular_coulomb_basis.nr() != desc_nabf_nabf_opt.m_loc() ||
+        regular_coulomb_basis.nc() != desc_nabf_nabf_opt.n_loc())
+        throw std::logic_error("metallic static 2D regular Coulomb basis has an invalid local shape");
+
+    const int nbody = as_int(n_nonsingular) - 1;
+    if (static_intraband_screening_wavevector_squared_ <= 0.0 ||
+        static_intraband_chi0v_wing_.size() != as_size(nbody))
+        throw std::logic_error("metallic static 2D intraband coefficients are unavailable");
+
+    auto desc_body = get_body_inv(epsilon_block, desc_nabf_nabf_opt);
+    construct_L(ifreq, desc_body);
+
+    std::vector<std::complex<double>> body_inv_static_global(as_size(nbody), 0.0);
+    std::vector<std::complex<double>> static_adjoint_body_inv_global(as_size(nbody), 0.0);
+    for (int iloc = 0; iloc != desc_body.m_loc(); ++iloc)
+    {
+        const int i = desc_body.indx_l2g_r(iloc);
+        for (int jloc = 0; jloc != desc_body.n_loc(); ++jloc)
+        {
+            const int j = desc_body.indx_l2g_c(jloc);
+            if (i >= 0 && i < nbody)
+                body_inv_static_global[as_size(i)] +=
+                    body_inv(iloc, jloc) * static_intraband_chi0v_wing_.at(as_size(j));
+            if (j >= 0 && j < nbody)
+                static_adjoint_body_inv_global[as_size(j)] +=
+                    std::conj(static_intraband_chi0v_wing_.at(as_size(i))) * body_inv(iloc, jloc);
+        }
+    }
+    MPI_Allreduce(MPI_IN_PLACE, body_inv_static_global.data(), nbody, MPI_CXX_DOUBLE_COMPLEX,
+                  MPI_SUM, comm_h.comm);
+    MPI_Allreduce(MPI_IN_PLACE, static_adjoint_body_inv_global.data(), nbody,
+                  MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
+
+    std::complex<double> schur_qminus1 = static_intraband_screening_wavevector_squared_;
+    for (int i = 0; i != nbody; ++i)
+        schur_qminus1 -= std::conj(static_intraband_chi0v_wing_.at(as_size(i))) *
+                         body_inv_static_global.at(as_size(i));
+    const double schur_scale = std::max(1.0, std::abs(schur_qminus1));
+    if (schur_qminus1.real() <= 0.0 ||
+        std::abs(schur_qminus1.imag()) > 1.0e-8 * schur_scale)
+        throw std::runtime_error("metallic static 2D Schur 1/q coefficient is not positive real");
+
+    std::array<std::complex<double>, 3> schur_q0{};
+    for (int alpha = 0; alpha != 3; ++alpha)
+    {
+        std::complex<double> left = 0.0;
+        std::complex<double> right = 0.0;
+        for (int i = 0; i != nbody; ++i)
+        {
+            left += std::conj(static_intraband_chi0v_wing_.at(as_size(i))) * bw(i, alpha);
+            right += wb(alpha, i) * static_intraband_chi0v_wing_.at(as_size(i));
+        }
+        schur_q0[as_size(alpha)] = -(left + right);
+    }
+
+    matrix_m<std::complex<double>> regular_schur = Lind.copy();
+    regular_schur(0, 0) -= 1.0;
+    regular_schur(1, 1) -= 1.0;
+    const double gamma_area = strict_2d_physical_gamma_cell_area(vol_gamma);
+    std::vector<double> physical_qmax(q_gamma.size());
+    std::transform(q_gamma.cbegin(), q_gamma.cend(), physical_qmax.begin(),
+                   strict_2d_physical_q);
+    const auto inverse_weights = compute_metallic_static_2d_inverse_weights(
+        regular_schur, schur_qminus1, 1.0, schur_q0, qx_leb, qy_leb, qw_leb, physical_qmax,
+        gamma_area);
+    const double pw_to_auxiliary_scale = get_strict_2d_pw_to_auxiliary_scale();
+    const double sqrt_two_pi = std::sqrt(TWO_PI);
+
+    auto regular_body_sqrt = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    ScalapackConnector::pgemr2d_f(nbody, nbody, regular_coulomb_basis.ptr(), 2, 2,
+                                  desc_nabf_nabf_opt.desc, regular_body_sqrt.ptr(), 1, 1,
+                                  desc_body.desc, blacs_h.ictxt);
+    auto body_average = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    for (int ilo = 0; ilo != desc_body.m_loc(); ++ilo)
+    {
+        const int i = desc_body.indx_l2g_r(ilo);
+        for (int jlo = 0; jlo != desc_body.n_loc(); ++jlo)
+        {
+            const int j = desc_body.indx_l2g_c(jlo);
+            std::complex<double> value = inverse_weights.volume *
+                                         (body_inv(ilo, jlo) - (i == j ? 1.0 : 0.0));
+            value += body_inv_static_global.at(as_size(i)) *
+                     static_adjoint_body_inv_global.at(as_size(j)) * inverse_weights.inverse_q1;
+            for (int alpha = 0; alpha != 3; ++alpha)
+            {
+                value += (body_inv_static_global.at(as_size(i)) * wb(alpha, j) +
+                          bw(i, alpha) * static_adjoint_body_inv_global.at(as_size(j))) *
+                         inverse_weights.inverse_q2[as_size(alpha)];
+                for (int beta = 0; beta != 3; ++beta)
+                    value += bw(i, alpha) * wb(beta, j) * inverse_weights.inverse_q3(alpha, beta);
+            }
+            body_average(ilo, jlo) = value;
+        }
+    }
+
+    auto body_tmp = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    auto wc_body = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    ScalapackConnector::pgemm_f('N', 'N', nbody, nbody, nbody, C_ONE, regular_body_sqrt.ptr(),
+                                1, 1, desc_body.desc, body_average.ptr(), 1, 1, desc_body.desc,
+                                C_ZERO, body_tmp.ptr(), 1, 1, desc_body.desc);
+    ScalapackConnector::pgemm_f('N', 'N', nbody, nbody, nbody, C_ONE, body_tmp.ptr(), 1, 1,
+                                desc_body.desc, regular_body_sqrt.ptr(), 1, 1, desc_body.desc,
+                                C_ZERO, wc_body.ptr(), 1, 1, desc_body.desc);
+
+    this->chi0 = init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
+    this->chi0.zero_out();
+    ScalapackConnector::pgemr2d_f(nbody, nbody, wc_body.ptr(), 1, 1, desc_body.desc,
+                                  this->chi0.ptr(), 2, 2, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
+
+    ArrayDesc desc_body_head(blacs_h);
+    desc_body_head.init(nbody, 1, desc_body.mb(), 1, 0, 0);
+    ArrayDesc desc_head_body(blacs_h);
+    desc_head_body.init(1, nbody, 1, desc_body.nb(), 0, 0);
+    auto body_head = init_local_mat<complex<double>>(desc_body_head, MAJOR::COL);
+    auto head_body = init_local_mat<complex<double>>(desc_head_body, MAJOR::COL);
+    for (int i = 0; i != nbody; ++i)
+    {
+        std::complex<double> body_value = body_inv_static_global.at(as_size(i)) *
+                                          inverse_weights.inverse_q1;
+        std::complex<double> head_value = static_adjoint_body_inv_global.at(as_size(i)) *
+                                          inverse_weights.inverse_q1;
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            body_value += bw(i, alpha) * inverse_weights.inverse_q2[as_size(alpha)];
+            head_value += wb(alpha, i) * inverse_weights.inverse_q2[as_size(alpha)];
+        }
+        body_value *= -sqrt_two_pi;
+        head_value *= -sqrt_two_pi;
+        const int ilo = desc_body_head.indx_g2l_r(i);
+        const int jlo = desc_body_head.indx_g2l_c(0);
+        if (ilo >= 0 && jlo >= 0) body_head(ilo, jlo) = body_value;
+        const int irow = desc_head_body.indx_g2l_r(0);
+        const int jcol = desc_head_body.indx_g2l_c(i);
+        if (irow >= 0 && jcol >= 0) head_body(irow, jcol) = head_value;
+    }
+    auto wc_body_head = init_local_mat<complex<double>>(desc_body_head, MAJOR::COL);
+    auto wc_head_body = init_local_mat<complex<double>>(desc_head_body, MAJOR::COL);
+    ScalapackConnector::pgemm_f('N', 'N', nbody, 1, nbody, C_ONE, regular_body_sqrt.ptr(), 1, 1,
+                                desc_body.desc, body_head.ptr(), 1, 1, desc_body_head.desc, C_ZERO,
+                                wc_body_head.ptr(), 1, 1, desc_body_head.desc);
+    ScalapackConnector::pgemm_f('N', 'N', 1, nbody, nbody, C_ONE, head_body.ptr(), 1, 1,
+                                desc_head_body.desc, regular_body_sqrt.ptr(), 1, 1, desc_body.desc,
+                                C_ZERO, wc_head_body.ptr(), 1, 1, desc_head_body.desc);
+    for (std::size_t i = 0; i != wc_body_head.size(); ++i) wc_body_head.ptr()[i] *= pw_to_auxiliary_scale;
+    for (std::size_t i = 0; i != wc_head_body.size(); ++i) wc_head_body.ptr()[i] *= pw_to_auxiliary_scale;
+    ScalapackConnector::pgemr2d_f(nbody, 1, wc_body_head.ptr(), 1, 1, desc_body_head.desc,
+                                  this->chi0.ptr(), 2, 1, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
+    ScalapackConnector::pgemr2d_f(1, nbody, wc_head_body.ptr(), 1, 1, desc_head_body.desc,
+                                  this->chi0.ptr(), 1, 2, desc_nabf_nabf_opt.desc, blacs_h.ictxt);
+
+    const int ilo_head = desc_nabf_nabf_opt.indx_g2l_r(0);
+    const int jlo_head = desc_nabf_nabf_opt.indx_g2l_c(0);
+    if (ilo_head >= 0 && jlo_head >= 0)
+        this->chi0(ilo_head, jlo_head) = pw_to_auxiliary_scale * pw_to_auxiliary_scale * TWO_PI *
+                                         (inverse_weights.inverse_q1 -
+                                          inverse_weights.bare_qminus1);
+    assign_chi0(epsilon_block, desc_nabf_nabf_opt);
+    this->chi0.clear();
+    this->Lind.clear();
+    this->body_inv.clear();
+}
+
 void diele_func::rewrite_metallic_static_3d_wc(
     matrix_m<std::complex<double>> &epsilon_block, const int ifreq, ArrayDesc &desc_nabf_nabf_opt,
     const matrix_m<std::complex<double>> &projected_coulomb_sqrt)
@@ -4667,8 +5217,23 @@ void diele_func::rewrite_metallic_static_3d_wc(
     const auto schur_qminus2 = static_intraband_screening_wavevector_squared_ - static_local_field;
     const double schur_scale = std::max(1.0, std::abs(schur_qminus2));
     if (schur_qminus2.real() <= 0.0 || std::abs(schur_qminus2.imag()) > 1.0e-8 * schur_scale)
+    {
+        if (comm_h.is_root())
+        {
+            double body_inv_wing_norm = 0.0;
+            for (const auto &value : body_inv_static_global)
+                body_inv_wing_norm += std::norm(value);
+            global::lib_printf(
+                "Metallic static complete-Wc Schur diagnostic: kappa2=(%.16e,%.16e) "
+                "local_field=(%.16e,%.16e) schur_qminus2=(%.16e,%.16e) "
+                "body_inv_wing_norm=%.16e\n",
+                static_intraband_screening_wavevector_squared_, 0.0, static_local_field.real(),
+                static_local_field.imag(), schur_qminus2.real(), schur_qminus2.imag(),
+                std::sqrt(body_inv_wing_norm));
+        }
         throw std::runtime_error(
             "metallic static complete-Wc Schur 1/q^2 coefficient is not positive real");
+    }
 
     std::array<std::complex<double>, 3> schur_qminus1{};
     for (int alpha = 0; alpha != 3; ++alpha)
@@ -5006,9 +5571,148 @@ std::complex<double> diele_func::compute_rpa_trace_log_average(
     const bool finite_temperature_static =
         meanfield_df.get_fermi_dirac_reference().enabled && omega.at(as_size(ifreq)) == 0.0;
     if (finite_temperature_static && settings.use_2d_dielectric)
-        throw std::logic_error(
-            "finite-temperature metallic static Gamma averaging is currently implemented only "
-            "for 3D Coulomb boundary conditions");
+    {
+        if (static_intraband_screening_wavevector_squared_ <= 0.0 ||
+            static_intraband_chi0v_wing_.size() != as_size(n_nonsingular - 1))
+            throw std::logic_error("finite-temperature metallic 2D Gamma coefficients are unavailable");
+
+        const int nbody = as_int(n_nonsingular) - 1;
+        std::vector<std::complex<double>> body_inv_static_global(as_size(nbody), 0.0);
+        for (int iloc = 0; iloc != desc_body.m_loc(); ++iloc)
+        {
+            const int i = desc_body.indx_l2g_r(iloc);
+            for (int jloc = 0; jloc != desc_body.n_loc(); ++jloc)
+            {
+                const int j = desc_body.indx_l2g_c(jloc);
+                if (i >= 0 && i < nbody)
+                    body_inv_static_global[as_size(i)] +=
+                        body_inv(iloc, jloc) * static_intraband_chi0v_wing_.at(as_size(j));
+            }
+        }
+        MPI_Allreduce(MPI_IN_PLACE, body_inv_static_global.data(), nbody,
+                      MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
+
+        std::complex<double> static_local_field = 0.0;
+        double static_wing_norm_squared = 0.0;
+        for (int i = 0; i != nbody; ++i)
+        {
+            const auto static_wing = static_intraband_chi0v_wing_.at(as_size(i));
+            static_local_field +=
+                std::conj(static_wing) * body_inv_static_global.at(as_size(i));
+            static_wing_norm_squared += std::norm(static_wing);
+        }
+
+        if (!static_intraband_chi0v_body_audit_.empty())
+        {
+            if (desc_body.m() != nbody || desc_body.n() != nbody ||
+                static_intraband_chi0v_body_audit_.size() != as_size(nbody) * nbody)
+                throw std::logic_error("static 2D body audit and Gamma body dimensions differ");
+
+            double gg_norm_squared_local = 0.0;
+            double intraband_norm_squared_local = 0.0;
+            double residual_norm_squared_local = 0.0;
+            std::complex<double> gg_quadratic_local = 0.0;
+            std::complex<double> intraband_quadratic_local = 0.0;
+            for (int iloc = 0; iloc != desc_body.m_loc(); ++iloc)
+            {
+                const int i = desc_body.indx_l2g_r(iloc);
+                if (i < 0 || i >= nbody) continue;
+                for (int jloc = 0; jloc != desc_body.n_loc(); ++jloc)
+                {
+                    const int j = desc_body.indx_l2g_c(jloc);
+                    if (j < 0 || j >= nbody) continue;
+                    const auto gg_screening = -body(iloc, jloc);
+                    const auto intraband_screening =
+                        -static_intraband_chi0v_body_audit_.at(as_size(i) * nbody + j);
+                    const auto residual = gg_screening - intraband_screening;
+                    gg_norm_squared_local += std::norm(gg_screening);
+                    intraband_norm_squared_local += std::norm(intraband_screening);
+                    residual_norm_squared_local += std::norm(residual);
+                    const auto left = std::conj(static_intraband_chi0v_wing_.at(as_size(i)));
+                    const auto right = static_intraband_chi0v_wing_.at(as_size(j));
+                    gg_quadratic_local += left * gg_screening * right;
+                    intraband_quadratic_local += left * intraband_screening * right;
+                }
+            }
+            double gg_norm_squared = 0.0;
+            double intraband_norm_squared = 0.0;
+            double residual_norm_squared = 0.0;
+            std::complex<double> gg_quadratic = 0.0;
+            std::complex<double> intraband_quadratic = 0.0;
+            MPI_Allreduce(&gg_norm_squared_local, &gg_norm_squared, 1, MPI_DOUBLE, MPI_SUM,
+                          comm_h.comm);
+            MPI_Allreduce(&intraband_norm_squared_local, &intraband_norm_squared, 1, MPI_DOUBLE,
+                          MPI_SUM, comm_h.comm);
+            MPI_Allreduce(&residual_norm_squared_local, &residual_norm_squared, 1, MPI_DOUBLE,
+                          MPI_SUM, comm_h.comm);
+            MPI_Allreduce(&gg_quadratic_local, &gg_quadratic, 1, MPI_CXX_DOUBLE_COMPLEX, MPI_SUM,
+                          comm_h.comm);
+            MPI_Allreduce(&intraband_quadratic_local, &intraband_quadratic, 1,
+                          MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
+            if (comm_h.is_root())
+            {
+                global::lib_printf(
+                    "Metallic static 2D body audit: GG_fro=%.12e intraband_fro=%.12e "
+                    "residual_fro=%.12e wing_GG=(%.12e,%.12e) "
+                    "wing_intraband=(%.12e,%.12e)\\n",
+                    std::sqrt(gg_norm_squared), std::sqrt(intraband_norm_squared),
+                    std::sqrt(residual_norm_squared), gg_quadratic.real(), gg_quadratic.imag(),
+                    intraband_quadratic.real(), intraband_quadratic.imag());
+            }
+        }
+
+        const std::complex<double> schur_qminus1 =
+            static_intraband_screening_wavevector_squared_ - static_local_field;
+        const double schur_scale = std::max(1.0, std::abs(schur_qminus1));
+        if (schur_qminus1.real() <= 0.0 ||
+            std::abs(schur_qminus1.imag()) > 1.0e-8 * schur_scale)
+        {
+            if (comm_h.is_root())
+            {
+                global::lib_printf(
+                    "Metallic static 2D RPA Schur failure: ifreq=%d body_start=%d nbody=%d "
+                    "kappa1=%.12e local_field=(%.12e,%.12e) "
+                    "schur_qminus1=(%.12e,%.12e) wing_norm2=%.12e\\n",
+                    ifreq, body_start, nbody, static_intraband_screening_wavevector_squared_,
+                    static_local_field.real(), static_local_field.imag(), schur_qminus1.real(),
+                    schur_qminus1.imag(), static_wing_norm_squared);
+            }
+            throw std::runtime_error("metallic static 2D RPA Schur 1/q coefficient is not positive real");
+        }
+
+        std::array<std::complex<double>, 3> schur_q0{};
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            std::complex<double> left = 0.0;
+            std::complex<double> right = 0.0;
+            for (int i = 0; i != nbody; ++i)
+            {
+                left += std::conj(static_intraband_chi0v_wing_.at(as_size(i))) * bw(i, alpha);
+                right += wb(alpha, i) * static_intraband_chi0v_wing_.at(as_size(i));
+            }
+            schur_q0[as_size(alpha)] = -(left + right);
+        }
+        matrix_m<std::complex<double>> regular_schur = Lind.copy();
+        regular_schur(0, 0) -= 1.0;
+        regular_schur(1, 1) -= 1.0;
+        std::vector<double> physical_q_gamma(q_gamma.size());
+        std::transform(q_gamma.cbegin(), q_gamma.cend(), physical_q_gamma.begin(),
+                       strict_2d_physical_q);
+        const auto result = compute_metallic_static_2d_rpa_trace_log_average(
+            get_rpa_chi0v_head(ifreq), regular_schur, trace_body, logdet_body,
+            static_intraband_screening_wavevector_squared_, schur_qminus1, 1.0, schur_q0,
+            qx_leb, qy_leb, qw_leb, physical_q_gamma,
+            strict_2d_physical_gamma_cell_area(vol_gamma));
+        if (debug && comm_h.is_root())
+            global::lib_printf(
+                "Metallic static 2D RPA Gamma avg: kappa1=%.12e schur_qminus1=(%.12e,%.12e) "
+                "result=(%.12e,%.12e)\n",
+                static_intraband_screening_wavevector_squared_, schur_qminus1.real(),
+                schur_qminus1.imag(), result.real(), result.imag());
+        this->Lind.clear();
+        this->body_inv.clear();
+        return result;
+    }
     if (finite_temperature_static)
     {
         if (static_intraband_screening_wavevector_squared_ <= 0.0

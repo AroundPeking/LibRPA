@@ -123,6 +123,29 @@ std::complex<double> compute_metallic_static_3d_rpa_trace_log_average(
     const std::vector<double> &qx, const std::vector<double> &qy,
     const std::vector<double> &qz, const std::vector<double> &angular_weights,
     const std::vector<double> &qmax, double gamma_cell_volume, int radial_order = 48);
+struct MetallicStatic2dInverseWeights
+{
+    std::complex<double> inverse_q1 = 0.0;
+    std::array<std::complex<double>, 3> inverse_q2{};
+    matrix_m<std::complex<double>> inverse_q3{3, 3, MAJOR::COL};
+    double bare_qminus1 = 0.0;
+    double volume = 0.0;
+};
+MetallicStatic2dInverseWeights compute_metallic_static_2d_inverse_weights(
+    const matrix_m<std::complex<double>> &regular_schur, std::complex<double> schur_qminus1,
+    std::complex<double> schur_q0_constant,
+    const std::array<std::complex<double>, 3> &schur_q0, const std::vector<double> &qx,
+    const std::vector<double> &qy, const std::vector<double> &angular_weights,
+    const std::vector<double> &qmax, double gamma_cell_area, int radial_order = 48);
+std::complex<double> compute_metallic_static_2d_rpa_trace_log_average(
+    const matrix_m<std::complex<double>> &regular_chi0v_head,
+    const matrix_m<std::complex<double>> &regular_schur, std::complex<double> trace_body,
+    std::complex<double> logdet_body, double screening_coefficient,
+    std::complex<double> schur_qminus1, std::complex<double> schur_q0_constant,
+    const std::array<std::complex<double>, 3> &schur_q0,
+    const std::vector<double> &qx, const std::vector<double> &qy,
+    const std::vector<double> &angular_weights, const std::vector<double> &qmax,
+    double gamma_cell_area, int radial_order = 48);
 std::vector<int> headwing_local_kpoints(int n_kpoints,
                                         const KPointBlacsParallelContext *kblacs_ctxt);
 ComplexMatrix rotate_headwing_wfc_to_kstar_member(
@@ -228,6 +251,10 @@ private:
     double static_intraband_screening_wavevector_squared_ = 0.0;
     std::vector<std::complex<double>> static_intraband_chi0v_wing_mu_;
     std::vector<std::complex<double>> static_intraband_chi0v_wing_;
+    // Explicit f' body constructed only for the opt-in 2D static-response audit.
+    // The production path continues to use the GG body without modification.
+    std::vector<std::complex<double>> static_intraband_chi0_mu_body_audit_;
+    std::vector<std::complex<double>> static_intraband_chi0v_body_audit_;
     double strict_2d_pw_to_auxiliary_scale_ = 0.0;
     std::vector<std::complex<double>> strict_2d_pw_wc_head_average_;
 
@@ -435,9 +462,14 @@ public:
         matrix_m<std::complex<double>> &response_block, const int ifreq, ArrayDesc &desc_response,
         const RpaHeadwingSettings &settings);
     bool is_metallic_static_3d_frequency(int ifreq) const;
+    bool is_metallic_static_2d_frequency(int ifreq) const;
     void rewrite_metallic_static_3d_wc(
         matrix_m<std::complex<double>> &epsilon_block, int ifreq, ArrayDesc &desc_nabf_nabf_opt,
         const matrix_m<std::complex<double>> &projected_coulomb_sqrt);
+    void rewrite_metallic_static_2d_wc(
+        matrix_m<std::complex<double>> &epsilon_block, int ifreq,
+        ArrayDesc &desc_nabf_nabf_opt,
+        const matrix_m<std::complex<double>> &regular_coulomb_basis);
     void rewrite_rpa_response(matrix_m<std::complex<double>> &eps_minus_identity_block,
                               const int ifreq, ArrayDesc &desc_nabf_nabf_opt);
     void assign_chi0(matrix_m<std::complex<double>> &chi0_block, ArrayDesc &desc_nabf_nabf_opt);

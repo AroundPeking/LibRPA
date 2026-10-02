@@ -310,6 +310,17 @@ bool use_metallic_static_3d_complete_wc_gamma_route(const bool replace_w_head,
            headwing_data_available && finite_temperature_static;
 }
 
+bool use_metallic_static_2d_complete_wc_gamma_route(const bool replace_w_head,
+                                                    const int option_dielect_func,
+                                                    const bool use_2d_dielectric,
+                                                    const bool gamma_point,
+                                                    const bool headwing_data_available,
+                                                    const bool finite_temperature_static)
+{
+    return replace_w_head && option_dielect_func == 3 && use_2d_dielectric && gamma_point &&
+           headwing_data_available && finite_temperature_static;
+}
+
 using abf_qspace_complex_block_map_t =
     atom_mapping<std::map<Vector3_Order<double>, matrix_m<std::complex<double>>>>::pair_t_old;
 using abf_rspace_complex_block_map_t =
@@ -3634,7 +3645,8 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             for (const auto &frequency : chi0.tfg.get_freq_nodes())
             {
                 const int frequency_index = chi0.tfg.get_freq_index(frequency);
-                if (df_headwing->is_metallic_static_3d_frequency(frequency_index))
+                if (df_headwing->is_metallic_static_3d_frequency(frequency_index) ||
+                    df_headwing->is_metallic_static_2d_frequency(frequency_index))
                 {
                     has_metallic_static_frequency = true;
                     break;
@@ -3644,7 +3656,7 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         const bool prepare_metallic_static_3d_complete_wc =
             use_metallic_static_3d_complete_wc_gamma_route(
                 replace_w_head, option_dielect_func,
-                df_headwing != nullptr && df_headwing->use_2d_dielectric, is_gamma_point(q),
+                false, is_gamma_point(q),
                 !epsmac_LF_imagfreq.empty() && df_headwing != nullptr,
                 has_metallic_static_frequency);
         matrix_m<std::complex<double>> metallic_static_projected_coulomb_sqrt;
@@ -3765,9 +3777,15 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             const bool metallic_static_3d_complete_wc_gamma =
                 use_metallic_static_3d_complete_wc_gamma_route(
                     replace_w_head, option_dielect_func,
-                    df_headwing != nullptr && df_headwing->use_2d_dielectric, is_gamma_point(q),
+                    false, is_gamma_point(q),
                     !epsmac_LF_imagfreq.empty() && df_headwing != nullptr,
                     df_headwing != nullptr && df_headwing->is_metallic_static_3d_frequency(ifreq));
+            const bool metallic_static_2d_complete_wc_gamma =
+                use_metallic_static_2d_complete_wc_gamma_route(
+                    replace_w_head, option_dielect_func,
+                    df_headwing != nullptr && df_headwing->use_2d_dielectric, is_gamma_point(q),
+                    !epsmac_LF_imagfreq.empty() && df_headwing != nullptr,
+                    df_headwing != nullptr && df_headwing->is_metallic_static_2d_frequency(ifreq));
             std::complex<double> finite_q_p_head = std::numeric_limits<double>::quiet_NaN();
             Strict2dBlockMetrics finite_q_p_metrics;
             Strict2dBlockMetrics finite_q_chi0_metrics;
@@ -3989,7 +4007,10 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                     if (df_headwing == nullptr)
                         throw LIBRPA_RUNTIME_ERROR(
                             "Head/wing dielectric function is not initialized");
-                    if (strict_2d_complete_wc_gamma)
+                    if (metallic_static_2d_complete_wc_gamma)
+                        df_headwing->rewrite_metallic_static_2d_wc(
+                            chi0_block, ifreq, desc_nabf_nabf_opt, coulwc_block);
+                    else if (strict_2d_complete_wc_gamma)
                         df_headwing->rewrite_strict_2d_wc(chi0_block, ifreq, desc_nabf_nabf_opt,
                                                           coulwc_block);
                     else if (metallic_static_3d_complete_wc_gamma)
@@ -4061,7 +4082,7 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                                    coul_chi0_block_ptr, 1, 1, desc_nabf_nabf_opt,
                                    coul_eigen_block_ptr, 1, 1, desc_nabf_nabf_opt, {0.0, 0.0},
                                    chi0_block_ptr, 1, 1, desc_nabf_nabf_opt);
-                if (strict_2d_complete_wc_gamma &&
+                if (strict_2d_complete_wc_gamma && !metallic_static_2d_complete_wc_gamma &&
                     !omega0_override_directories.auxiliary_basis.empty())
                 {
                     std::ostringstream filename;
@@ -4204,7 +4225,8 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                                     desc_nabf_nabf_opt, "", 1e-10);
 
             global::profiler.start("epsilon_to_wc");
-            if (strict_2d_complete_wc_gamma || metallic_static_3d_complete_wc_gamma)
+            if (strict_2d_complete_wc_gamma || metallic_static_3d_complete_wc_gamma ||
+                metallic_static_2d_complete_wc_gamma)
             {
                 if (ifreq == 0 && comm_h.is_root())
                     std::cout

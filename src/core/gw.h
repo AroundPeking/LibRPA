@@ -68,7 +68,9 @@ private:
 
     void collect_sigc_rf_output_shards();
     void write_sigc_rf_output_files() const;
-    void write_sigc_frequency_grid(const std::string &directory) const;
+    void write_sigc_frequency_grid(const std::string &directory,
+                                   bool collected_unique_blocks = false) const;
+    void read_thermal_sigc(const std::string &input_dir);
 
     void build_sigc_matrix_KS(
         const std::map<int, std::map<int, std::map<int, ComplexMatrix>>> &wfc_target,

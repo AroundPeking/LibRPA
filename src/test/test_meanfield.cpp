@@ -3,6 +3,7 @@
 #include <cassert>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <map>
 #include <stdexcept>
 #include <utility>
@@ -107,6 +108,131 @@ void test_finite_temperature_green_function_uses_stable_combined_factors()
     if (std::abs(gf_negative_R.at(-0.5 * beta).at(Rs.front())(0, 0) + expected)
         > expected * 1.0e-12)
         throw std::runtime_error("finite-temperature negative real-space Green function is unstable");
+}
+
+void test_tetrahedron_fourier_weights_are_normalized()
+{
+    using namespace librpa_int;
+
+    std::vector<Vector3_Order<double>> kfrac_list;
+    for (int ix = 0; ix != 2; ++ix)
+        for (int iy = 0; iy != 2; ++iy)
+            for (int iz = 0; iz != 2; ++iz)
+                kfrac_list.push_back({0.5 * ix, 0.5 * iy, 0.5 * iz});
+
+    const auto weights = build_tetrahedron_fourier_weights(kfrac_list, {0, 0, 0});
+    std::complex<double> sum{0.0, 0.0};
+    for (const auto weight : weights)
+    {
+        if (!std::isfinite(weight.real()) || !std::isfinite(weight.imag()))
+            throw std::runtime_error("tetrahedron Fourier weight is nonfinite");
+        sum += weight;
+    }
+    if (std::abs(sum - std::complex<double>{1.0, 0.0}) > 1e-12)
+        throw std::runtime_error("tetrahedron Fourier weights do not conserve BZ volume");
+
+    const auto nonzero_R = build_tetrahedron_fourier_weights(kfrac_list, {1, 0, 0});
+    // Every vertex of a 2x2x2 mesh is inversion invariant modulo a reciprocal
+    // vector. Its periodic nodal basis must therefore have a real Fourier coefficient.
+    for (const auto weight : nonzero_R)
+        if (std::abs(weight.imag()) > 1e-12)
+            throw std::runtime_error("tetrahedron partition violates inversion symmetry");
+    bool differs_from_gamma = false;
+    for (std::size_t ik = 0; ik != weights.size(); ++ik)
+        if (std::abs(nonzero_R[ik] - weights[ik]) > 1e-8) differs_from_gamma = true;
+    if (!differs_from_gamma)
+        throw std::runtime_error("tetrahedron Fourier phase did not depend on R");
+}
+
+void test_tetrahedron_unfolded_coefficients_reconstruct_source()
+{
+    using namespace librpa_int;
+
+    std::vector<Vector3_Order<double>> kfrac_list;
+    std::vector<Vector3_Order<int>> bvk_R;
+    for (int ix = 0; ix != 2; ++ix)
+        for (int iy = 0; iy != 2; ++iy)
+            for (int iz = 0; iz != 2; ++iz)
+            {
+                kfrac_list.push_back({0.25 + 0.5 * ix, 0.5 * iy, 0.5 * iz});
+                bvk_R.push_back({ix, iy, iz});
+            }
+
+    const Vector3_Order<int> X{3, 0, 0};
+    const auto T = build_tetrahedron_fourier_weights(kfrac_list, X);
+    const auto U = build_tetrahedron_unfolded_coefficients(kfrac_list, bvk_R, X);
+    std::vector<std::complex<double>> values(kfrac_list.size());
+    for (std::size_t ik = 0; ik != values.size(); ++ik)
+        values[ik] = {0.2 + 0.13 * ik, -0.1 + 0.03 * ik * ik};
+
+    std::complex<double> direct{0.0, 0.0};
+    for (std::size_t ik = 0; ik != values.size(); ++ik) direct += T[ik] * values[ik];
+
+    std::complex<double> reconstructed{0.0, 0.0};
+    for (std::size_t ir = 0; ir != bvk_R.size(); ++ir)
+    {
+        std::complex<double> g_bvk{0.0, 0.0};
+        for (std::size_t ik = 0; ik != values.size(); ++ik)
+        {
+            const double phase = -2.0 * std::acos(-1.0) *
+                                 (kfrac_list[ik] * bvk_R[ir]);
+            g_bvk += std::polar(1.0, phase) * values[ik] /
+                     static_cast<double>(values.size());
+        }
+        reconstructed += U[ir] * g_bvk;
+    }
+    if (std::abs(reconstructed - direct) > 1e-12)
+        throw std::runtime_error("unfolded tetrahedron coefficients lost the mesh twist");
+
+    const auto folded_T = build_tetrahedron_fourier_weights(kfrac_list, {1, 0, 0});
+    std::complex<double> premature_fold{0.0, 0.0};
+    for (std::size_t ik = 0; ik != values.size(); ++ik)
+        premature_fold += folded_T[ik] * values[ik];
+    if (std::abs(premature_fold - direct) < 1e-5)
+        throw std::runtime_error("unfolded tetrahedron test did not distinguish BvK images");
+}
+
+void test_tetrahedron_unfolded_grid_tiles_bvk_cell()
+{
+    using namespace librpa_int;
+
+    const Vector3_Order<int> bvk_period{2, 3, 4};
+    const Vector3_Order<int> image_factors{3, 3, 3};
+    const auto unfolded = build_tetrahedron_unfolded_grid(bvk_period, image_factors);
+    if (!(unfolded.period == Vector3_Order<int>{6, 9, 12}))
+        throw std::runtime_error("tetrahedron unfolded period is incorrect");
+
+    const auto bvk_R = construct_R_grid(bvk_period);
+    if (unfolded.Rlist.size() != bvk_R.size() * 27)
+        throw std::runtime_error("tetrahedron unfolded grid has the wrong number of images");
+
+    std::map<Vector3_Order<int>, int> image_count;
+    for (const auto &X : unfolded.Rlist)
+        ++image_count[fold_tetrahedron_unfolded_translation(X, bvk_period)];
+    for (const auto &R : bvk_R)
+    {
+        if (image_count[R] != 27)
+            throw std::runtime_error("tetrahedron image folding does not tile the BvK cell");
+    }
+
+    const auto identity = build_tetrahedron_unfolded_grid(bvk_period, {1, 1, 1});
+    if (!(identity.period == bvk_period) || identity.Rlist != bvk_R)
+        throw std::runtime_error("unit tetrahedron image factors must preserve the BvK grid");
+
+    for (const auto invalid : {Vector3_Order<int>{2, 3, 3}, Vector3_Order<int>{0, 3, 3}})
+    {
+        bool rejected = false;
+        try
+        {
+            static_cast<void>(build_tetrahedron_unfolded_grid(bvk_period, invalid));
+        }
+        catch (const std::invalid_argument &)
+        {
+            rejected = true;
+        }
+        if (!rejected)
+            throw std::runtime_error("invalid tetrahedron image factor was accepted");
+    }
 }
 
 void test_state_index_energy_bounds()
@@ -471,6 +597,9 @@ int main(int argc, char *argv[])
 {
     test_BCC_He_gamma_minimal_basis_aims();
     test_finite_temperature_green_function_uses_stable_combined_factors();
+    test_tetrahedron_fourier_weights_are_normalized();
+    test_tetrahedron_unfolded_coefficients_reconstruct_source();
+    test_tetrahedron_unfolded_grid_tiles_bvk_cell();
     test_state_index_energy_bounds();
     test_find_highest_occupied_state();
     test_dmat_cplx_Rs_matches_single_R_accumulation();

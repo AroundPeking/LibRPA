@@ -76,6 +76,12 @@ static void test_kgrids_with_weighted_coulomb_mapping()
     assert(pbc.map_irk_ks.at(pbc.klist_coul[0]).size() == 2);
     assert(pbc.map_irk_ks.at(pbc.klist_coul[1]).size() == 1);
 
+    // Coulomb-v1 iq is indexed by klist_coul, not by the loaded SCF klist.
+    // The inverse mapping must therefore recover the loaded SCF index of the
+    // Coulomb representative before calling the legacy input API.
+    assert(pbc.get_k_index_scf(pbc.klist_coul[0]) == 0);
+    assert(pbc.get_k_index_scf(pbc.klist_coul[1]) == 2);
+
     pbc.set_period(3, 1, 1);
     assert(pbc.klist.size() == 3);
     pbc.set_period(1, 1, 1);

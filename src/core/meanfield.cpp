@@ -1,10 +1,14 @@
 #include "meanfield.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <stdexcept>
+#include <string>
 
 #include "symmetry_context.h"
 #include "pbc.h"
@@ -13,6 +17,342 @@
 #include "../math/lapack_connector.h"
 
 namespace librpa_int {
+
+namespace
+{
+using GridKey = std::array<int, 3>;
+
+int wrap_tetra_index(const int index, const int period)
+{
+    const int remainder = index % period;
+    return remainder < 0 ? remainder + period : remainder;
+}
+
+double reduce_fractional_coordinate(double value)
+{
+    value -= std::floor(value);
+    if (value >= 1.0 - 1e-12) value = 0.0;
+    if (value < 0.0 && value > -1e-12) value = 0.0;
+    return value;
+}
+
+struct TetrahedronGrid
+{
+    std::array<int, 3> period{};
+    std::array<std::vector<double>, 3> coordinates;
+    std::map<GridKey, std::size_t> q_index;
+};
+
+using SmallMatrix5 = std::array<std::array<std::complex<double>, 5>, 5>;
+
+SmallMatrix5 multiply_small_matrix(const SmallMatrix5& lhs, const SmallMatrix5& rhs)
+{
+    SmallMatrix5 product{};
+    for (int row = 0; row != 5; ++row)
+        for (int inner = 0; inner != 5; ++inner)
+            for (int col = 0; col != 5; ++col)
+                product[row][col] += lhs[row][inner] * rhs[inner][col];
+    return product;
+}
+
+double small_matrix_max_abs(const SmallMatrix5& matrix)
+{
+    double maximum = 0.0;
+    for (const auto& row : matrix)
+        for (const auto value : row) maximum = std::max(maximum, std::abs(value));
+    return maximum;
+}
+
+SmallMatrix5 exponential_small_matrix(SmallMatrix5 matrix)
+{
+    double row_norm = 0.0;
+    for (const auto& row : matrix)
+    {
+        double sum = 0.0;
+        for (const auto value : row) sum += std::abs(value);
+        row_norm = std::max(row_norm, sum);
+    }
+    int squarings = 0;
+    while (row_norm > 0.5)
+    {
+        row_norm *= 0.5;
+        ++squarings;
+    }
+    const double scale = std::ldexp(1.0, -squarings);
+    for (auto& row : matrix)
+        for (auto& value : row) value *= scale;
+
+    SmallMatrix5 result{};
+    for (int index = 0; index != 5; ++index) result[index][index] = 1.0;
+    SmallMatrix5 term = result;
+    for (int order = 1; order != 65; ++order)
+    {
+        term = multiply_small_matrix(term, matrix);
+        for (auto& row : term)
+            for (auto& value : row) value /= static_cast<double>(order);
+        for (int row = 0; row != 5; ++row)
+            for (int col = 0; col != 5; ++col) result[row][col] += term[row][col];
+        if (small_matrix_max_abs(term) < 1e-15 * std::max(1.0, small_matrix_max_abs(result))) break;
+    }
+    for (int iteration = 0; iteration != squarings; ++iteration)
+        result = multiply_small_matrix(result, result);
+    return result;
+}
+
+std::complex<double> simplex_fourier_linear_moment(
+    const std::array<std::complex<double>, 4>& phases, const int vertex)
+{
+    SmallMatrix5 matrix{};
+    for (int index = 0; index != 5; ++index)
+    {
+        const auto phase = index == 4 ? phases[vertex] : phases[index];
+        matrix[index][index] = phase - phases[0];
+        if (index + 1 != 5) matrix[index][index + 1] = 1.0;
+    }
+    return std::exp(phases[0]) * exponential_small_matrix(matrix)[0][4];
+}
+
+struct TetrahedronFourierWeightCache
+{
+    std::vector<Vector3_Order<double>> kfrac_list;
+    std::map<Vector3_Order<int>, std::vector<std::complex<double>>> weights_by_R;
+};
+
+bool same_tetrahedron_kgrid(const std::vector<Vector3_Order<double>>& lhs,
+                            const std::vector<Vector3_Order<double>>& rhs)
+{
+    if (lhs.size() != rhs.size()) return false;
+    for (std::size_t index = 0; index != lhs.size(); ++index)
+        if (std::abs(lhs[index].x - rhs[index].x) > 1e-14 ||
+            std::abs(lhs[index].y - rhs[index].y) > 1e-14 ||
+            std::abs(lhs[index].z - rhs[index].z) > 1e-14)
+            return false;
+    return true;
+}
+
+TetrahedronFourierWeightCache& tetrahedron_fourier_weight_cache()
+{
+    thread_local TetrahedronFourierWeightCache cache;
+    return cache;
+}
+
+TetrahedronGrid infer_tetrahedron_grid(
+    const std::vector<Vector3_Order<double>>& kfrac_list)
+{
+    if (kfrac_list.empty())
+        throw std::invalid_argument("tetrahedron transform requires a nonempty k grid");
+
+    TetrahedronGrid grid;
+    for (int axis = 0; axis != 3; ++axis)
+    {
+        std::vector<double> values;
+        values.reserve(kfrac_list.size());
+        for (const auto& k : kfrac_list)
+        {
+            const double value = axis == 0 ? k.x : axis == 1 ? k.y : k.z;
+            if (!std::isfinite(value))
+                throw std::invalid_argument("tetrahedron transform found a nonfinite k point");
+            values.push_back(reduce_fractional_coordinate(value));
+        }
+        std::sort(values.begin(), values.end());
+        std::vector<double> unique;
+        for (const double value : values)
+            if (unique.empty() || std::abs(value - unique.back()) > 1e-10)
+                unique.push_back(value);
+        if (unique.empty())
+            throw std::invalid_argument("tetrahedron transform found no k values");
+        const auto period = static_cast<int>(unique.size());
+        for (int i = 0; i != period; ++i)
+        {
+            const double next = i + 1 == period ? unique.front() + 1.0 : unique[i + 1];
+            if (std::abs((next - unique[i]) - 1.0 / period) > 1e-8)
+                throw std::invalid_argument("tetrahedron transform requires a uniform periodic grid");
+        }
+        grid.period[axis] = period;
+        grid.coordinates[axis] = std::move(unique);
+    }
+
+    const std::size_t expected = static_cast<std::size_t>(grid.period[0]) * grid.period[1] *
+                                 grid.period[2];
+    if (expected != kfrac_list.size())
+        throw std::invalid_argument("tetrahedron transform requires a complete 3D k grid");
+
+    for (std::size_t ik = 0; ik != kfrac_list.size(); ++ik)
+    {
+        const auto& k = kfrac_list[ik];
+        GridKey key{};
+        for (int axis = 0; axis != 3; ++axis)
+        {
+            const double value = reduce_fractional_coordinate(
+                axis == 0 ? k.x : axis == 1 ? k.y : k.z);
+            const auto& coordinates = grid.coordinates[axis];
+            const auto iter = std::lower_bound(coordinates.begin(), coordinates.end(), value);
+            if (iter == coordinates.end() || std::abs(*iter - value) > 1e-10)
+                throw std::invalid_argument("tetrahedron transform k point is off the inferred grid");
+            key[axis] = static_cast<int>(iter - coordinates.begin());
+        }
+        if (!grid.q_index.emplace(key, ik).second)
+            throw std::invalid_argument("tetrahedron transform found duplicate k points");
+    }
+    return grid;
+}
+}  // namespace
+
+namespace
+{
+bool tetrahedron_env_requested(const char* name)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return false;
+    if (std::string(value) != "enabled")
+        throw std::invalid_argument(std::string(name) + " must be unset or 'enabled'");
+    return true;
+}
+}  // namespace
+
+bool tetrahedron_full_gw_requested()
+{
+    return tetrahedron_env_requested("LIBRPA_TETRA_FULL_GW");
+}
+
+bool tetrahedron_source_g_requested()
+{
+    return tetrahedron_full_gw_requested() ||
+           tetrahedron_env_requested("LIBRPA_TETRA_SOURCE_G");
+}
+
+Vector3_Order<int> tetrahedron_unfolded_image_factors()
+{
+    const char* value = std::getenv("LIBRPA_TETRA_IMAGE_FACTOR");
+    if (value == nullptr || *value == '\0') return {3, 3, 3};
+    int factor = 0;
+    try
+    {
+        std::size_t consumed = 0;
+        factor = std::stoi(value, &consumed);
+        if (consumed != std::string(value).size())
+            throw std::invalid_argument("trailing characters");
+    }
+    catch (const std::exception&)
+    {
+        throw std::invalid_argument(
+            "LIBRPA_TETRA_IMAGE_FACTOR must be a positive odd integer");
+    }
+    if (factor <= 0 || factor % 2 == 0)
+        throw std::invalid_argument("LIBRPA_TETRA_IMAGE_FACTOR must be a positive odd integer");
+    return {factor, factor, factor};
+}
+
+std::vector<std::complex<double>> build_tetrahedron_fourier_weights(
+    const std::vector<Vector3_Order<double>>& kfrac_list, const Vector3_Order<int>& R)
+{
+    const auto grid = infer_tetrahedron_grid(kfrac_list);
+    const std::size_t n_k = kfrac_list.size();
+    auto& cache = tetrahedron_fourier_weight_cache();
+    if (!same_tetrahedron_kgrid(cache.kfrac_list, kfrac_list))
+    {
+        cache.kfrac_list = kfrac_list;
+        cache.weights_by_R.clear();
+    }
+    const auto cached = cache.weights_by_R.find(R);
+    if (cached != cache.weights_by_R.end()) return cached->second;
+
+    std::vector<std::complex<double>> weights(n_k, {0.0, 0.0});
+
+    static constexpr std::array<std::array<std::array<int, 3>, 4>, 6> tetra_vertices{
+        {{{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {1, 1, 1}}},
+         {{{0, 0, 0}, {1, 1, 0}, {0, 1, 0}, {1, 1, 1}}},
+         {{{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {1, 1, 1}}},
+         {{{0, 0, 0}, {0, 1, 1}, {0, 0, 1}, {1, 1, 1}}},
+         {{{0, 0, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}}},
+         {{{0, 0, 0}, {1, 0, 1}, {1, 0, 0}, {1, 1, 1}}}}};
+    const double tetra_volume = 1.0 / static_cast<double>(n_k);
+
+    for (int ix = 0; ix != grid.period[0]; ++ix)
+        for (int iy = 0; iy != grid.period[1]; ++iy)
+            for (int iz = 0; iz != grid.period[2]; ++iz)
+                for (const auto& tetra : tetra_vertices)
+                {
+                    std::array<std::size_t, 4> vertices{};
+                    std::array<Vector3_Order<double>, 4> coordinates{};
+                    for (int vertex = 0; vertex != 4; ++vertex)
+                    {
+                        const auto& offset = tetra[vertex];
+                        const GridKey key{wrap_tetra_index(ix + offset[0], grid.period[0]),
+                                          wrap_tetra_index(iy + offset[1], grid.period[1]),
+                                          wrap_tetra_index(iz + offset[2], grid.period[2])};
+                        vertices[vertex] = grid.q_index.at(key);
+                        coordinates[vertex] = {
+                            grid.coordinates[0][key[0]] + (key[0] < ix ? 1.0 : 0.0),
+                            grid.coordinates[1][key[1]] + (key[1] < iy ? 1.0 : 0.0),
+                            grid.coordinates[2][key[2]] + (key[2] < iz ? 1.0 : 0.0)};
+                    }
+                    std::array<std::complex<double>, 4> phases{};
+                    for (int vertex = 0; vertex != 4; ++vertex)
+                    {
+                        const double phase_arg =
+                            -TWO_PI * (coordinates[vertex].x * R.x + coordinates[vertex].y * R.y +
+                                       coordinates[vertex].z * R.z);
+                        phases[vertex] = {0.0, phase_arg};
+                    }
+                    for (int vertex = 0; vertex != 4; ++vertex)
+                        weights[vertices[vertex]] +=
+                            tetra_volume * simplex_fourier_linear_moment(phases, vertex);
+                }
+    cache.weights_by_R.emplace(R, weights);
+    return weights;
+}
+
+std::vector<std::complex<double>> build_tetrahedron_unfolded_coefficients(
+    const std::vector<Vector3_Order<double>>& kfrac_list,
+    const std::vector<Vector3_Order<int>>& bvk_R, const Vector3_Order<int>& X)
+{
+    const auto tetra_weights = build_tetrahedron_fourier_weights(kfrac_list, X);
+    std::vector<std::complex<double>> coefficients(bvk_R.size(), {0.0, 0.0});
+    for (std::size_t ir = 0; ir != bvk_R.size(); ++ir)
+    {
+        for (std::size_t ik = 0; ik != kfrac_list.size(); ++ik)
+        {
+            const double phase_arg =
+                TWO_PI * (kfrac_list[ik] * bvk_R[ir]);
+            coefficients[ir] +=
+                tetra_weights[ik] *
+                std::complex<double>{std::cos(phase_arg), std::sin(phase_arg)};
+        }
+    }
+    return coefficients;
+}
+
+TetrahedronUnfoldedGrid build_tetrahedron_unfolded_grid(
+    const Vector3_Order<int>& bvk_period, const Vector3_Order<int>& image_factors)
+{
+    const auto expanded_period_axis = [](const int period, const int factor) {
+        if (period <= 0)
+            throw std::invalid_argument("tetrahedron unfolded grid requires positive BvK periods");
+        if (factor <= 0 || factor % 2 == 0)
+            throw std::invalid_argument(
+                "tetrahedron unfolded grid requires positive odd image factors");
+        if (period > std::numeric_limits<int>::max() / factor)
+            throw std::invalid_argument("tetrahedron unfolded grid period overflows int");
+        return period * factor;
+    };
+
+    TetrahedronUnfoldedGrid grid;
+    grid.period = {
+        expanded_period_axis(bvk_period.x, image_factors.x),
+        expanded_period_axis(bvk_period.y, image_factors.y),
+        expanded_period_axis(bvk_period.z, image_factors.z)};
+    grid.Rlist = construct_R_grid(grid.period);
+    return grid;
+}
+
+Vector3_Order<int> fold_tetrahedron_unfolded_translation(
+    const Vector3_Order<int>& translation, const Vector3_Order<int>& bvk_period)
+{
+    if (bvk_period.x <= 0 || bvk_period.y <= 0 || bvk_period.z <= 0)
+        throw std::invalid_argument("tetrahedron folding requires positive BvK periods");
+    return translation % bvk_period;
+}
 
 struct SymmetryKStarMeanFieldRestoreEntry
 {
@@ -835,6 +1175,11 @@ std::map<double, std::map<Vector3_Order<int>, ComplexMatrix>> MeanField::get_gf_
     const std::vector<Vector3_Order<int>> &Rs) const
 {
     std::map<double, std::map<Vector3_Order<int>, ComplexMatrix>> gf_tau_R;
+    const bool use_tetra = tetrahedron_source_g_requested();
+    std::map<Vector3_Order<int>, std::vector<std::complex<double>>> tetra_weights;
+    if (use_tetra)
+        for (const auto& R : Rs)
+            tetra_weights.emplace(R, build_tetrahedron_fourier_weights(kfrac_list, R));
     for (const auto &tau : imagtimes)
     {
         gf_tau_R[tau] = {};
@@ -859,9 +1204,15 @@ std::map<double, std::map<Vector3_Order<int>, ComplexMatrix>> MeanField::get_gf_
             const auto gf_k = transpose(*wfc_bra, false) * scaled_wfc_conj;
             for (const auto &R : Rs)
             {
-                double ang = -kfrac_list[ik] * R * TWO_PI;
-                auto kphase = std::complex<double>(cos(ang), sin(ang));
-                auto phase = kphase * (tau > 0 ? 1.0 : -1.0);
+                std::complex<double> phase;
+                if (use_tetra)
+                    phase = tetra_weights.at(R)[ik] * static_cast<double>(n_kpoints);
+                else
+                {
+                    double ang = -kfrac_list[ik] * R * TWO_PI;
+                    phase = std::complex<double>(cos(ang), sin(ang));
+                }
+                phase *= (tau > 0 ? 1.0 : -1.0);
                 if (gf_tau_R.count(tau) == 0 || gf_tau_R.at(tau).count(R) == 0)
                 {
                     gf_tau_R[tau][R].create(n_aos, n_aos);

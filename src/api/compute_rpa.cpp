@@ -106,7 +106,16 @@ double librpa_get_rpa_correlation_energy(LibrpaHandler *h, const LibrpaOptions *
     // std::cout << "n_abf * " << pds->p_chi0->atbasis_abf.nb_total;
 
     profiler.start("chi0_build", "Build response function chi0");
-    chi0.build(routing, pds->cs_data, pds->atpairs_local, pds->basis_aux, pds->sinvS,
+    const bool use_shrink_abfs = opts.use_shrink_abfs == LIBRPA_SWITCH_ON;
+    const bool shrink_chi_from_full_abfs =
+        use_shrink_abfs && opts.use_shrink_chi == LIBRPA_SWITCH_ON;
+    const auto &cs_data_chi0 =
+        use_shrink_abfs && !shrink_chi_from_full_abfs ? pds->cs_data_shrink : pds->cs_data;
+    const auto &basis_aux_chi0 =
+        use_shrink_abfs && !shrink_chi_from_full_abfs ? pds->basis_aux_shrink : pds->basis_aux;
+    std::map<Vector3_Order<double>, ComplexMatrix> empty_sinvS;
+    auto &sinvS_chi0 = shrink_chi_from_full_abfs ? pds->sinvS : empty_sinvS;
+    chi0.build(routing, cs_data_chi0, pds->atpairs_local, basis_aux_chi0, sinvS_chi0,
                pds->blacs_h);
     profiler.stop("chi0_build");
 

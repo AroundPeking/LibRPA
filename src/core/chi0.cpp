@@ -3,6 +3,7 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +42,7 @@
 #include "pbc.h"
 #include "ri.h"
 #include "symmetry_context.h"
+#include "tetrahedron_quadrature.h"
 #include "utils_atomic_basis_blacs.h"
 #ifdef LIBRPA_USE_LIBRI
 #include <RI/physics/RPA.h>
@@ -88,6 +90,36 @@ static bool direct_bandpair_vertex_export_requested(const char *value)
         "LIBRPA_DIRECT_CHI0_BANDPAIR_VERTEX_EXPORT accepts only the explicit value 'enabled'");
 }
 
+static bool direct_bandpair_tetrahedron_diagnostic_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_DIAG accepts only the explicit value 'enabled'");
+}
+
+static bool direct_bandpair_tetrahedron_reference_requested(const char *value)
+{
+    if (value == nullptr || value[0] == '\0') return false;
+    if (std::string(value) == "enabled") return true;
+    throw std::invalid_argument(
+        "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE accepts only the explicit value 'enabled'");
+}
+
+static std::vector<PeriodicTetrahedronQuadraturePoint> build_direct_tetrahedron_quadrature(
+    const PeriodicBoundaryData &pbc)
+{
+    const auto n_k = pbc.kfrac_list.size();
+    const auto expected = static_cast<std::size_t>(pbc.period.x) *
+                          static_cast<std::size_t>(pbc.period.y) *
+                          static_cast<std::size_t>(pbc.period.z);
+    if (n_k == 0 || expected != n_k)
+        throw std::invalid_argument(
+            "direct band-pair tetrahedron diagnostic requires a complete periodic k grid");
+
+    return build_periodic_tetrahedron_quadrature(pbc.period, pbc.kfrac_list);
+}
+
 double chi0_spacetime_spin_scale(const int n_spinor, const int n_spins)
 {
     if (n_spinor <= 0 || n_spins <= 0)
@@ -104,8 +136,7 @@ template <typename Tdata>
 using Chi0CollectMap = std::map<int, std::map<Chi0BlockKey, RI::Tensor<Tdata>>>;
 
 template <typename Tdata>
-static Tdata time_to_frequency_factor_as(const TFGrids &tfg,
-                                         const std::size_t ifreq,
+static Tdata time_to_frequency_factor_as(const TFGrids &tfg, const std::size_t ifreq,
                                          const std::size_t itime)
 {
     const auto factor = tfg.get_time_to_frequency_factor(ifreq, itime);
@@ -779,8 +810,7 @@ Chi0::Chi0(const MeanField &mf_in, const AtomicBasis &atbasis_wfc_in,
     {
         const auto &reference = mf.get_fermi_dirac_reference();
         const double beta_kbt = tfg.get_finite_beta_ha_inv() * reference.kbt_ha;
-        if (!reference.enabled || !std::isfinite(beta_kbt) ||
-            std::abs(beta_kbt - 1.0) > 1e-10)
+        if (!reference.enabled || !std::isfinite(beta_kbt) || std::abs(beta_kbt - 1.0) > 1e-10)
             throw LIBRPA_RUNTIME_ERROR(
                 "finite-beta chi0 requires an FD reference at the grid temperature");
     }
@@ -819,6 +849,13 @@ void Chi0::build(LibrpaParallelRouting routing, const Cs_LRI &Cs,
         use_space_time = true;
     }
 
+    if (direct_bandpair_tetrahedron_reference_requested(
+            std::getenv("LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE")))
+    {
+        run_direct_bandpair_chi0_tetrahedron_reference(Cs, abf_Cs, sinvS, atpairs_ABF);
+        return;
+    }
+
     if (comm_h.is_root()) tfg.show();
     comm_h.barrier();
 
@@ -827,7 +864,20 @@ void Chi0::build(LibrpaParallelRouting routing, const Cs_LRI &Cs,
     // use space-time method
     if (use_space_time)
     {
-        for (auto R : this->pbc.Rlist) Rlist_gf.push_back(R);
+        Rlist_gf.clear();
+        const bool use_tetra_unfolded_grid = tetrahedron_full_gw_requested();
+        const auto tetra_grid = use_tetra_unfolded_grid
+                                    ? build_tetrahedron_unfolded_grid(
+                                          this->pbc.period, tetrahedron_unfolded_image_factors())
+                                    : TetrahedronUnfoldedGrid{this->pbc.period, this->pbc.Rlist};
+        const auto &source_Rlist = use_tetra_unfolded_grid ? tetra_grid.Rlist : this->pbc.Rlist;
+        Rlist_gf.insert(Rlist_gf.end(), source_Rlist.begin(), source_Rlist.end());
+        if (use_tetra_unfolded_grid && comm_h.is_root())
+            global::lib_printf(
+                "Finite-temperature tetrahedron chi0: expanded real-space period = (%d,%d,%d), "
+                "images = %zu\n",
+                tetra_grid.period.x, tetra_grid.period.y, tetra_grid.period.z,
+                tetra_grid.Rlist.size());
 
         if (routing == LIBRPA_ROUTING_LIBRI)
         {
@@ -868,7 +918,7 @@ void Chi0::build(LibrpaParallelRouting routing, const Cs_LRI &Cs,
 
     if (direct_bandpair_chi0_diagnostic_requested(std::getenv("LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG")))
     {
-        run_direct_bandpair_chi0_diagnostic(Cs, !sinvS.empty());
+        run_direct_bandpair_chi0_diagnostic(Cs, abf_Cs, sinvS);
     }
 
     // Free the intermediate Green's functions to lower memory load
@@ -918,8 +968,7 @@ void Chi0::build_gf_Rt(Vector3_Order<int> R, double tau)
                         {
                             const double scale = mf.green_spectral_amplitude(
                                 is, ik, ib, tau, 1.0 / static_cast<double>(nkpts));
-                            LapackConnector::scal(naos, scale,
-                                                  scaled_wfc_conj.c + naos * ib, 1);
+                            LapackConnector::scal(naos, scale, scaled_wfc_conj.c + naos * ib, 1);
                         }
                         if (nbands_G >= 0)
                         {
@@ -985,14 +1034,12 @@ void Chi0::build_chi0_q_space_time(const LibrpaParallelRouting routing, const Cs
 {
     const bool force_complex_spacetime = force_complex_spacetime_diagnostic_requested(
         std::getenv("LIBRPA_FORCE_COMPLEX_SPACETIME_DIAG"));
-    const bool finite_temperature =
-        tfg.get_grid_type() == LIBRPA_TFGRID_FD_MATSUBARA;
+    const bool finite_temperature = tfg.get_grid_type() == LIBRPA_TFGRID_FD_MATSUBARA;
     if (finite_temperature && routing != LIBRPA_ROUTING_LIBRI)
         throw LIBRPA_RUNTIME_ERROR(
             "finite-temperature space-time chi0 currently requires LibRI routing");
     const bool physical_soc = mf.get_n_spinor() > 1;
-    const bool use_complex_tensor =
-        physical_soc || force_complex_spacetime || finite_temperature;
+    const bool use_complex_tensor = physical_soc || force_complex_spacetime || finite_temperature;
     if (force_complex_spacetime && comm_h.is_root())
     {
         global::lib_printf(
@@ -1043,6 +1090,7 @@ static void build_gf_Rt_libri_serial(
     const auto nkpts = mf.get_n_kpoints();
     const auto nbands = mf.get_n_bands();
     const auto naos = mf.get_n_aos();
+    const bool use_tetrahedron_transform = tetrahedron_source_g_requested();
 
     assert(kfrac_list.size() == as_size(nkpts));
     assert(nbands_G < nbands);
@@ -1060,7 +1108,8 @@ static void build_gf_Rt_libri_serial(
         atbasis_wfc.has_l_shells()
             ? atbasis_wfc.build_species_basis_layouts(symmetry_context.atom_to_type)
             : std::vector<SpeciesBasisLayout>{};
-    const bool can_try_symmetry_kstar_restore = use_symmetry_context && !wfc_layouts.empty();
+    const bool can_try_symmetry_kstar_restore =
+        use_symmetry_context && !wfc_layouts.empty() && !use_tetrahedron_transform;
     const auto full_grid_kstar_representatives =
         can_try_symmetry_kstar_restore
             ? build_symmetry_full_grid_kstar_representative_indices(symmetry_context, kfrac_list)
@@ -1162,6 +1211,9 @@ static void build_gf_Rt_libri_serial(
 
         const auto R = R_IJs.first;
         const auto IJs = R_IJs.second;
+        const auto tetra_weights = use_tetrahedron_transform
+                                       ? build_tetrahedron_fourier_weights(kfrac_list, R)
+                                       : std::vector<std::complex<double>>{};
         const std::array<int, 3> Ra{R.x, R.y, R.z};
         // global::ofs_myid << "Chi0 Handling IJs: " << IJs << " - R " << Ra << std::endl;
 
@@ -1169,8 +1221,14 @@ static void build_gf_Rt_libri_serial(
 #pragma omp parallel for schedule(dynamic)
         for (int ik = 0; ik != nkpts; ik++)
         {
-            double ang = -(kfrac_list[ik] * R) * TWO_PI;
-            complex<double> kphase = complex<double>(cos(ang), sin(ang));
+            complex<double> kphase;
+            if (use_tetrahedron_transform)
+                kphase = tetra_weights.at(ik) * static_cast<double>(nkpts);
+            else
+            {
+                double ang = -(kfrac_list[ik] * R) * TWO_PI;
+                kphase = complex<double>(cos(ang), sin(ang));
+            }
             const auto &ev1 = mf.get_eigenvectors().at(ispin).at(isoc1).at(ik);
             const auto &ev2 = mf.get_eigenvectors().at(ispin).at(isoc2).at(ik);
             auto scaled_wfc_conj = conj(ev2);
@@ -1178,8 +1236,8 @@ static void build_gf_Rt_libri_serial(
             // " " << isoc1 << " " << isoc2 << std::endl;
             for (int ib = 0; ib != nbands; ib++)
             {
-                const double scale = mf.green_spectral_amplitude(
-                    ispin, ik, ib, tau, 1.0 / static_cast<double>(nkpts));
+                const double scale = mf.green_spectral_amplitude(ispin, ik, ib, tau,
+                                                                 1.0 / static_cast<double>(nkpts));
                 LapackConnector::scal(naos, scale, scaled_wfc_conj.c + naos * ib, 1);
             }
             if (nbands_G >= 0)
@@ -1446,6 +1504,29 @@ static void chi_libri_ft_ct(
     }
 }
 
+// The four LibRI CGGC sectors have already been summed in each input tensor.
+// Folding is linear and may therefore be completed before the time-to-frequency
+// accumulation. This avoids retaining one unfolded R map for every frequency.
+template <typename Tdata>
+static Chi0CollectMap<Tdata> fold_tetrahedron_chi0_R(const Chi0CollectMap<Tdata> &unfolded,
+                                                     const Vector3_Order<int> &bvk_period)
+{
+    Chi0CollectMap<Tdata> folded;
+    for (const auto &[Mu, blocks] : unfolded)
+        for (const auto &[Nu_R, tensor] : blocks)
+        {
+            const Vector3_Order<int> R{Nu_R.second[0], Nu_R.second[1], Nu_R.second[2]};
+            const auto R_folded = fold_tetrahedron_unfolded_translation(R, bvk_period);
+            const Chi0BlockKey key{Nu_R.first, {R_folded.x, R_folded.y, R_folded.z}};
+            auto &target = folded[Mu][key];
+            if (target.empty())
+                target = tensor.copy();
+            else
+                target += tensor;
+    }
+    return folded;
+}
+
 template <typename Tdata>
 static void chi_libri_ct_accumulate_R(const int &isp, const double spin_scale, const int &it,
                                       const TFGrids &tfg, const Chi0CollectMap<Tdata> &chi0s_IJR,
@@ -1492,8 +1573,7 @@ static void chi_libri_ct_accumulate_R(const int &isp, const double spin_scale, c
         const auto &task = tasks[itask];
         for (std::size_t ifreq = 0; ifreq != freqs.size(); ++ifreq)
         {
-            const Tdata scale = spin_scale
-                                * time_to_frequency_factor_as<Tdata>(tfg, ifreq, it);
+            const Tdata scale = spin_scale * time_to_frequency_factor_as<Tdata>(tfg, ifreq, it);
             *task.dst_by_freq[ifreq]->data += scale * *task.src->data;
         }
     }
@@ -1712,18 +1792,19 @@ static void shrink_abfs_chi0(
 
     const bool use_gamma_transform = use_gamma_shrink_transform_diagnostic_requested(
         std::getenv("LIBRPA_USE_GAMMA_SHRINK_TRANSFORM_DIAG"));
-    const auto gamma_q = std::min_element(
-        qlist.begin(), qlist.end(), [](const auto &lhs, const auto &rhs) {
-            return lhs.x * lhs.x + lhs.y * lhs.y + lhs.z * lhs.z <
-                   rhs.x * rhs.x + rhs.y * rhs.y + rhs.z * rhs.z;
-        });
+    const auto gamma_q = std::min_element(qlist.begin(), qlist.end(),
+                                          [](const auto &lhs, const auto &rhs)
+                                          {
+                                              return lhs.x * lhs.x + lhs.y * lhs.y + lhs.z * lhs.z <
+                                                     rhs.x * rhs.x + rhs.y * rhs.y + rhs.z * rhs.z;
+                                          });
     if (use_gamma_transform &&
         (gamma_q == qlist.end() ||
          gamma_q->x * gamma_q->x + gamma_q->y * gamma_q->y + gamma_q->z * gamma_q->z > 1.0e-20))
         throw std::logic_error("Gamma shrink-transform diagnostic requires q=0");
     if (use_gamma_transform && comm_h.is_root())
-        global::ofs_myid
-            << "Diagnostic: using the q=0 shrink transform for every finite q." << std::endl;
+        global::ofs_myid << "Diagnostic: using the q=0 shrink transform for every finite q."
+                         << std::endl;
 
     const complex<double> CONE{1.0, 0.0};
     ArrayDesc desc_nabf_nabf_ll(blacs_ctxt_h);
@@ -1915,7 +1996,13 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
     throw LIBRPA_RUNTIME_ERROR("compilation");
 #else
     const bool use_shrink_chi = sinvS.size() > 0;
-    const bool use_delayed_ft_shrink = use_shrink_chi && global::dev_opts.use_delayed_ft_shrink;
+    const bool use_tetra_unfolded_grid = tetrahedron_full_gw_requested();
+    const auto tetra_grid = use_tetra_unfolded_grid
+                                ? build_tetrahedron_unfolded_grid(
+                                      this->pbc.period, tetrahedron_unfolded_image_factors())
+                                : TetrahedronUnfoldedGrid{this->pbc.period, this->pbc.Rlist};
+    const bool use_delayed_ft_shrink =
+        use_shrink_chi && (global::dev_opts.use_delayed_ft_shrink || use_tetra_unfolded_grid);
     const double spin_scale = chi0_spacetime_spin_scale(mf.get_n_spinor(), mf.get_n_spins());
     global::profiler.start("LibRI_routing", "Loop over LibRI");
     const auto &qlist = this->active_qpoints();
@@ -1923,8 +2010,10 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
     const auto all_atpairs_ABF = generate_atom_pair_from_nat(atbasis_abf.n_atoms, false);
     const auto q_uhap_process_shape =
         resolve_chi0_q_uhap_process_shape(comm_h.nprocs, qlist.size(), all_atpairs_ABF.size());
-    const bool chi0_rspace_symmetry_available = can_use_chi0_rspace_symmetry(
-        this->symmetry_context, abf_Cs, Rlist_gf, this->use_symmetry_context);
+    const bool chi0_rspace_symmetry_available =
+        !use_tetra_unfolded_grid &&
+        can_use_chi0_rspace_symmetry(this->symmetry_context, abf_Cs, Rlist_gf,
+                                     this->use_symmetry_context);
     const bool chi0_band_space_complete =
         rspace_symmetry_has_complete_band_space(this->mf, this->nbands_G);
     const bool disable_chi0_rspace_symmetry_diagnostic =
@@ -2036,7 +2125,10 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
     }
     const auto &lat_array = this->pbc.latvec_array;
 
-    const auto &period_array = this->pbc.period_array;
+    const std::array<int, 3> period_array =
+        use_tetra_unfolded_grid
+            ? std::array<int, 3>{tetra_grid.period.x, tetra_grid.period.y, tetra_grid.period.z}
+            : this->pbc.period_array;
     const auto atom_nw = atbasis_wfc.get_atom_nb_map<int>();
 
     RI::RPA<int, int, 3, Tdata> rpa;
@@ -2427,6 +2519,13 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(
             }
             else
             {
+                if (use_tetra_unfolded_grid)
+                {
+                    profiler.start("chi0_libri_routing_fold_R",
+                                   "Fold tetrahedron real-space images");
+                    chi0s_IJR = fold_tetrahedron_chi0_R<Tdata>(chi0s_IJR, this->pbc.period);
+                    profiler.stop("chi0_libri_routing_fold_R");
+                }
                 profiler.start("chi0_libri_routing_ct_R", "Time-frequency transform in R-space");
                 const auto &atpairs_ct = use_chi0_rspace_symmetry && !use_shrink_chi
                                              ? symmetry_irreducible_atpairs
@@ -2614,8 +2713,7 @@ void Chi0::build_chi0_q_space_time_R_tau_routing(const Cs_LRI &Cs,
                             for (int ifreq = 0; ifreq != nfreq; ifreq++)
                             {
                                 double freq = tfg.get_freq_nodes()[ifreq];
-                                const auto trans =
-                                    tfg.get_time_to_frequency_factor(ifreq, itau);
+                                const auto trans = tfg.get_time_to_frequency_factor(ifreq, itau);
                                 const complex<double> weight = trans * kphase;
                                 /* cout << weight << endl; */
                                 // if(freq==tfg.get_freq_nodes()[10] && tau ==
@@ -3010,17 +3108,16 @@ void Chi0::build_chi0_q_conventional(const Cs_LRI &Cs, const vector<atpair_t> &a
     throw std::logic_error("Not implemented");
 }
 
-static ComplexMatrix assemble_lri_vertex_matrix(const Cs_LRI &Cs, const AtomicBasis &atbasis_wfc,
-                                                const int mu_atom, const int mu_local,
-                                                const Vector3_Order<double> &kfrac)
+static void accumulate_lri_vertex_matrix(const Cs_LRI &Cs, const AtomicBasis &atbasis_wfc,
+                                         const int mu_atom, const int mu_local,
+                                         const Vector3_Order<double> &kfrac,
+                                         const std::complex<double> coefficient,
+                                         ComplexMatrix &c_mu)
 {
     const auto it_mu = Cs.data_libri.find(mu_atom);
     if (it_mu == Cs.data_libri.end())
         throw LIBRPA_RUNTIME_ERROR("direct band-pair chi0 diagnostic is missing LRI coefficients");
 
-    const int n_aos = static_cast<int>(atbasis_wfc.nb_total);
-    ComplexMatrix c_mu(n_aos, n_aos);
-    c_mu.zero_out();
     for (const auto &[j_cell, coefficients] : it_mu->second)
     {
         const int j_atom = j_cell.first;
@@ -3035,8 +3132,49 @@ static ComplexMatrix assemble_lri_vertex_matrix(const Cs_LRI &Cs, const AtomicBa
             for (int j_local = 0; j_local != atbasis_wfc.get_atom_nb(j_atom); ++j_local)
             {
                 const int j_ao = atbasis_wfc.get_global_index(j_atom, j_local);
-                c_mu(i_ao, j_ao) += phase * coefficients(mu_local, i_local, j_local);
+                c_mu(i_ao, j_ao) += coefficient * phase * coefficients(mu_local, i_local, j_local);
             }
+        }
+    }
+}
+
+static ComplexMatrix assemble_lri_vertex_matrix(const Cs_LRI &Cs, const AtomicBasis &atbasis_wfc,
+                                                const int mu_atom, const int mu_local,
+                                                const Vector3_Order<double> &kfrac)
+{
+    const int n_aos = static_cast<int>(atbasis_wfc.nb_total);
+    ComplexMatrix c_mu(n_aos, n_aos);
+    c_mu.zero_out();
+    accumulate_lri_vertex_matrix(Cs, atbasis_wfc, mu_atom, mu_local, kfrac, 1.0, c_mu);
+    return c_mu;
+}
+
+static ComplexMatrix assemble_lri_transformed_vertex_matrix(
+    const Cs_LRI &Cs, const AtomicBasis &atbasis_wfc, const AtomicBasis &abf_large,
+    const AtomicBasis &abf_small, const ComplexMatrix &transform, const int small_mu_atom,
+    const int small_mu_local, const Vector3_Order<double> &kfrac)
+{
+    if (abf_large.n_atoms == 0 || abf_small.n_atoms == 0)
+        throw LIBRPA_RUNTIME_ERROR("direct band-pair chi0 diagnostic found no auxiliary atoms");
+
+    const int small_global = abf_small.get_global_index(small_mu_atom, small_mu_local);
+    if (small_global < 0 || small_global >= transform.nr ||
+        transform.nc != static_cast<int>(abf_large.nb_total))
+        throw LIBRPA_RUNTIME_ERROR(
+            "direct band-pair chi0 diagnostic found incompatible shrink-transform dimensions");
+
+    const int n_aos = static_cast<int>(atbasis_wfc.nb_total);
+    ComplexMatrix c_mu(n_aos, n_aos);
+    c_mu.zero_out();
+    for (int large_atom = 0; large_atom != abf_large.n_atoms; ++large_atom)
+    {
+        for (int large_local = 0; large_local != abf_large.get_atom_nb(large_atom); ++large_local)
+        {
+            const int large_global = abf_large.get_global_index(large_atom, large_local);
+            const auto coefficient = transform(small_global, large_global);
+            if (std::abs(coefficient) < 1.0e-15) continue;
+            accumulate_lri_vertex_matrix(Cs, atbasis_wfc, large_atom, large_local, kfrac,
+                                         coefficient, c_mu);
         }
     }
     return c_mu;
@@ -3098,26 +3236,16 @@ static std::complex<double> finite_temperature_bandpair_factor(const double ener
                                                                const double frequency,
                                                                const FermiDiracReference &reference)
 {
-    const double difference = energy_n - energy_m;
-    if (std::abs(difference) < 1.0e-14 && std::abs(frequency) < 1.0e-14)
-        return fermi_dirac_derivative(0.5 * (energy_n + energy_m) - reference.chemical_potential_ha,
-                                      reference.kbt_ha);
-
-    const double occupation_n =
-        fermi_dirac_occupation(energy_n - reference.chemical_potential_ha, reference.kbt_ha);
-    const double occupation_m =
-        fermi_dirac_occupation(energy_m - reference.chemical_potential_ha, reference.kbt_ha);
-    return (occupation_n - occupation_m) / std::complex<double>(difference, frequency);
+    return finite_temperature_tetrahedron_kernel(energy_n, energy_m, frequency, reference);
 }
 
-void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0_was_shrunk)
+void Chi0::run_direct_bandpair_chi0_diagnostic(
+    const Cs_LRI &Cs, const AtomicBasis &abf_Cs,
+    const std::map<Vector3_Order<double>, ComplexMatrix> &sinvS)
 {
     if (comm_h.nprocs != 1)
         throw LIBRPA_RUNTIME_ERROR(
             "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG currently requires one MPI rank");
-    if (chi0_was_shrunk)
-        throw LIBRPA_RUNTIME_ERROR(
-            "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG currently requires an unshrunk auxiliary basis");
     if (is_mf_eigvec_k_distributed_)
         throw LIBRPA_RUNTIME_ERROR(
             "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG requires replicated eigenvectors");
@@ -3136,6 +3264,11 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
             "LIBRPA_DIRECT_CHI0_BANDPAIR_DIAG requires finite-temperature FD occupations");
     if (atbasis_abf.n_atoms == 0 || atbasis_abf.get_atom_nb(0) == 0)
         throw LIBRPA_RUNTIME_ERROR("direct band-pair chi0 diagnostic found no auxiliary functions");
+    if (abf_Cs.n_atoms != atbasis_abf.n_atoms)
+        throw LIBRPA_RUNTIME_ERROR(
+            "direct band-pair chi0 diagnostic found incompatible auxiliary atom counts");
+
+    const bool chi0_was_shrunk = !sinvS.empty();
 
     const auto qlist = active_qpoints();
     auto q_selected = qlist.end();
@@ -3153,6 +3286,22 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
         throw LIBRPA_RUNTIME_ERROR("direct band-pair chi0 diagnostic found no nonzero q point");
     const auto q = *q_selected;
     const auto qfrac = pbc.latvec * q;
+    const ComplexMatrix *q_transform = nullptr;
+    const ComplexMatrix *gamma_transform = nullptr;
+    if (chi0_was_shrunk)
+    {
+        const auto q_transform_it = sinvS.find(q);
+        if (q_transform_it == sinvS.end())
+            throw LIBRPA_RUNTIME_ERROR(
+                "direct band-pair chi0 diagnostic is missing the finite-q shrink transform");
+        const Vector3_Order<double> gamma_q(0.0, 0.0, 0.0);
+        const auto gamma_transform_it = sinvS.find(gamma_q);
+        if (gamma_transform_it == sinvS.end())
+            throw LIBRPA_RUNTIME_ERROR(
+                "direct band-pair chi0 diagnostic is missing the Gamma shrink transform");
+        q_transform = &q_transform_it->second;
+        gamma_transform = &gamma_transform_it->second;
+    }
 
     const int n_kpoints = mf.get_n_kpoints();
     std::vector<int> kplusq(static_cast<std::size_t>(n_kpoints), -1);
@@ -3178,6 +3327,8 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
     const int mu_local = 0;
     const bool export_vertex = direct_bandpair_vertex_export_requested(
         std::getenv("LIBRPA_DIRECT_CHI0_BANDPAIR_VERTEX_EXPORT"));
+    const bool tetrahedron_diagnostic = direct_bandpair_tetrahedron_diagnostic_requested(
+        std::getenv("LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_DIAG"));
     const auto &reference = mf.get_fermi_dirac_reference();
     const double spin_scale = chi0_spacetime_spin_scale(mf.get_n_spinor(), mf.get_n_spins());
     const auto &frequencies = tfg.get_freq_nodes();
@@ -3186,13 +3337,22 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
     global::ofs_myid << std::setprecision(16) << "Direct band-pair chi0 diagnostic: q=(" << q.x
                      << ", " << q.y << ", " << q.z << "), qfrac=(" << qfrac.x << ", " << qfrac.y
                      << ", " << qfrac.z << "), nk=" << n_kpoints << ", nbands=" << n_bands
-                     << ", ABF=(atom 0, local 0), source weights=1/Nk\n";
+                     << ", ABF=(atom 0, local 0), aux_basis="
+                     << (chi0_was_shrunk ? "shrink" : "full") << ", source weights=1/Nk"
+                     << (tetrahedron_diagnostic ? ", tetrahedron quadrature=enabled\n" : "\n");
 
     std::vector<std::complex<double>> direct_source(n_frequencies_to_check, 0.0);
     std::vector<std::complex<double>> direct_target(n_frequencies_to_check, 0.0);
     std::vector<std::complex<double>> direct_target_plus_source_dagger(n_frequencies_to_check, 0.0);
     std::vector<std::complex<double>> direct_source_plus_target_dagger(n_frequencies_to_check, 0.0);
     std::vector<std::complex<double>> direct_gamma(n_frequencies_to_check, 0.0);
+    std::vector<std::vector<double>> tetra_vertex_matrix_elements;
+    if (tetrahedron_diagnostic)
+    {
+        tetra_vertex_matrix_elements.resize(static_cast<std::size_t>(n_kpoints));
+        for (auto &values : tetra_vertex_matrix_elements)
+            values.resize(static_cast<std::size_t>(n_bands) * static_cast<std::size_t>(n_bands));
+    }
     for (int ik = 0; ik != n_kpoints; ++ik)
     {
         const int ikq = kplusq[static_cast<std::size_t>(ik)];
@@ -3201,10 +3361,20 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
         if (wfc_k == nullptr || wfc_kq == nullptr)
             throw LIBRPA_RUNTIME_ERROR("direct band-pair chi0 diagnostic is missing eigenvectors");
 
-        const auto c_source = assemble_lri_vertex_matrix(
-            Cs, atbasis_wfc, mu_atom, mu_local, pbc.kfrac_list[static_cast<std::size_t>(ik)]);
-        const auto c_target = assemble_lri_vertex_matrix(
-            Cs, atbasis_wfc, mu_atom, mu_local, pbc.kfrac_list[static_cast<std::size_t>(ikq)]);
+        const auto c_source =
+            q_transform == nullptr
+                ? assemble_lri_vertex_matrix(Cs, atbasis_wfc, mu_atom, mu_local,
+                                             pbc.kfrac_list[static_cast<std::size_t>(ik)])
+                : assemble_lri_transformed_vertex_matrix(
+                      Cs, atbasis_wfc, abf_Cs, atbasis_abf, *q_transform, mu_atom, mu_local,
+                      pbc.kfrac_list[static_cast<std::size_t>(ik)]);
+        const auto c_target =
+            q_transform == nullptr
+                ? assemble_lri_vertex_matrix(Cs, atbasis_wfc, mu_atom, mu_local,
+                                             pbc.kfrac_list[static_cast<std::size_t>(ikq)])
+                : assemble_lri_transformed_vertex_matrix(
+                      Cs, atbasis_wfc, abf_Cs, atbasis_abf, *q_transform, mu_atom, mu_local,
+                      pbc.kfrac_list[static_cast<std::size_t>(ikq)]);
         const auto vertex_source = contract_lri_band_vertex(*wfc_k, c_source, *wfc_kq, n_bands);
         const auto vertex_target = contract_lri_band_vertex(*wfc_k, c_target, *wfc_kq, n_bands);
         const auto vertex_target_plus_source_dagger = contract_lri_band_vertex(
@@ -3213,8 +3383,14 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
         const auto vertex_source_plus_target_dagger = contract_lri_band_vertex(
             *wfc_k, add_lri_vertex_matrices(c_source, adjoint_lri_vertex_matrix(c_target)), *wfc_kq,
             n_bands);
+        const auto c_gamma =
+            gamma_transform == nullptr
+                ? c_source
+                : assemble_lri_transformed_vertex_matrix(
+                      Cs, atbasis_wfc, abf_Cs, atbasis_abf, *gamma_transform, mu_atom, mu_local,
+                      pbc.kfrac_list[static_cast<std::size_t>(ik)]);
         const auto vertex_gamma = contract_lri_band_vertex(
-            *wfc_k, add_lri_vertex_matrices(c_source, adjoint_lri_vertex_matrix(c_source)), *wfc_k,
+            *wfc_k, add_lri_vertex_matrices(c_gamma, adjoint_lri_vertex_matrix(c_gamma)), *wfc_k,
             n_bands);
         if (export_vertex)
         {
@@ -3247,6 +3423,14 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
                 const double source_plus_target_dagger_matrix_element =
                     std::norm(vertex_source_plus_target_dagger[vertex_index]);
                 const double gamma_matrix_element = std::norm(vertex_gamma[vertex_index]);
+                if (tetrahedron_diagnostic)
+                    // The finite-q density vertex in the LibRI convention is the
+                    // symmetrized combination C(k+q) + C^dagger(k), not C(k)
+                    // alone.  Store the same vertex that is compared with CGGC
+                    // below so the tetrahedron and uniform band-pair controls
+                    // have an identical integrand.
+                    tetra_vertex_matrix_elements[static_cast<std::size_t>(ik)][vertex_index] =
+                        target_plus_source_dagger_matrix_element;
                 for (std::size_t ifreq = 0; ifreq != n_frequencies_to_check; ++ifreq)
                 {
                     const auto factor = finite_temperature_bandpair_factor(
@@ -3279,6 +3463,52 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
         direct_target_plus_source_dagger[ifreq] *= spin_scale / static_cast<double>(n_kpoints);
         direct_source_plus_target_dagger[ifreq] *= spin_scale / static_cast<double>(n_kpoints);
         direct_gamma[ifreq] *= spin_scale / static_cast<double>(n_kpoints);
+        if (tetrahedron_diagnostic)
+        {
+            const auto tetra_points = build_direct_tetrahedron_quadrature(pbc);
+            std::complex<double> tetra_density_vertex = 0.0;
+            for (const auto &point : tetra_points)
+            {
+                for (int n = 0; n != n_bands; ++n)
+                {
+                    double energy_n = 0.0;
+                    for (int vertex = 0; vertex != 4; ++vertex)
+                        energy_n +=
+                            point.barycentric[vertex] *
+                            mf.get_eigenvals().at(0)(static_cast<int>(point.vertices[vertex]), n);
+                    for (int m = 0; m != n_bands; ++m)
+                    {
+                        double energy_m = 0.0;
+                        double matrix_element = 0.0;
+                        const auto pair_index =
+                            static_cast<std::size_t>(n) * static_cast<std::size_t>(n_bands) +
+                            static_cast<std::size_t>(m);
+                        for (int vertex = 0; vertex != 4; ++vertex)
+                        {
+                            const auto source_vertex = point.vertices[vertex];
+                            const auto target_vertex = kplusq[source_vertex];
+                            energy_m += point.barycentric[vertex] *
+                                        mf.get_eigenvals().at(0)(target_vertex, m);
+                            matrix_element +=
+                                point.barycentric[vertex] *
+                                tetra_vertex_matrix_elements[source_vertex][pair_index];
+                        }
+                        tetra_density_vertex += point.weight *
+                                                finite_temperature_bandpair_factor(
+                                                    energy_n, energy_m, frequency, reference) *
+                                                matrix_element;
+                    }
+                }
+            }
+            tetra_density_vertex *= spin_scale;
+            global::ofs_myid << "  iw=" << frequency
+                             << " tetra_C(k+q)+Cdag(k)=" << tetra_density_vertex
+                             << " absdiff_tetra_uniform="
+                             << std::abs(tetra_density_vertex -
+                                         direct_target_plus_source_dagger[ifreq])
+                             << " absdiff_tetra_CGGC="
+                             << std::abs(space_time - tetra_density_vertex) << "\n";
+        }
         global::ofs_myid << "  iw=" << frequency << " CGGC=" << space_time
                          << " direct_C(k)=" << direct_source[ifreq]
                          << " absdiff_C(k)=" << std::abs(space_time - direct_source[ifreq])
@@ -3294,6 +3524,197 @@ void Chi0::run_direct_bandpair_chi0_diagnostic(const Cs_LRI &Cs, const bool chi0
                          << " gamma_CGGC=" << gamma_space_time
                          << " absdiff_gamma=" << std::abs(gamma_space_time - direct_gamma[ifreq])
                          << "\n";
+    }
+}
+
+void Chi0::run_direct_bandpair_chi0_tetrahedron_reference(
+    const Cs_LRI &Cs, const AtomicBasis &abf_Cs,
+    const std::map<Vector3_Order<double>, ComplexMatrix> &sinvS,
+    const std::vector<atpair_t> &atpairs_ABF)
+{
+    if (comm_h.nprocs != 1)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE currently requires one MPI rank");
+    if (is_mf_eigvec_k_distributed_)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE requires replicated eigenvectors");
+    if (!Cs.use_libri || Cs.data_libri.empty())
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE requires LibRI LRI coefficients");
+    if (mf.get_n_spins() != 1 || mf.get_n_spinor() != 1)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE currently supports one spin and one "
+            "spinor");
+    if (sinvS.empty() && abf_Cs != atbasis_abf)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE found mismatched unshrunk auxiliary "
+            "bases");
+    if (!sinvS.empty() && abf_Cs.n_atoms != atbasis_abf.n_atoms)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE found mismatched auxiliary atom counts");
+    if (!mf.get_fermi_dirac_reference().enabled)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE requires finite-temperature FD "
+            "occupations");
+    if (tfg.get_grid_type() != LIBRPA_TFGRID_FD_MATSUBARA)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE requires a finite-temperature Matsubara "
+            "grid");
+
+    const std::size_t n_kpoints = static_cast<std::size_t>(mf.get_n_kpoints());
+    if (n_kpoints == 0 || n_kpoints != pbc.kfrac_list.size() ||
+        n_kpoints != static_cast<std::size_t>(pbc.get_n_cells_bvk()))
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE requires a complete BvK k mesh");
+    const auto qlist = active_qpoints();
+    if (qlist.size() != n_kpoints)
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE requires the full unreduced q mesh");
+
+    const auto quadrature = build_periodic_tetrahedron_quadrature(pbc.period, pbc.kfrac_list);
+    const auto &reference = mf.get_fermi_dirac_reference();
+    const auto &frequencies = tfg.get_freq_nodes();
+    if (frequencies.empty())
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE requires Matsubara frequencies");
+    const int n_bands = nbands_G < 0 ? mf.get_n_bands() : std::min(nbands_G, mf.get_n_bands());
+    const int n_aux = static_cast<int>(atbasis_abf.nb_total);
+    const std::size_t n_band_pairs = static_cast<std::size_t>(n_bands) * n_bands;
+    const double spin_scale = chi0_spacetime_spin_scale(mf.get_n_spinor(), mf.get_n_spins());
+
+    create_chi0_q_blocks(chi0_q, frequencies, qlist, atpairs_ABF, atbasis_abf);
+    global::lib_printf(
+        "Finite-temperature band-pair tetrahedron reference enabled: nk=%zu, nq=%zu, "
+        "nbands=%d, naux=%d, quadrature points=%zu\n",
+        n_kpoints, qlist.size(), n_bands, n_aux, quadrature.size());
+
+    for (const auto &q : qlist)
+    {
+        const auto qfrac = pbc.latvec * q;
+        std::vector<int> kplusq(n_kpoints, -1);
+        for (std::size_t ik = 0; ik != n_kpoints; ++ik)
+        {
+            const auto target = pbc.kfrac_list[ik] + qfrac;
+            for (std::size_t jk = 0; jk != n_kpoints; ++jk)
+            {
+                if (same_fractional_kpoint(target, pbc.kfrac_list[jk], 1.0e-8))
+                {
+                    kplusq[ik] = static_cast<int>(jk);
+                    break;
+                }
+            }
+            if (kplusq[ik] < 0)
+                throw LIBRPA_RUNTIME_ERROR(
+                    "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE could not map k+q");
+        }
+
+        const ComplexMatrix *q_transform = nullptr;
+        if (!sinvS.empty())
+        {
+            const auto transform_it = sinvS.find(q);
+            if (transform_it == sinvS.end())
+                throw LIBRPA_RUNTIME_ERROR(
+                    "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE is missing the q shrink "
+                    "transform");
+            q_transform = &transform_it->second;
+        }
+
+        // Store the symmetrized LRI density vertex at the grid vertices.  The
+        // complete rho_mu rho_nu^* matrix element is formed at each vertex
+        // and linearly interpolated as the fixed-q Adler-Wiser integrand.
+        std::vector<std::vector<std::complex<double>>> vertices(
+            n_kpoints,
+            std::vector<std::complex<double>>(static_cast<std::size_t>(n_aux) * n_band_pairs));
+        for (std::size_t ik = 0; ik != n_kpoints; ++ik)
+        {
+            const int ikq = kplusq[ik];
+            const auto *wfc_k = mf.find_wfc(0, 0, static_cast<int>(ik));
+            const auto *wfc_kq = mf.find_wfc(0, 0, ikq);
+            if (wfc_k == nullptr || wfc_kq == nullptr)
+                throw LIBRPA_RUNTIME_ERROR(
+                    "LIBRPA_DIRECT_CHI0_BANDPAIR_TETRA_REFERENCE is missing eigenvectors");
+
+            for (int mu_atom = 0; mu_atom != atbasis_abf.n_atoms; ++mu_atom)
+                for (int mu_local = 0; mu_local != atbasis_abf.get_atom_nb(mu_atom); ++mu_local)
+                {
+                    const int mu_global = atbasis_abf.get_global_index(mu_atom, mu_local);
+                    const auto c_source =
+                        q_transform == nullptr
+                            ? assemble_lri_vertex_matrix(Cs, atbasis_wfc, mu_atom, mu_local,
+                                                         pbc.kfrac_list[ik])
+                            : assemble_lri_transformed_vertex_matrix(
+                                  Cs, atbasis_wfc, abf_Cs, atbasis_abf, *q_transform, mu_atom,
+                                  mu_local, pbc.kfrac_list[ik]);
+                    const auto c_target =
+                        q_transform == nullptr
+                            ? assemble_lri_vertex_matrix(
+                                  Cs, atbasis_wfc, mu_atom, mu_local,
+                                  pbc.kfrac_list[static_cast<std::size_t>(ikq)])
+                            : assemble_lri_transformed_vertex_matrix(
+                                  Cs, atbasis_wfc, abf_Cs, atbasis_abf, *q_transform, mu_atom,
+                                  mu_local, pbc.kfrac_list[static_cast<std::size_t>(ikq)]);
+                    const auto vertex = contract_lri_band_vertex(
+                        *wfc_k,
+                        add_lri_vertex_matrices(c_target, adjoint_lri_vertex_matrix(c_source)),
+                        *wfc_kq, n_bands);
+                    for (std::size_t pair = 0; pair != n_band_pairs; ++pair)
+                        vertices[ik][static_cast<std::size_t>(mu_global) * n_band_pairs + pair] =
+                            vertex[pair];
+                }
+        }
+
+        for (const auto frequency : frequencies)
+            for (const auto &point : quadrature)
+                for (int n = 0; n != n_bands; ++n)
+                {
+                    double energy_n = 0.0;
+                    for (int vertex = 0; vertex != 4; ++vertex)
+                        energy_n +=
+                            point.barycentric[vertex] *
+                            mf.get_eigenvals().at(0)(static_cast<int>(point.vertices[vertex]), n);
+                    for (int m = 0; m != n_bands; ++m)
+                    {
+                        double energy_m = 0.0;
+                        const std::size_t pair = static_cast<std::size_t>(n) * n_bands + m;
+                        for (int vertex = 0; vertex != 4; ++vertex)
+                        {
+                            const auto source = point.vertices[vertex];
+                            energy_m += point.barycentric[vertex] *
+                                        mf.get_eigenvals().at(0)(kplusq[source], m);
+                        }
+                        const auto kernel = finite_temperature_tetrahedron_kernel(
+                            energy_n, energy_m, frequency, reference);
+                        for (const auto &[mu_atom, nu_atom] : atpairs_ABF)
+                            for (int mu_local = 0; mu_local != atbasis_abf.get_atom_nb(mu_atom);
+                                 ++mu_local)
+                                for (int nu_local = 0; nu_local != atbasis_abf.get_atom_nb(nu_atom);
+                                     ++nu_local)
+                                {
+                                    const int mu_global =
+                                        atbasis_abf.get_global_index(mu_atom, mu_local);
+                                    const int nu_global =
+                                        atbasis_abf.get_global_index(nu_atom, nu_local);
+                                    std::complex<double> matrix_element = 0.0;
+                                    for (int vertex = 0; vertex != 4; ++vertex)
+                                    {
+                                        const auto source = point.vertices[vertex];
+                                        const auto mu_vertex =
+                                            vertices[source][static_cast<std::size_t>(mu_global) *
+                                                                 n_band_pairs +
+                                                             pair];
+                                        const auto nu_vertex =
+                                            vertices[source][static_cast<std::size_t>(nu_global) *
+                                                                 n_band_pairs +
+                                                             pair];
+                                        matrix_element += point.barycentric[vertex] * mu_vertex *
+                                                          std::conj(nu_vertex);
+                                    }
+                                    auto &block = chi0_q[frequency][q][mu_atom][nu_atom];
+                                    block(mu_local, nu_local) +=
+                                        spin_scale * point.weight * kernel * matrix_element;
+                                }
+                    }
+                }
     }
 }
 

@@ -10,6 +10,7 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -103,8 +104,7 @@ bool should_contract_sigc_in_compressed_abfs(const bool use_shrink_abfs, const c
 {
     const bool requested = direct_compressed_sigc_diagnostic_requested(value);
     if (requested && !use_shrink_abfs)
-        throw std::invalid_argument(
-            "LIBRPA_DIRECT_COMPRESSED_SIGC_DIAG requires use_shrink_abfs");
+        throw std::invalid_argument("LIBRPA_DIRECT_COMPRESSED_SIGC_DIAG requires use_shrink_abfs");
     return requested;
 }
 
@@ -152,6 +152,34 @@ static void add_phase_weighted_sigc_ijk(const Vector3_Order<int> &R_bvk,
     sigc_weighted *= phase;
     sigc_ijk += sigc_weighted;
 }
+
+#ifdef LIBRPA_USE_LIBRI
+using ThermalSigcTensorMap =
+    std::map<int, std::map<std::pair<int, std::array<int, 3>>, RI::Tensor<cplxdb>>>;
+
+// LibRI has completed all four GWc C C-dagger contraction sectors in every
+// input tensor. Only then may different real-space images be folded onto the
+// original BvK representative.
+static ThermalSigcTensorMap fold_tetrahedron_sigc_R(
+    const ThermalSigcTensorMap &unfolded, const Vector3_Order<int> &bvk_period)
+{
+    ThermalSigcTensorMap folded;
+    for (const auto &[i, blocks] : unfolded)
+        for (const auto &[jR, tensor] : blocks)
+        {
+            const Vector3_Order<int> R{jR.second[0], jR.second[1], jR.second[2]};
+            const auto R_folded = fold_tetrahedron_unfolded_translation(R, bvk_period);
+            const std::pair<int, std::array<int, 3>> key{
+                jR.first, {R_folded.x, R_folded.y, R_folded.z}};
+            auto &target = folded[i][key];
+            if (target.empty())
+                target = tensor.copy();
+            else
+                target += tensor;
+        }
+    return folded;
+}
+#endif
 
 static void add_weighted_sigc_R(std::map<Vector3_Order<int>, Matz> &R_sigc_shift,
                                 const Vector3_Order<int> &R_bvk, const Matz &sigc,
@@ -319,6 +347,97 @@ static void read_exact(std::ifstream &ifs, void *dst, const std::streamsize n,
 {
     if (!ifs.read(static_cast<char *>(dst), n))
         throw LIBRPA_RUNTIME_ERROR("failed to read SigC checkpoint file: " + fn);
+}
+
+struct ThermalSigcGridMetadata
+{
+    double beta_ha_inv = 0.0;
+    double chemical_potential_ha = 0.0;
+    std::vector<int> fermionic_indices;
+    bool collected_unique_blocks = false;
+};
+
+static ThermalSigcGridMetadata read_thermal_sigc_grid_metadata(const std::string &input_dir)
+{
+    const auto filename = path_as_directory(input_dir) + "Sigc_fermionic_grid.dat";
+    std::ifstream input(filename);
+    if (!input) throw LIBRPA_RUNTIME_ERROR("cannot open thermal Sigma grid file: " + filename);
+
+    ThermalSigcGridMetadata metadata;
+    bool has_beta = false;
+    bool has_chemical_potential = false;
+    int expected_ifreq = 0;
+    std::string line;
+    while (std::getline(input, line))
+    {
+        if (line.empty()) continue;
+        if (line[0] == '#')
+        {
+            if (line.find("collected_unique_blocks true") != std::string::npos)
+                metadata.collected_unique_blocks = true;
+
+            std::istringstream header(line.substr(1));
+            std::string key;
+            double value = 0.0;
+            if (!(header >> key >> value)) continue;
+            if (key == "beta_ha_inv")
+            {
+                if (has_beta)
+                    throw LIBRPA_RUNTIME_ERROR("duplicate beta in thermal Sigma grid: " + filename);
+                metadata.beta_ha_inv = value;
+                has_beta = true;
+            }
+            else if (key == "chemical_potential_ha")
+            {
+                if (has_chemical_potential)
+                    throw LIBRPA_RUNTIME_ERROR(
+                        "duplicate chemical potential in thermal Sigma grid: " + filename);
+                metadata.chemical_potential_ha = value;
+                has_chemical_potential = true;
+            }
+            continue;
+        }
+
+        std::istringstream row(line);
+        int ifreq = -1;
+        int fermionic_n = -1;
+        double omega_ha = 0.0;
+        std::string extra;
+        if (!(row >> ifreq >> fermionic_n >> omega_ha) || (row >> extra) ||
+            ifreq != expected_ifreq || fermionic_n < 0 || !std::isfinite(omega_ha))
+            throw LIBRPA_RUNTIME_ERROR("invalid thermal Sigma grid row in: " + filename);
+        if (!metadata.fermionic_indices.empty() && fermionic_n <= metadata.fermionic_indices.back())
+            throw LIBRPA_RUNTIME_ERROR("fermionic labels must increase in thermal Sigma grid: " +
+                                       filename);
+        metadata.fermionic_indices.push_back(fermionic_n);
+        ++expected_ifreq;
+    }
+    if (!input.eof())
+        throw LIBRPA_RUNTIME_ERROR("failed while reading thermal Sigma grid file: " + filename);
+    if (!has_beta || !has_chemical_potential || !std::isfinite(metadata.beta_ha_inv) ||
+        metadata.beta_ha_inv <= 0.0 || !std::isfinite(metadata.chemical_potential_ha) ||
+        metadata.fermionic_indices.empty())
+        throw LIBRPA_RUNTIME_ERROR("incomplete thermal Sigma grid metadata in: " + filename);
+
+    ThermalFrequencyGrid grid(metadata.beta_ha_inv, metadata.fermionic_indices, true);
+    input.clear();
+    input.seekg(0);
+    while (std::getline(input, line))
+    {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream row(line);
+        int ifreq = -1;
+        int fermionic_n = -1;
+        double omega_ha = 0.0;
+        row >> ifreq >> fermionic_n >> omega_ha;
+        const double expected_omega = grid.get_frequencies_ha().at(as_size(ifreq));
+        const double tolerance =
+            1e-12 * std::max({1.0, std::abs(omega_ha), std::abs(expected_omega)});
+        if (std::abs(omega_ha - expected_omega) > tolerance)
+            throw LIBRPA_RUNTIME_ERROR("Matsubara frequency disagrees with beta and label in: " +
+                                       filename);
+    }
+    return metadata;
 }
 
 static bool use_symmetry_ibz_root_projection(const SymmetryContext &ctx,
@@ -779,13 +898,13 @@ void G0W0::set_thermal_sigc(ThermalSigcRspace result)
                 throw std::invalid_argument("requires a finite FD chemical potential");
             validate_fermi_dirac_chemical_potential(fd, result.chemical_potential_ha);
             validate_fermi_dirac_chemical_potential(fd, mf.get_efermi());
-            if (mf.get_n_spinor() != 1)
-                throw std::invalid_argument("requires scalar spin");
+            if (mf.get_n_spinor() != 1) throw std::invalid_argument("requires scalar spin");
             // Spatially reduced contractions have already restored full AO/R
             // blocks; the import and its ordinary distributed sum are unchanged.
             if (use_symmetry_context &&
                 (pbc.klist != pbc.klist_full || mf.get_n_kpoints() != pbc.get_n_cells_bvk()))
-                throw std::invalid_argument("self-energy symmetry import requires a full SCF k grid");
+                throw std::invalid_argument(
+                    "self-energy symmetry import requires a full SCF k grid");
             if (mf.get_n_spins() <= 0 || atbasis_wfc.n_atoms == 0 ||
                 atbasis_wfc.nb_total != mf.get_n_aos())
                 throw std::invalid_argument("invalid AO/spin dimensions");
@@ -912,10 +1031,15 @@ void G0W0::set_thermal_sigc(ThermalSigcRspace result)
         "Imported Sigma on %zu independent positive fermionic frequencies "
         "(beta=%.17g Ha^-1, mu=%.17g Ha); bosonic W grid unchanged.\n",
         sigc_frequency_nodes_.size(), sigc_beta_ha_inv_, sigc_chemical_potential_ha_);
-    if (output_sigc_mat_rf) write_sigc_rf_output_files();
+    if (output_sigc_mat_rf)
+    {
+        collect_sigc_rf_output_shards();
+        write_sigc_rf_output_files();
+    }
 }
 
-void G0W0::write_sigc_frequency_grid(const std::string &directory) const
+void G0W0::write_sigc_frequency_grid(const std::string &directory,
+                                     const bool collected_unique_blocks) const
 {
     if (!is_thermal_sigc_) return;
     const auto filename = path_as_directory(directory) + "Sigc_fermionic_grid.dat";
@@ -924,8 +1048,10 @@ void G0W0::write_sigc_frequency_grid(const std::string &directory) const
     {
         std::ofstream output(filename);
         output << "# Independent positive fermionic Sigma grid; not the bosonic W grid\n"
-               << "# SigcRF storage: additive rank-local ordered atom-pair blocks\n"
-               << "# Thermal restart reading is unsupported\n"
+               << "# SigcRF storage: "
+               << (collected_unique_blocks ? "collected_unique_blocks true"
+                                           : "not exported by this output path")
+               << '\n'
                << std::setprecision(17) << "# beta_ha_inv " << sigc_beta_ha_inv_ << '\n'
                << "# chemical_potential_ha " << sigc_chemical_potential_ha_ << '\n'
                << "# ifreq fermionic_n omega_ha\n";
@@ -940,16 +1066,142 @@ void G0W0::write_sigc_frequency_grid(const std::string &directory) const
         throw LIBRPA_RUNTIME_ERROR("failed to write thermal Sigma grid file: " + filename);
 }
 
+void G0W0::read_thermal_sigc(const std::string &input_dir)
+{
+    ThermalSigcGridMetadata metadata;
+    std::string metadata_error;
+    try
+    {
+        metadata = read_thermal_sigc_grid_metadata(input_dir);
+    }
+    catch (const std::exception &error)
+    {
+        metadata_error = error.what();
+    }
+    int metadata_invalid = !metadata_error.empty();
+    MPI_Allreduce(MPI_IN_PLACE, &metadata_invalid, 1, MPI_INT, MPI_MAX, comm_h.comm);
+    if (metadata_invalid)
+        throw LIBRPA_RUNTIME_ERROR(
+            "invalid thermal Sigma restart metadata: " +
+            (metadata_error.empty() ? "invalid on another rank" : metadata_error));
+
+    const int nprocs_old = discover_sigc_rf_nprocs_old(input_dir);
+    if (nprocs_old == 0)
+        throw LIBRPA_RUNTIME_ERROR("no SigC checkpoint files found in: " +
+                                   path_as_directory(input_dir));
+    if (!metadata.collected_unique_blocks && nprocs_old != 1)
+        throw LIBRPA_RUNTIME_ERROR(
+            "legacy thermal SigcRF checkpoint lacks collected ownership metadata and was "
+            "written by more than one MPI rank");
+
+    const auto myid_old_range =
+        sigc_rf_file_range_for_rank(nprocs_old, global::size_global, global::myid_global);
+    const int n_spinor = mf.get_n_spinor();
+    int missing_file_local = 0;
+    std::string missing_file;
+    for (int ispin = 0; ispin != mf.get_n_spins(); ++ispin)
+        for (int ispinor_bra = 0; ispinor_bra != n_spinor; ++ispinor_bra)
+            for (int ispinor_ket = 0; ispinor_ket != n_spinor; ++ispinor_ket)
+                for (std::size_t iomega = 0; iomega != metadata.fermionic_indices.size(); ++iomega)
+                    for (int myid_old = myid_old_range.first; myid_old != myid_old_range.second;
+                         ++myid_old)
+                    {
+                        bool found = false;
+                        const auto filename =
+                            find_sigc_rf_file(input_dir, ispin, ispinor_bra, ispinor_ket, n_spinor,
+                                              as_int(iomega), myid_old, &found);
+                        if (!found)
+                        {
+                            missing_file_local = 1;
+                            if (missing_file.empty()) missing_file = filename;
+                        }
+                    }
+    int missing_file_any = 0;
+    comm_h.allreduce(&missing_file_local, &missing_file_any, 1, MPI_MAX);
+    if (missing_file_any)
+    {
+        if (missing_file_local)
+            global::ofs_myid << "Missing thermal SigC checkpoint file: " << missing_file
+                             << std::endl;
+        throw LIBRPA_RUNTIME_ERROR("missing thermal SigC checkpoint file(s) in: " +
+                                   path_as_directory(input_dir));
+    }
+
+    ThermalSigcRspace result{
+        ThermalFrequencyGrid(metadata.beta_ha_inv, metadata.fermionic_indices, true),
+        {},
+        metadata.chemical_potential_ha};
+    for (int ispin = 0; ispin != mf.get_n_spins(); ++ispin)
+        for (int ispinor_bra = 0; ispinor_bra != n_spinor; ++ispinor_bra)
+            for (int ispinor_ket = 0; ispinor_ket != n_spinor; ++ispinor_ket)
+                for (std::size_t iomega = 0; iomega != metadata.fermionic_indices.size(); ++iomega)
+                    for (int myid_old = myid_old_range.first; myid_old != myid_old_range.second;
+                         ++myid_old)
+                    {
+                        const auto filename =
+                            find_sigc_rf_file(input_dir, ispin, ispinor_bra, ispinor_ket, n_spinor,
+                                              as_int(iomega), myid_old, nullptr);
+                        std::ifstream input(filename, std::ios::binary);
+                        if (!input)
+                            throw LIBRPA_RUNTIME_ERROR(
+                                "cannot open thermal SigC checkpoint file: " + filename);
+
+                        size_t n_blocks = 0;
+                        read_exact(input, &n_blocks, sizeof(n_blocks), filename);
+                        const int fermionic_n = metadata.fermionic_indices[iomega];
+                        for (size_t iblock = 0; iblock != n_blocks; ++iblock)
+                        {
+                            size_t dims[5];
+                            read_exact(input, dims, sizeof(dims), filename);
+                            if (dims[0] >= pbc.Rlist.size())
+                                throw LIBRPA_RUNTIME_ERROR(
+                                    "thermal SigC checkpoint R index is out of range: " + filename);
+                            if (dims[1] >= atbasis_wfc.n_atoms || dims[2] >= atbasis_wfc.n_atoms)
+                                throw LIBRPA_RUNTIME_ERROR(
+                                    "thermal SigC checkpoint atom index is out of range: " +
+                                    filename);
+
+                            const int I = as_int(dims[1]);
+                            const int J = as_int(dims[2]);
+                            const auto n_I = atbasis_wfc.get_atom_nb(I);
+                            const auto n_J = atbasis_wfc.get_atom_nb(J);
+                            if (dims[3] != n_I || dims[4] != n_J)
+                                throw LIBRPA_RUNTIME_ERROR(
+                                    "thermal SigC checkpoint block size mismatch: " + filename);
+
+                            Matz sigc(as_int(n_I), as_int(n_J), MAJOR::ROW);
+                            read_exact(input, sigc.ptr(),
+                                       static_cast<std::streamsize>(n_I * n_J * sizeof(cplxdb)),
+                                       filename);
+                            const auto inserted = result.blocks[ispin][fermionic_n][{I, J}].emplace(
+                                pbc.Rlist[dims[0]], std::move(sigc));
+                            if (!inserted.second)
+                                throw LIBRPA_RUNTIME_ERROR(
+                                    "duplicate thermal SigC block in checkpoint: " + filename);
+                        }
+                    }
+
+    set_thermal_sigc(std::move(result));
+    global::lib_printf_root(
+        "Finished reading thermal real-space imaginary-frequency NAO sigma_c matrices from %s\n",
+        path_as_directory(input_dir).c_str());
+}
+
 void G0W0::read_sigc(const std::string &input_dir)
 {
-    const std::ifstream thermal_grid(path_as_directory(input_dir) + "Sigc_fermionic_grid.dat");
-    int thermal_restart = is_thermal_sigc_ || mf.get_fermi_dirac_reference().enabled ||
-                          tfg.get_finite_beta_ha_inv() > 0.0 || thermal_grid.good();
-    MPI_Allreduce(MPI_IN_PLACE, &thermal_restart, 1, MPI_INT, MPI_MAX, comm_h.comm);
-    if (thermal_restart)
+    const int local_has_thermal_grid =
+        file_exists(path_as_directory(input_dir) + "Sigc_fermionic_grid.dat") ? 1 : 0;
+    int has_thermal_grid = 0;
+    MPI_Allreduce(&local_has_thermal_grid, &has_thermal_grid, 1, MPI_INT, MPI_MAX, comm_h.comm);
+    if (has_thermal_grid)
+    {
+        read_thermal_sigc(input_dir);
+        return;
+    }
+    if (is_thermal_sigc_ || mf.get_fermi_dirac_reference().enabled ||
+        tfg.get_finite_beta_ha_inv() > 0.0)
         throw LIBRPA_RUNTIME_ERROR(
-            "thermal Sigma restart reading is unsupported: legacy SigcRF files do not encode "
-            "the independent fermionic grid and additive ownership");
+            "thermal Sigma restart requires Sigc_fermionic_grid.dat and collected SigcRF files");
 
     reset_rspace();
     reset_kspace();
@@ -1140,7 +1392,7 @@ void G0W0::collect_sigc_rf_output_shards()
 
 void G0W0::write_sigc_rf_output_files() const
 {
-    write_sigc_frequency_grid(output_dir);
+    write_sigc_frequency_grid(output_dir, true);
     const int n_spinor = mf.get_n_spinor();
     for (int ispin = 0; ispin != mf.get_n_spins(); ++ispin)
     {
@@ -1196,7 +1448,7 @@ void G0W0::write_sigc_rf_output_files() const
 void G0W0::write_sigc_matrices_KS_binary(const std::string &output_dir,
                                          const std::string &source) const
 {
-    write_sigc_frequency_grid(output_dir);
+    write_sigc_frequency_grid(output_dir, output_sigc_mat_rf);
     char fn[100];
     for (const auto &ispin_sigc : sigc_is_ik_f_KS)
     {
@@ -1311,7 +1563,7 @@ static void build_gf_libri_kserial(
             ? atbasis_wfc.build_species_basis_layouts(symmetry_context.atom_to_type)
             : std::vector<SpeciesBasisLayout>{};
     const bool can_try_symmetry_kstar_restore =
-        use_symmetry_context && !wfc_layouts.empty();
+        use_symmetry_context && !wfc_layouts.empty() && !tetrahedron_source_g_requested();
     const auto full_grid_kstar_representatives =
         can_try_symmetry_kstar_restore
             ? build_symmetry_full_grid_kstar_representative_indices(symmetry_context, kfrac_list)
@@ -1429,8 +1681,8 @@ static void build_gf_libri_kblacs_para(
             ? atbasis_wfc.build_species_basis_layouts(symmetry_context.atom_to_type)
             : std::vector<SpeciesBasisLayout>{};
     const bool restore_symmetry_kstars =
-        use_symmetry_context && can_restore_symmetry_kstar_meanfield(
-                                    symmetry_context, wfc_layouts, mf, kfrac_list, atom_nw);
+        use_symmetry_context && can_restore_symmetry_kstar_meanfield(symmetry_context, wfc_layouts,
+                                                                     mf, kfrac_list, atom_nw);
     global::ofs_myid << "GW kBLACS GF symmetry restore: "
                      << (restore_symmetry_kstars ? "on" : "off") << std::endl;
     auto gf_taus_Rs_cplx =
@@ -1485,6 +1737,16 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
 #ifndef LIBRPA_USE_LIBRI
     throw std::runtime_error("thermal spacetime requires LibRI");
 #else
+    const bool use_tetra_unfolded_grid = tetrahedron_full_gw_requested();
+    const auto tetra_grid = use_tetra_unfolded_grid
+                                ? build_tetrahedron_unfolded_grid(
+                                      pbc.period, tetrahedron_unfolded_image_factors())
+                                : TetrahedronUnfoldedGrid{pbc.period, pbc.Rlist};
+    const auto &thermal_rlist = tetra_grid.Rlist;
+    const std::array<int, 3> libri_period =
+        use_tetra_unfolded_grid
+            ? std::array<int, 3>{tetra_grid.period.x, tetra_grid.period.y, tetra_grid.period.z}
+            : pbc.period_array;
     // Keep all preflight failures collective before entering LibRI/BLACS exchanges.
     const auto collective_check = [&](const auto &check)
     {
@@ -1571,12 +1833,14 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
         });
 
     const auto n_full_blocks = atbasis_wfc.n_atoms * atbasis_wfc.n_atoms * pbc.Rlist.size();
+    const auto n_tetrahedron_blocks =
+        atbasis_wfc.n_atoms * atbasis_wfc.n_atoms * thermal_rlist.size();
     bool use_rspace_symmetry = false;
     std::map<std::pair<int, int>, std::set<std::array<int, 3>>> irreducible_sector;
     collective_check(
         [&]
         {
-            if (!use_symmetry_context) return;
+            if (!use_symmetry_context || use_tetra_unfolded_grid) return;
             if (!symmetry_context.available || !atbasis_wfc.has_l_shells() ||
                 symmetry_context.rspace_operations.empty() ||
                 symmetry_context.rsh_rotations.empty() ||
@@ -1635,6 +1899,12 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
             use_rspace_symmetry ? "on" : "off",
             use_rspace_symmetry ? symmetry_context.count_irreducible_blocks() : n_full_blocks,
             n_full_blocks);
+    if (use_tetra_unfolded_grid && comm_h.is_root())
+        global::lib_printf(
+            "Finite-temperature tetrahedron Sigma: expanded real-space period = (%d,%d,%d), "
+            "contraction blocks = %zu, final folding period = (%d,%d,%d)\n",
+            tetra_grid.period.x, tetra_grid.period.y, tetra_grid.period.z, n_tetrahedron_blocks,
+            pbc.period.x, pbc.period.y, pbc.period.z);
 
     const auto distribution =
         get_balanced_ap_distribution_for_consec_descriptor(atbasis_abf, atbasis_abf, ad_wc);
@@ -1646,7 +1916,7 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
     RI::GW<int, int, 3, cplxdb> gw_libri;
     std::map<int, std::array<double, 3>> atoms_pos;
     for (int i = 0; i < atbasis_wfc.n_atoms; ++i) atoms_pos[i] = {0, 0, 0};
-    libri_set_parallel(gw_libri, comm_h.comm, atoms_pos, pbc.latvec_array, pbc.period_array,
+    libri_set_parallel(gw_libri, comm_h.comm, atoms_pos, pbc.latvec_array, libri_period,
                        atbasis_wfc.get_atom_nb_map<int>());
     gw_libri.set_symmetry(false, {});
     if (use_rspace_symmetry)
@@ -1658,14 +1928,14 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
         for (const auto &[jr, c] : jrmap) cs[i][jr] = RI::Global_Func::convert<cplxdb>(c);
     gw_libri.set_Cs(cs, libri_threshold_C);
     const auto pairs = generate_atom_pair_from_nat(atbasis_wfc.n_atoms, true);
-    const auto ijrs =
-        dispatch_vector_prod(pairs, pbc.Rlist, comm_h.myid, comm_h.nprocs, true, false);
+    const auto ijrs = dispatch_vector_prod(pairs, thermal_rlist, comm_h.myid, comm_h.nprocs, true,
+                                           false);
     const auto f = transform.copy_fermionic_time_to_frequency();
     const auto &labels = transform.get_fermionic_indices();
     ThermalSigcRspace result{
         transform.get_fermionic_grid(), {}, mf.get_fermi_dirac_reference().chemical_potential_ha};
     thermal_Wc_freq_q_to_tau_R_stream(
-        comm_h, wc_freq_q, pbc, transform,
+        comm_h, wc_freq_q, pbc, transform, thermal_rlist,
         [&](const std::size_t itau, const double tau, std::map<Vector3_Order<int>, Matz> &&wc_tau_r)
         {
             const double start_time = MPI_Wtime();
@@ -1705,6 +1975,13 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
                             gw_libri.Sigmas = restore_symmetry_ao_rspace_tensor_map_gw(
                                 gw_libri.Sigmas, symmetry_context,
                                 symmetry_context.rspace_sector_stars, atbasis_wfc);
+                        });
+                if (use_tetra_unfolded_grid)
+                    collective_check(
+                        [&]
+                        {
+                            gw_libri.Sigmas =
+                                fold_tetrahedron_sigc_R(gw_libri.Sigmas, pbc.period);
                         });
                 const double restored_time = MPI_Wtime();
                 gw_libri.free_Gs();
@@ -1870,8 +2147,8 @@ void G0W0::build_spacetime(
                 if (!direct_compressed_sigc)
                 {
                     profiler.start("unfold_Wc_abfs", "Do shrink transformation");
-                    unfold_helper->unfold_abfs_Wc_q(*sinvS, Wc_q, pbc.klist_coul,
-                                                    *basis_aux_unfold, *blacs_ctxt_h);
+                    unfold_helper->unfold_abfs_Wc_q(*sinvS, Wc_q, pbc.klist_coul, *basis_aux_unfold,
+                                                    *blacs_ctxt_h);
                     profiler.stop("unfold_Wc_abfs");
                 }
 
@@ -1879,8 +2156,7 @@ void G0W0::build_spacetime(
                 complete_hermitian_Wc_q_blocks(Wc_q);
                 profiler.stop("construct_Wc_freq_lower_half");
 
-                const auto &output_basis =
-                    direct_compressed_sigc ? atbasis_abf : *basis_aux_unfold;
+                const auto &output_basis = direct_compressed_sigc ? atbasis_abf : *basis_aux_unfold;
                 auto Wc_R = FT_Wc_q2R(comm_h, output_basis, symmetry_context, Wc_q, tfg, pbc,
                                       pbc.Rlist, true, output_dir, this->use_symmetry_context);
                 if (output_wc_rf_atom_pair)
@@ -1913,8 +2189,8 @@ void G0W0::build_spacetime(
             if (!direct_compressed_sigc)
             {
                 profiler.start("unfold_Wc_abfs", "Do shrink transformation");
-                unfold_helper->unfold_abfs_Wc_q(*sinvS, Wc_q, pbc.klist_coul,
-                                                *basis_aux_unfold, *blacs_ctxt_h);
+                unfold_helper->unfold_abfs_Wc_q(*sinvS, Wc_q, pbc.klist_coul, *basis_aux_unfold,
+                                                *blacs_ctxt_h);
                 profiler.stop("unfold_Wc_abfs");
             }
 
@@ -2662,7 +2938,7 @@ void G0W0::build_sigc_matrix_KS_blacs(
     assert(this->is_rspace_built_);
 
     if (output_sigc_ks_mat_kf || output_sigc_ks_kf || output_sigc_mat_kf)
-        write_sigc_frequency_grid(output_dir);
+        write_sigc_frequency_grid(output_dir, output_sigc_mat_rf);
 
     if (this->is_kspace_built_)
     {

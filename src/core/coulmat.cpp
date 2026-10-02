@@ -79,7 +79,7 @@ static bool has_complete_symmetry_abf_ibz_coverage(
             const auto& q_blocks =
                 has_upper ? upper_iter->second.at(static_cast<atom_t>(atom_j))
                           : lower_iter->second.at(static_cast<atom_t>(atom_i));
-            for (const auto& q_ibz : pbc.klist)
+            for (const auto& q_ibz : pbc.klist_coul)
             {
                 if (find_matching_symmetry_qpoint(q_blocks, q_ibz) == q_blocks.end())
                 {
@@ -390,11 +390,12 @@ static bool can_use_symmetry_irreducible_sector_ft_vq(const SymmetryContext& ctx
         || has_complete_symmetry_abf_ibz_coverage(coulmat_k, atom_nabf, pbc);
     return ctx.available
            && !ctx.kstars.empty()
-           && ctx.kstars.size() == pbc.kfrac_list.size()
+           && ctx.kstars.size() == pbc.klist_coul.size()
            && !pbc.map_irk_ks.empty()
            && atom_nabf.size() == ctx.atom_to_type.size()
            && ctx.input_coord_frac.size() == atom_nabf.size()
-           && pbc.klist.size() < static_cast<std::size_t>(pbc.get_n_cells_bvk())
+           // SCF can cover the full grid while Coulomb matrices use only q representatives.
+           && pbc.klist_coul.size() < static_cast<std::size_t>(pbc.get_n_cells_bvk())
            && has_complete_or_distributed_coverage
            && !ctx.irreducible_sector.empty()
            && !ctx.rspace_operations.empty();
@@ -443,7 +444,19 @@ atpair_R_mat_t FT_Vq(const MpiCommHandler &comm_h,
                 for (const auto &q_V: Nu_qV.second)
                 {
                     auto q = q_V.first;
-                    for (auto q_bz: map_irk_ks.at(q))
+                    const auto q_members = map_irk_ks.find(q);
+                    if (q_members == map_irk_ks.end())
+                    {
+                        std::ostringstream ss;
+                        ss << "FT_Vq could not match Coulomb q to the k-to-q map: ("
+                           << q.x << ", " << q.y << ", " << q.z << ")"
+                           << ", Coulomb blocks=" << coulmat_k.size()
+                           << ", q-map entries=" << map_irk_ks.size()
+                           << ", pbc ibz index=" << pbc.get_k_index_ibz(q)
+                           << ", pbc SCF index=" << pbc.get_k_index_scf(q);
+                        throw std::runtime_error(ss.str());
+                    }
+                    for (auto q_bz: q_members->second)
                     {
                         double ang = - q_bz * (R * latvec) * TWO_PI;
                         complex<double> kphase = complex<double>(cos(ang), sin(ang)) / double(n_k_points);
@@ -483,7 +496,19 @@ atpair_R_mat_t FT_Vq(const MpiCommHandler &comm_h,
                     for (const auto &q_V: Nu_qV.second)
                     {
                         auto q = q_V.first;
-                        for (auto q_bz: map_irk_ks.at(q))
+                        const auto q_members = map_irk_ks.find(q);
+                        if (q_members == map_irk_ks.end())
+                        {
+                            std::ostringstream ss;
+                            ss << "FT_Vq could not match ordered Coulomb q to the k-to-q map: ("
+                               << q.x << ", " << q.y << ", " << q.z << ")"
+                               << ", Coulomb blocks=" << coulmat_k.size()
+                               << ", q-map entries=" << map_irk_ks.size()
+                               << ", pbc ibz index=" << pbc.get_k_index_ibz(q)
+                               << ", pbc SCF index=" << pbc.get_k_index_scf(q);
+                            throw std::runtime_error(ss.str());
+                        }
+                        for (auto q_bz: q_members->second)
                         {
                             double ang = - q_bz * (R * latvec) * TWO_PI;
                             complex<double> kphase = complex<double>(cos(ang), sin(ang)) / double(n_k_points);

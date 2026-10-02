@@ -103,6 +103,7 @@ list(APPEND lib_sources
   core/thermal_gw_screening.cpp
   core/thermal_wc_spacetime.cpp
   core/thermal_occupation.cpp
+  core/tetrahedron_quadrature.cpp
   core/utils_atomic_basis_blacs.cpp
         core/utils_complexmatrix.cpp
 

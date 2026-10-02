@@ -6,6 +6,7 @@
 #define MEANFIELD_H
 
 #include <array>
+#include <complex>
 #include <vector>
 #include <map>
 #include <utility>
@@ -18,6 +19,43 @@
 #include "../math/vector3_order.h"
 
 namespace librpa_int {
+
+//! Opt-in real-space tetrahedron transform for the finite-temperature metal path.
+bool tetrahedron_full_gw_requested();
+
+//! Opt-in source-G tetrahedron transform used by the isolated consistency control.
+bool tetrahedron_source_g_requested();
+
+//! Image multiplicity for the opt-in unfolded real-space tetrahedron path.
+Vector3_Order<int> tetrahedron_unfolded_image_factors();
+
+//! Return normalized Fourier weights for a piecewise-linear tetrahedron transform.
+//!
+//! The entries are ordered like kfrac_list and already include the BZ integration
+//! weight and exp(-i 2 pi k.R).  At R=(0,0,0) they sum to one.
+std::vector<std::complex<double>> build_tetrahedron_fourier_weights(
+    const std::vector<Vector3_Order<double>>& kfrac_list, const Vector3_Order<int>& R);
+
+//! Map the BvK real-space coefficients back to a continuous interpolant coefficient.
+//! The returned entries correspond to bvk_R and retain the full mesh twist.
+std::vector<std::complex<double>> build_tetrahedron_unfolded_coefficients(
+    const std::vector<Vector3_Order<double>>& kfrac_list,
+    const std::vector<Vector3_Order<int>>& bvk_R, const Vector3_Order<int>& X);
+
+//! Expanded real-space tile used before the four LRI contraction sectors are folded.
+struct TetrahedronUnfoldedGrid
+{
+    Vector3_Order<int> period;
+    std::vector<Vector3_Order<int>> Rlist;
+};
+
+//! Construct an odd-image real-space tile around the original centered BvK cell.
+TetrahedronUnfoldedGrid build_tetrahedron_unfolded_grid(
+    const Vector3_Order<int>& bvk_period, const Vector3_Order<int>& image_factors);
+
+//! Fold an unfolded lattice translation into the centered original BvK representative.
+Vector3_Order<int> fold_tetrahedron_unfolded_translation(
+    const Vector3_Order<int>& translation, const Vector3_Order<int>& bvk_period);
 
 //! Object of the meanfield input
 /*!

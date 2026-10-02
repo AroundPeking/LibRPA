@@ -40,9 +40,14 @@ def build_grid(beta, wmax, rpa_wmax, tolerance, rpa_tolerance=None):
         raise ValueError("RPA scalar sum weights have a significant imaginary component")
     weights = folded.real.copy()
     static_relative_error = abs(2*beta*weights[0] - 1)
-    if static_relative_error > max(1e-8, 100*rpa_tolerance):
-        raise ValueError("IR sum does not resolve the isolated static Matsubara mode")
-    # Preserve an arbitrary static anomaly exactly; record the small IR correction.
+    # The bosonic zero mode is an isolated point.  Its IR reconstruction is
+    # only an audit quantity, not the weight used by LibRPA: enforce the exact
+    # static Matsubara weight below and retain the uncorrected error in the
+    # provenance.  At large beta the IR truncation error can exceed 100*eps
+    # even though the corrected quadrature is well resolved.
+    if static_relative_error > 1e-6:
+        raise ValueError("IR sum has an unresolved bosonic static mode")
+    # Preserve the static mode exactly; record the small IR correction.
     weights[0] = 0.5 / beta
 
     response_basis = sparse_ir.FiniteTempBasis("B", beta=beta, wmax=wmax, eps=tolerance)

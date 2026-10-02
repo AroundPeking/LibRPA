@@ -81,6 +81,10 @@ bool use_metallic_static_3d_complete_wc_gamma_route(bool replace_w_head, int opt
                                                     bool use_2d_dielectric, bool gamma_point,
                                                     bool headwing_data_available,
                                                     bool finite_temperature_static);
+bool use_metallic_static_2d_complete_wc_gamma_route(bool replace_w_head, int option_dielect_func,
+                                                    bool use_2d_dielectric, bool gamma_point,
+                                                    bool headwing_data_available,
+                                                    bool finite_temperature_static);
 
 struct CorrEnergy
 {
@@ -158,6 +162,13 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
     const std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
     const PeriodicBoundaryData &pbc, const ThermalGWTransform &transform);
 
+//! As above, but evaluates the same q-space quadrature on an explicit real-space image list.
+std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
+    const MpiCommHandler &comm_h,
+    const std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
+    const PeriodicBoundaryData &pbc, const ThermalGWTransform &transform,
+    const std::vector<Vector3_Order<int>> &rlist);
+
 using ThermalWcTimeConsumer =
     std::function<void(std::size_t, double, std::map<Vector3_Order<int>, Matz> &&)>;
 
@@ -169,6 +180,13 @@ void thermal_Wc_freq_q_to_tau_R_stream(
     std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
     const PeriodicBoundaryData &pbc, const ThermalGWTransform &transform,
     const ThermalWcTimeConsumer &consume);
+
+//! Streaming variant evaluated on an explicit real-space image list.
+void thermal_Wc_freq_q_to_tau_R_stream(
+    const MpiCommHandler &comm_h,
+    std::map<double, std::map<Vector3_Order<double>, Matz>> &Wc_freq_q,
+    const PeriodicBoundaryData &pbc, const ThermalGWTransform &transform,
+    const std::vector<Vector3_Order<int>> &rlist, const ThermalWcTimeConsumer &consume);
 
 //! Fourier transform screened Coulomb in q-space to R-space, but still in frequency domain
 std::map<double, std::map<Vector3_Order<int>, Matz>> FT_Wc_freq_q(
