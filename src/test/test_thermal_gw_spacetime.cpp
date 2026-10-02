@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 
+#include "../core/epsilon.h"
 #include "../core/gw.h"
 #include "../io/global_io.h"
 #include "../mpi/global_mpi.h"
@@ -147,6 +149,101 @@ void check(MAJOR major, int nk, int nabf = 2)
                 for (int b = 0; b < 2; ++b)
                     require(cs.data_libri.at(0).begin()->second(u, a, b) == c[u][a][b],
                             "thermal reference changed an LRI coefficient");
+    // The opt-in full tetrahedron path expands the real-space contraction domain,
+    // but must fold the completed four-sector Sigma back to exactly the original
+    // BvK block set before returning to the caller.
+    setenv("LIBRPA_TETRA_FULL_GW", "enabled", 1);
+    setenv("LIBRPA_TETRA_IMAGE_FACTOR", "3", 1);
+    const auto tetrahedron_result = gw.build_thermal_spacetime(abf, cs, wc, desc, transform);
+    const auto tetrahedron_grid =
+        build_tetrahedron_unfolded_grid(pbc.period, tetrahedron_unfolded_image_factors());
+    const auto tetrahedron_wc = thermal_Wc_freq_q_to_tau_R(
+        global::mpi_comm_global_h, wc, pbc, transform, tetrahedron_grid.Rlist);
+    std::map<double, std::map<Vector3_Order<int>, ComplexMatrix>> tetrahedron_wc_global;
+    for (const auto &[tau, blocks] : tetrahedron_wc)
+        for (const auto &[x, local_block] : blocks)
+        {
+            ComplexMatrix global_block(nabf, nabf, true);
+            for (int u = 0; u < local_block.nr(); ++u)
+                for (int v = 0; v < local_block.nc(); ++v)
+                    global_block(desc.indx_l2g_r(u), desc.indx_l2g_c(v)) = local_block(u, v);
+            MPI_Allreduce(MPI_IN_PLACE, global_block.c, global_block.size, MPI_C_DOUBLE_COMPLEX,
+                          MPI_SUM, MPI_COMM_WORLD);
+            tetrahedron_wc_global[tau][x] = std::move(global_block);
+        }
+    const auto tetrahedron_f = transform.copy_fermionic_time_to_frequency();
+    double tetrahedron_error = 0.0;
+    double tetrahedron_scale = 0.0;
+    for (const auto &r : pbc.Rlist)
+        for (std::size_t n = 0; n < fermions.size(); ++n)
+            for (int a = 0; a < 2; ++a)
+                for (int b = 0; b < 2; ++b)
+                {
+                    Z expected = 0.0;
+                    for (std::size_t t = 0; t < times.size(); ++t)
+                        for (const auto &x : tetrahedron_grid.Rlist)
+                        {
+                            if (fold_tetrahedron_unfolded_translation(x, pbc.period) != r) continue;
+                            const auto weights =
+                                build_tetrahedron_fourier_weights(pbc.kfrac_list, x);
+                            Z sigma_tau = 0.0;
+                            for (int u = 0; u < nabf; ++u)
+                                for (int v = 0; v < nabf; ++v)
+                                    for (int band = 0; band < 2; ++band)
+                                    {
+                                        Z g = 0.0;
+                                        for (int k = 0; k < nk; ++k)
+                                        {
+                                            const double xi = -0.3 + 0.4 * band + 0.07 * k;
+                                            g += weights[k] * std::exp(-xi * times[t]) /
+                                                 (1 + std::exp(-beta * xi));
+                                        }
+                                        sigma_tau += (c[u][a][band] + c[u][band][a]) *
+                                                     (c[v][b][band] + c[v][band][b]) * g *
+                                                     tetrahedron_wc_global.at(times[t]).at(x)(u, v);
+                                    }
+                            expected += tetrahedron_f(n, t) * sigma_tau;
+                        }
+                    Z actual = 0.0;
+                    if (tetrahedron_result.blocks.count(0) &&
+                        tetrahedron_result.blocks.at(0).count(fermions[n]))
+                    {
+                        const auto &pairs = tetrahedron_result.blocks.at(0).at(fermions[n]);
+                        if (pairs.count({0, 0}) && pairs.at({0, 0}).count(r))
+                            actual = pairs.at({0, 0}).at(r)(a, b);
+                    }
+                    MPI_Allreduce(MPI_IN_PLACE, &actual, 1, MPI_C_DOUBLE_COMPLEX, MPI_SUM,
+                                  MPI_COMM_WORLD);
+                    tetrahedron_error = std::max(tetrahedron_error, std::abs(actual - expected));
+                    tetrahedron_scale = std::max(tetrahedron_scale, std::abs(expected));
+                }
+    unsetenv("LIBRPA_TETRA_IMAGE_FACTOR");
+    unsetenv("LIBRPA_TETRA_FULL_GW");
+    bool tetrahedron_valid = true;
+    for (const auto &[spin, frequency_blocks] : tetrahedron_result.blocks)
+        for (const auto &[label, pairs] : frequency_blocks)
+            for (const auto &[ij, cells] : pairs)
+                for (const auto &[r, block] : cells)
+                {
+                    tetrahedron_valid = tetrahedron_valid && spin == 0 &&
+                                        std::find(fermions.begin(), fermions.end(), label) !=
+                                            fermions.end() &&
+                                        ij.first == 0 && ij.second == 0 &&
+                                        pbc.get_R_index(r) >= 0;
+                    for (int a = 0; a < block.nr(); ++a)
+                        for (int b = 0; b < block.nc(); ++b)
+                            tetrahedron_valid = tetrahedron_valid &&
+                                                std::isfinite(block(a, b).real()) &&
+                                                std::isfinite(block(a, b).imag());
+                }
+    int tetrahedron_has_blocks = !tetrahedron_result.blocks.empty();
+    int tetrahedron_valid_global = tetrahedron_valid;
+    MPI_Allreduce(MPI_IN_PLACE, &tetrahedron_has_blocks, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &tetrahedron_valid_global, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    require(tetrahedron_has_blocks && tetrahedron_valid_global,
+            "full tetrahedron Sigma did not fold finite blocks to the original BvK cell");
+    require(tetrahedron_error < 3e-12 * std::max(1.0, tetrahedron_scale),
+            "full tetrahedron Sigma differs from an explicit unfolded real-space sum");
     // Destroy caller payloads before reading the returned matrices.
     wc.clear();
     cs.data_libri.clear();

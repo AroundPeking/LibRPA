@@ -48,6 +48,34 @@ static const librpa_int::AtomicBasis &target_coulomb_basis(ReaderContext &ctx, c
     return use_shrink_basis ? ds->basis_aux_shrink : ds->basis_aux;
 }
 
+// Coulomb-v1 file.iq is one-based in the Coulomb representative list.  The
+// public input API takes an index in the loaded SCF k-list, so translate once
+// at this boundary instead of allowing the two index spaces to be confused.
+static int scf_k_index_for_coulomb_v1_iq(const int iq0)
+{
+    const auto ds = librpa_int::api::get_dataset_instance(driver::h.get_c_handler());
+    const auto &pbc = ds->pbc;
+    if (iq0 < 0 || static_cast<std::size_t>(iq0) >= pbc.klist_coul.size())
+    {
+        std::ostringstream ss;
+        ss << "Coulomb v1 iq=" << (iq0 + 1)
+           << " is outside klist_coul (size=" << pbc.klist_coul.size() << ")";
+        throw std::logic_error(ss.str());
+    }
+
+    const auto &qvec = pbc.klist_coul[static_cast<std::size_t>(iq0)];
+    const int ik = pbc.get_k_index_scf(qvec);
+    if (ik < 0)
+    {
+        std::ostringstream ss;
+        ss << "Coulomb v1 representative iq=" << (iq0 + 1)
+           << " is not present in the loaded SCF k-list: ("
+           << qvec.x << ", " << qvec.y << ", " << qvec.z << ")";
+        throw std::logic_error(ss.str());
+    }
+    return ik;
+}
+
 //! Check if Coulomb matrix data file is in ASCII text or unformatted binary format
 bool check_coulomb_file_binary(const string &file_path)
 {
@@ -678,6 +706,7 @@ void process_complex_coulomb_v1_read(ReaderContext &ctx, const CoulombV1File &fi
     std::vector<std::complex<double>> buffer(nvalues);
     file.read_bytes(read.offset, buffer.data(),
                     checked_size_from_offset(read.nbytes, file.path));
+    const int ik = scf_k_index_for_coulomb_v1_iq(iq0);
 
     for (const auto &block: read.blocks)
     {
@@ -708,6 +737,7 @@ void process_real_coulomb_v1_read(ReaderContext &ctx, const CoulombV1File &file,
     std::vector<double> buffer(nvalues);
     file.read_bytes(read.offset, buffer.data(),
                     checked_size_from_offset(read.nbytes, file.path));
+    const int ik = scf_k_index_for_coulomb_v1_iq(iq0);
 
     for (const auto &block: read.blocks)
     {
@@ -825,6 +855,7 @@ size_t read_Vq_full_v1(ReaderContext &ctx, const string &dir_path, const string 
         CoulombV1File file(path);
         validate_coulomb_v1_basis(file, basis_aux);
         const int iq0 = file.iq - 1;
+        const int ik = scf_k_index_for_coulomb_v1_iq(iq0);
 
         for (std::size_t I = 0; I != basis_aux.n_atoms; ++I)
         {

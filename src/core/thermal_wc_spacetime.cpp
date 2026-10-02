@@ -1,14 +1,19 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "../utils/constants.h"
 #include "epsilon.h"
+#include "meanfield.h"
 
 namespace librpa_int
 {
@@ -67,6 +72,16 @@ void validate_pbc(const PeriodicBoundaryData& pbc)
     for (const auto& q : pbc.klist_full)
         if (!finite(q) || !unique_q.insert(q).second)
             throw std::invalid_argument("thermal Wc full-q metadata must be finite and unique");
+}
+
+void validate_rlist(const std::vector<Vector3_Order<int>>& rlist)
+{
+    if (rlist.empty())
+        throw std::invalid_argument("thermal Wc requires a nonempty real-space image list");
+    std::set<Vector3_Order<int>> unique;
+    for (const auto& r : rlist)
+        if (!unique.insert(r).second)
+            throw std::invalid_argument("thermal Wc real-space image list contains duplicates");
 }
 
 void validate_matrix(const Matz& matrix)
@@ -173,6 +188,142 @@ SpatialBatch choose_spatial_batch(std::size_t nq, std::size_t nr, std::size_t nb
         }
     }
 }
+
+bool tetra_q2r_requested()
+{
+    const char* value = std::getenv("LIBRPA_TETRA_Q2R_DIAG");
+    const char* full_value = std::getenv("LIBRPA_TETRA_FULL_GW");
+    const bool full_requested = full_value != nullptr && *full_value != '\0';
+    if (full_requested && std::string(full_value) != "enabled")
+        throw std::invalid_argument("LIBRPA_TETRA_FULL_GW must be unset or 'enabled'");
+    if ((value == nullptr || *value == '\0') && !full_requested) return false;
+    if (value != nullptr && *value != '\0' && std::string(value) != "enabled")
+        throw std::invalid_argument("LIBRPA_TETRA_Q2R_DIAG must be unset or 'enabled'");
+    return true;
+}
+
+bool tetra_gamma_cell_average_requested()
+{
+    const char* value = std::getenv("LIBRPA_TETRA_GAMMA_CELL_AVERAGE");
+    if (value == nullptr || *value == '\0') return false;
+    if (std::string(value) != "enabled")
+        throw std::invalid_argument(
+            "LIBRPA_TETRA_GAMMA_CELL_AVERAGE must be unset or 'enabled'");
+    return true;
+}
+
+std::size_t find_gamma_q_index(const PeriodicBoundaryData& pbc)
+{
+    if (pbc.kfrac_list_full.size() != pbc.klist_full.size())
+        throw std::invalid_argument("tetra Gamma-cell treatment requires fractional q metadata");
+
+    constexpr double tolerance = 1.0e-10;
+    std::size_t gamma_index = pbc.kfrac_list_full.size();
+    for (std::size_t iq = 0; iq < pbc.kfrac_list_full.size(); ++iq)
+    {
+        const auto& q = pbc.kfrac_list_full[iq];
+        const bool is_gamma = std::abs(q.x - std::round(q.x)) <= tolerance &&
+                              std::abs(q.y - std::round(q.y)) <= tolerance &&
+                              std::abs(q.z - std::round(q.z)) <= tolerance;
+        if (is_gamma)
+        {
+            if (gamma_index != pbc.kfrac_list_full.size())
+                throw std::invalid_argument("tetra Gamma-cell treatment found duplicate Gamma q");
+            gamma_index = iq;
+        }
+    }
+    if (gamma_index == pbc.kfrac_list_full.size())
+        throw std::invalid_argument("tetra Gamma-cell treatment requires Gamma on the q grid");
+    return gamma_index;
+}
+
+double sinc(const double value)
+{
+    return std::abs(value) < 1.0e-14 ? 1.0 : std::sin(value) / value;
+}
+
+cplxdb gamma_cell_fourier_moment(const PeriodicBoundaryData& pbc,
+                                  const Vector3_Order<int>& r)
+{
+    if (pbc.period.x <= 0 || pbc.period.y <= 0 || pbc.period.z <= 0)
+        throw std::invalid_argument("tetra Gamma-cell treatment requires positive q-grid periods");
+    // The Gamma control volume is the centered rectangular cell of the
+    // uniform fractional q mesh. Its normalized Fourier average is a product
+    // of one-dimensional sinc factors.
+    const double phase = sinc(PI * r.x / pbc.period.x) *
+                         sinc(PI * r.y / pbc.period.y) *
+                         sinc(PI * r.z / pbc.period.z);
+    return {phase, 0.0};
+}
+
+void isolate_static_gamma_cell_average(const ComplexMatrix& phases, const ComplexMatrix& qpack,
+                                       ComplexMatrix& spatial, const PeriodicBoundaryData& pbc,
+                                       const std::vector<Vector3_Order<int>>& rlist,
+                                       const std::size_t r_offset,
+                                       const std::size_t gamma_index, const double frequency)
+{
+    if (std::abs(frequency) > 1.0e-14) return;
+    const auto n_q = static_cast<std::size_t>(qpack.nr);
+    if (n_q == 0 || gamma_index >= n_q || qpack.nc != spatial.nc || phases.nr != spatial.nr ||
+        phases.nc != qpack.nr)
+        throw std::invalid_argument("invalid dimensions in tetra Gamma-cell treatment");
+
+    // The metallic static Gamma sample is already the average over the Gamma
+    // control volume. Remove its ordinary tetrahedral nodal shape function and
+    // add the control-volume Fourier average of the centered uniform q cell.
+    const cplxdb gamma_weight = 1.0 / static_cast<double>(n_q);
+    for (int ir = 0; ir < spatial.nr; ++ir)
+        for (int column = 0; column < spatial.nc; ++column)
+            spatial(ir, column) +=
+                (gamma_weight * gamma_cell_fourier_moment(pbc, rlist[r_offset + ir]) -
+                 phases(ir, static_cast<int>(gamma_index))) *
+                qpack(static_cast<int>(gamma_index), column);
+}
+
+ComplexMatrix build_tetra_q2r_phases(const PeriodicBoundaryData& pbc,
+                                     const std::vector<Vector3_Order<int>>& rlist,
+                                     const std::size_t r_offset, const std::size_t r_count)
+{
+    const auto& qfrac = pbc.kfrac_list_full;
+    const auto n_q = pbc.klist_full.size();
+    if (qfrac.size() != n_q || n_q != static_cast<std::size_t>(pbc.get_n_cells_bvk()))
+        throw std::invalid_argument("tetra q->R requires a complete uniform full-q grid");
+
+    ComplexMatrix phases(static_cast<int>(r_count), static_cast<int>(n_q));
+    for (std::size_t ir = 0; ir < r_count; ++ir)
+    {
+        const auto weights = build_tetrahedron_fourier_weights(qfrac, rlist[r_offset + ir]);
+        for (std::size_t iq = 0; iq < n_q; ++iq)
+            phases(static_cast<int>(ir), static_cast<int>(iq)) = weights[iq];
+    }
+    return phases;
+}
+
+ComplexMatrix build_spatial_phases(const PeriodicBoundaryData& pbc,
+                                   const std::vector<Vector3_Order<int>>& rlist,
+                                   const std::size_t r_offset, const std::size_t r_count,
+                                   const bool use_tetra)
+{
+    const auto& qlist = pbc.klist_full;
+    if (use_tetra) return build_tetra_q2r_phases(pbc, rlist, r_offset, r_count);
+
+    ComplexMatrix phases(static_cast<int>(r_count), static_cast<int>(qlist.size()));
+    for (std::size_t ir = 0; ir < r_count; ++ir)
+    {
+        const auto cartesian_r = rlist[r_offset + ir] * pbc.latvec;
+        if (!finite(cartesian_r))
+            throw std::overflow_error("thermal Wc lattice translation is nonfinite");
+        for (std::size_t q = 0; q < qlist.size(); ++q)
+        {
+            const double angle = -TWO_PI * (qlist[q] * cartesian_r);
+            if (!std::isfinite(angle))
+                throw std::overflow_error("thermal Wc spatial phase is nonfinite");
+            phases(static_cast<int>(ir), static_cast<int>(q)) =
+                cplxdb(std::cos(angle), std::sin(angle)) / double(qlist.size());
+        }
+    }
+    return phases;
+}
 }  // namespace
 
 std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
@@ -180,11 +331,21 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
     const std::map<double, std::map<Vector3_Order<double>, Matz>>& Wc_freq_q,
     const PeriodicBoundaryData& pbc, const ThermalGWTransform& transform)
 {
+    return thermal_Wc_freq_q_to_tau_R(comm_h, Wc_freq_q, pbc, transform, pbc.Rlist);
+}
+
+std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
+    const MpiCommHandler& comm_h,
+    const std::map<double, std::map<Vector3_Order<double>, Matz>>& Wc_freq_q,
+    const PeriodicBoundaryData& pbc, const ThermalGWTransform& transform,
+    const std::vector<Vector3_Order<int>>& rlist)
+{
     std::exception_ptr error;
     std::vector<double> frequencies;
     try
     {
         validate_pbc(pbc);
+        validate_rlist(rlist);
         frequencies = transform.get_bosonic_frequencies_ha();
         if (transform.get_times().empty())
             throw std::invalid_argument("thermal Wc requires a nonempty time grid");
@@ -207,9 +368,18 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
     {
         const auto& times = transform.get_times();
         const auto& qlist = pbc.klist_full;
+        const bool use_tetra = tetra_q2r_requested();
+        const bool isolate_gamma = use_tetra && tetra_gamma_cell_average_requested();
+        const auto gamma_index = isolate_gamma ? find_gamma_q_index(pbc) : qlist.size();
+        if (comm_h.is_root())
+            global::lib_printf_root("Thermal Wc q->R integration: %s\n",
+                                    use_tetra ? "periodic tetrahedron interpolation" : "uniform grid");
+        if (comm_h.is_root() && isolate_gamma)
+            global::lib_printf_root(
+                "Thermal Wc q->R Gamma treatment: isolated static Gamma-cell average\n");
         const auto size = layout.size();
         for (double time : times)
-            for (const auto& r : pbc.Rlist)
+            for (const auto& r : rlist)
                 result[time].emplace(r, Matz(layout.nr(), layout.nc(), layout.major()));
 
         // Full Wc input/output stays resident. The O(NB*Nq) pointer index is separate
@@ -225,26 +395,14 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
             for (const auto& q : qlist) indexed_samples.push_back(&qmap.at(q));
         }
 
-        const auto batch = choose_spatial_batch(qlist.size(), pbc.Rlist.size(), frequencies.size(),
+        const auto batch = choose_spatial_batch(qlist.size(), rlist.size(), frequencies.size(),
                                                 times.size(), size);
-        for (std::size_t r_offset = 0; r_offset < pbc.Rlist.size(); r_offset += batch.r_count)
+        for (std::size_t r_offset = 0; r_offset < rlist.size(); r_offset += batch.r_count)
         {
-            const auto r_count = std::min(batch.r_count, pbc.Rlist.size() - r_offset);
+            const auto r_count = std::min(batch.r_count, rlist.size() - r_offset);
             validate_dense_dimensions(r_count, qlist.size());
-            ComplexMatrix phases(static_cast<int>(r_count), static_cast<int>(qlist.size()));
-            for (std::size_t ir = 0; ir < r_count; ++ir)
-            {
-                const auto cartesian_r = pbc.Rlist[r_offset + ir] * pbc.latvec;
-                if (!finite(cartesian_r))
-                    throw std::overflow_error("thermal Wc lattice translation is nonfinite");
-                for (std::size_t q = 0; q < qlist.size(); ++q)
-                {
-                    const double angle = -TWO_PI * (qlist[q] * cartesian_r);
-                    if (!std::isfinite(angle))
-                        throw std::overflow_error("thermal Wc spatial phase is nonfinite");
-                    phases(ir, q) = cplxdb(std::cos(angle), std::sin(angle)) / double(qlist.size());
-                }
-            }
+            const auto phases =
+                build_spatial_phases(pbc, rlist, r_offset, r_count, use_tetra);
             // Empty owners still validate every R/phase and join the final collective,
             // but never call either spatial GEMM or the B helper with empty storage.
             for (std::size_t offset = 0; offset < size; offset += batch.elements)
@@ -263,7 +421,10 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
                     for (std::size_t q = 0; q < qlist.size(); ++q)
                         std::copy_n(indexed_samples[m * qlist.size() + q]->ptr() + offset, count,
                                     qpack.c + q * count);
-                    const auto spatial = phases * qpack;
+                    auto spatial = phases * qpack;
+                    if (isolate_gamma)
+                        isolate_static_gamma_cell_average(phases, qpack, spatial, pbc, rlist,
+                                                          r_offset, gamma_index, frequencies[m]);
                     // B columns enumerate (R, flat local entry), without changing ROW/COL
                     // semantics or completing any complex entries by conjugation.
                     std::copy_n(spatial.c, columns, samples.c + m * columns);
@@ -273,7 +434,7 @@ std::map<double, std::map<Vector3_Order<int>, Matz>> thermal_Wc_freq_q_to_tau_R(
                     for (std::size_t ir = 0; ir < r_count; ++ir)
                         std::copy_n(
                             transformed.c + j * columns + ir * count, count,
-                            result.at(times[j]).at(pbc.Rlist[r_offset + ir]).ptr() + offset);
+                            result.at(times[j]).at(rlist[r_offset + ir]).ptr() + offset);
             }
         }
     }
@@ -293,11 +454,21 @@ void thermal_Wc_freq_q_to_tau_R_stream(
     const PeriodicBoundaryData& pbc, const ThermalGWTransform& transform,
     const ThermalWcTimeConsumer& consume)
 {
+    thermal_Wc_freq_q_to_tau_R_stream(comm_h, Wc_freq_q, pbc, transform, pbc.Rlist, consume);
+}
+
+void thermal_Wc_freq_q_to_tau_R_stream(
+    const MpiCommHandler& comm_h,
+    std::map<double, std::map<Vector3_Order<double>, Matz>>& Wc_freq_q,
+    const PeriodicBoundaryData& pbc, const ThermalGWTransform& transform,
+    const std::vector<Vector3_Order<int>>& rlist, const ThermalWcTimeConsumer& consume)
+{
     std::exception_ptr error;
     std::vector<double> frequencies;
     try
     {
         validate_pbc(pbc);
+        validate_rlist(rlist);
         frequencies = transform.get_bosonic_frequencies_ha();
         if (transform.get_times().empty())
             throw std::invalid_argument("thermal Wc requires a nonempty time grid");
@@ -325,36 +496,41 @@ void thermal_Wc_freq_q_to_tau_R_stream(
     try
     {
         const auto& qlist = pbc.klist_full;
+        const bool use_tetra = tetra_q2r_requested();
+        const bool isolate_gamma = use_tetra && tetra_gamma_cell_average_requested();
+        const auto gamma_index = isolate_gamma ? find_gamma_q_index(pbc) : qlist.size();
+        if (comm_h.is_root())
+            global::lib_printf_root("Thermal Wc q->R integration: %s\n",
+                                    use_tetra ? "periodic tetrahedron diagnostic" : "uniform grid");
+        if (comm_h.is_root() && isolate_gamma)
+            global::lib_printf_root(
+                "Thermal Wc q->R Gamma treatment: isolated static Gamma-cell average\n");
         const auto spatial_batch =
-            choose_spatial_batch(qlist.size(), pbc.Rlist.size(), 1, 1, matrix_size);
+            choose_spatial_batch(qlist.size(), rlist.size(), 1, 1, matrix_size);
+        std::vector<ComplexMatrix> phase_batches;
+        for (std::size_t r_offset = 0; r_offset < rlist.size();
+             r_offset += spatial_batch.r_count)
+        {
+            const auto r_count = std::min(spatial_batch.r_count, rlist.size() - r_offset);
+            validate_dense_dimensions(r_count, qlist.size());
+            phase_batches.emplace_back(
+                build_spatial_phases(pbc, rlist, r_offset, r_count, use_tetra));
+        }
         while (!Wc_freq_q.empty())
         {
             auto frequency_node = Wc_freq_q.begin();
             const double frequency = frequency_node->first;
             const auto& qmap = frequency_node->second;
             auto& rmap = frequency_r[frequency];
-            for (const auto& r : pbc.Rlist) rmap.emplace(r, Matz(rows, columns, major));
+            for (const auto& r : rlist) rmap.emplace(r, Matz(rows, columns, major));
 
-            for (std::size_t r_offset = 0; r_offset < pbc.Rlist.size();
-                 r_offset += spatial_batch.r_count)
+            std::size_t phase_batch_index = 0;
+            for (std::size_t r_offset = 0; r_offset < rlist.size();
+                 r_offset += spatial_batch.r_count, ++phase_batch_index)
             {
-                const auto r_count = std::min(spatial_batch.r_count, pbc.Rlist.size() - r_offset);
+                const auto r_count = std::min(spatial_batch.r_count, rlist.size() - r_offset);
                 validate_dense_dimensions(r_count, qlist.size());
-                ComplexMatrix phases(static_cast<int>(r_count), static_cast<int>(qlist.size()));
-                for (std::size_t ir = 0; ir < r_count; ++ir)
-                {
-                    const auto cartesian_r = pbc.Rlist[r_offset + ir] * pbc.latvec;
-                    if (!finite(cartesian_r))
-                        throw std::overflow_error("thermal Wc lattice translation is nonfinite");
-                    for (std::size_t q = 0; q < qlist.size(); ++q)
-                    {
-                        const double angle = -TWO_PI * (qlist[q] * cartesian_r);
-                        if (!std::isfinite(angle))
-                            throw std::overflow_error("thermal Wc spatial phase is nonfinite");
-                        phases(ir, q) =
-                            cplxdb(std::cos(angle), std::sin(angle)) / double(qlist.size());
-                    }
-                }
+                const auto& phases = phase_batches.at(phase_batch_index);
                 for (std::size_t offset = 0; offset < matrix_size; offset += spatial_batch.elements)
                 {
                     const auto count = std::min(spatial_batch.elements, matrix_size - offset);
@@ -363,10 +539,13 @@ void thermal_Wc_freq_q_to_tau_R_stream(
                     ComplexMatrix qpack(static_cast<int>(qlist.size()), static_cast<int>(count));
                     for (std::size_t q = 0; q < qlist.size(); ++q)
                         std::copy_n(qmap.at(qlist[q]).ptr() + offset, count, qpack.c + q * count);
-                    const auto spatial = phases * qpack;
+                    auto spatial = phases * qpack;
+                    if (isolate_gamma)
+                        isolate_static_gamma_cell_average(phases, qpack, spatial, pbc, rlist,
+                                                          r_offset, gamma_index, frequency);
                     for (std::size_t ir = 0; ir < r_count; ++ir)
                         std::copy_n(spatial.c + ir * count, count,
-                                    rmap.at(pbc.Rlist[r_offset + ir]).ptr() + offset);
+                                    rmap.at(rlist[r_offset + ir]).ptr() + offset);
                 }
             }
             Wc_freq_q.erase(frequency_node);
@@ -380,21 +559,21 @@ void thermal_Wc_freq_q_to_tau_R_stream(
 
     const auto bosonic = transform.copy_bosonic_frequency_to_time();
     const auto time_batch =
-        choose_spatial_batch(frequencies.size(), pbc.Rlist.size(), 1, 1, matrix_size);
+        choose_spatial_batch(frequencies.size(), rlist.size(), 1, 1, matrix_size);
     for (std::size_t time_index = 0; time_index < transform.get_times().size(); ++time_index)
     {
         SpatialMap time_r;
         try
         {
-            for (const auto& r : pbc.Rlist) time_r.emplace(r, Matz(rows, columns, major));
+            for (const auto& r : rlist) time_r.emplace(r, Matz(rows, columns, major));
             ComplexMatrix coefficients(1, static_cast<int>(frequencies.size()));
             for (std::size_t m = 0; m < frequencies.size(); ++m)
                 coefficients(0, m) = bosonic(time_index, m);
 
-            for (std::size_t r_offset = 0; r_offset < pbc.Rlist.size();
+            for (std::size_t r_offset = 0; r_offset < rlist.size();
                  r_offset += time_batch.r_count)
             {
-                const auto r_count = std::min(time_batch.r_count, pbc.Rlist.size() - r_offset);
+                const auto r_count = std::min(time_batch.r_count, rlist.size() - r_offset);
                 for (std::size_t offset = 0; offset < matrix_size; offset += time_batch.elements)
                 {
                     const auto count = std::min(time_batch.elements, matrix_size - offset);
@@ -406,7 +585,7 @@ void thermal_Wc_freq_q_to_tau_R_stream(
                     {
                         const auto& rmap = frequency_r.at(frequencies[m]);
                         for (std::size_t ir = 0; ir < r_count; ++ir)
-                            std::copy_n(rmap.at(pbc.Rlist[r_offset + ir]).ptr() + offset, count,
+                            std::copy_n(rmap.at(rlist[r_offset + ir]).ptr() + offset, count,
                                         samples.c + m * packed_columns + ir * count);
                     }
                     const auto transformed = coefficients * samples;
@@ -416,7 +595,7 @@ void thermal_Wc_freq_q_to_tau_R_stream(
                                 "thermal Wc time transform produced a nonfinite result");
                     for (std::size_t ir = 0; ir < r_count; ++ir)
                         std::copy_n(transformed.c + ir * count, count,
-                                    time_r.at(pbc.Rlist[r_offset + ir]).ptr() + offset);
+                                    time_r.at(rlist[r_offset + ir]).ptr() + offset);
                 }
             }
         }

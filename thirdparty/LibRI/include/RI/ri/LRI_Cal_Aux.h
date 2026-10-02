@@ -267,7 +267,9 @@ namespace LRI_Cal_Aux
 		for(auto &&D_in : Ds_in)
 		{
 			const TAC key = {D_in.first.first, (D_in.first.second-translation)%period};
-			Ds_out[key] = std::move(D_in.second);
+			// Several unfolded image keys can reduce to the same BvK key.
+			// Preserve all of them before the caller performs the final fold.
+			add_Ds(std::move(D_in.second), Ds_out[key]);
 		}
 		return Ds_out;
 	}
@@ -285,7 +287,7 @@ namespace LRI_Cal_Aux
 		{
 			const TA key0 = D_in.first.first;
 			const TAC key1 = {key1_origin.first, (key1_origin.second-D_in.first.second)%period};
-			Ds_out[key0][key1] = std::move(D_in.second);
+			add_Ds(std::move(D_in.second), Ds_out[key0][key1]);
 		}
 		return Ds_out;
 	}
