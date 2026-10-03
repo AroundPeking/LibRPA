@@ -590,15 +590,20 @@ void read_headwing_input(const string &dir_path, bool need_wing,
             use_kpara_eigvec && pds->scfk_blacs_ctxt.is_initialized()
                 ? &iks_headwing_eigvec_this
                 : nullptr;
+        // PyATB sidecars keep the legacy eigenvector prefix independently of
+        // the ABACUS root files selected by input_preset=abacus.
+        auto pyatb_reader_ctx = driver_reader_context();
+        pyatb_reader_ctx.params.prefix_eigvecs_scf = "KS_eigenvector";
         const int ret_eigenvec =
             direct_headwing_kblacs_2d
-                ? read_eigenvector_kblacs_2d(
-                      pyatb_dir, mf, use_spinor_wfc, pds->scfk_blacs_ctxt,
-                      pds->desc_wfc_kb, &source_to_target_ik,
+                ? librpa::reader::read_eigenvector_kblacs_2d(
+                      pyatb_reader_ctx, pyatb_dir, mf, use_spinor_wfc,
+                      pds->scfk_blacs_ctxt, pds->desc_wfc_kb, &source_to_target_ik,
                       LegacyTextWfcOrder::SpinBasisBand)
-                : read_eigenvector(pyatb_dir, mf, use_spinor_wfc, source_to_target_ik,
-                                   source_iks_headwing_eigvec_selected,
-                                   LegacyTextWfcOrder::SpinBasisBand);
+                : librpa::reader::read_eigenvector(
+                      pyatb_reader_ctx, pyatb_dir, mf, use_spinor_wfc,
+                      source_to_target_ik, source_iks_headwing_eigvec_selected,
+                      LegacyTextWfcOrder::SpinBasisBand);
         if (ret_eigenvec != 0)
         {
             throw std::runtime_error("Failed to read pyatb head/wing eigenvectors from " +
