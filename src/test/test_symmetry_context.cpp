@@ -1519,6 +1519,25 @@ void test_rspace_block_restore_uses_stored_operation_rotation_convention()
     const auto restored = rotate_symmetry_rspace_block(
         ctx, layouts, non_identity_member->isym, 0, 0, block_ir);
     assert_matrix_close(restored, expected_full);
+
+    // A complex shell rotation distinguishes the operator transform from the
+    // transpose/conjugate transform used for density-like blocks.
+    ComplexMatrix complex_p_rotation(3, 3);
+    complex_p_rotation.zero_out();
+    complex_p_rotation(0, 0) = {1.0, 0.0};
+    complex_p_rotation(1, 1) = {0.0, 1.0};
+    complex_p_rotation(2, 2) = {-1.0, 0.0};
+    ctx.rsh_rotations.at(static_cast<std::size_t>(non_identity_member->isym)).at(1) =
+        complex_p_rotation;
+    const auto T_complex = ctx.get_rotation_matrix(layouts, 0, non_identity_member->isym);
+    const auto expected_operator = transpose(T_complex, true) * block_ir * T_complex;
+    const auto restored_operator = rotate_symmetry_rspace_operator_block(
+        ctx, layouts, non_identity_member->isym, 0, 0, block_ir);
+    assert_matrix_close(restored_operator, expected_operator);
+    assert(std::abs(restored_operator(1, 0) -
+                    rotate_symmetry_rspace_block(
+                        ctx, layouts, non_identity_member->isym, 0, 0, block_ir)(1, 0))
+           > 1e-8);
 }
 
 /*!
