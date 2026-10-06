@@ -9,6 +9,7 @@
 #include "reader_lri.h"
 #include "reader_coulomb.h"
 #include "reader_structure.h"
+#include "bz_full_kmap.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -475,8 +476,6 @@ void read_bz_sampling(ReaderContext &ctx, const std::string &file_path)
         }
         weight_sum += kweights[i];
     }
-    infile.close();
-
     if (std::abs(weight_sum - 1.0) > kBzSamplingWeightSumTol)
     {
         throw LIBRPA_RUNTIME_ERROR(
@@ -515,8 +514,11 @@ void read_bz_sampling(ReaderContext &ctx, const std::string &file_path)
             "symmetry-context representatives.\n");
     }
 
-    ctx.h.set_kgrids_kvec(nk[0], nk[1], nk[2], kvecs, kweights);
-    ctx.h.set_kq_mapping(map_q_ks);
+    if (!read_full_kmap(infile, ctx, nk, kvecs, kweights, map_q_ks))
+    {
+        ctx.h.set_kgrids_kvec(nk[0], nk[1], nk[2], kvecs, kweights);
+        ctx.h.set_kq_mapping(map_q_ks);
+    }
     sync_ibz_kpoints_from_mapping(ctx, kvecs, map_q_ks, n_kpoints_scf);
 }
 

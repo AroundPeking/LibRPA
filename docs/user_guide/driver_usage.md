@@ -69,6 +69,11 @@ This selects the short reader-v1 names: `stru_out.txt`, `band_out.txt`,
 `sinvS_*`, `V_cut_*`, and `V_full_*`. It also changes `prefix_velocity` to
 `velocity_matrix`.
 
+Reader-v1 supports ABACUS symmetry 0 and 1 through its explicit full-to-SCF
+mapping in `bz_sample.txt`; spatial operations are stored in `stru_out.txt`.
+Set `use_symmetry_rpa = t` to enable the existing LibRPA symmetry path for
+these reduced scalar or collinear datasets.
+
 For ABACUS datasets produced before
 [PR #7849](https://github.com/deepmodeling/abacus-develop/pull/7849)
 (merge commit [`42f8ad905d56`](https://github.com/deepmodeling/abacus-develop/commit/42f8ad905d567e965ae53fc554498bdc7e9ccbcc) on `develop`), select:

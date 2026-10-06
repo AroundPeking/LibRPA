@@ -252,13 +252,33 @@ This line indicates that SCF k-point `2`
 - whose representative in the SCF k-point list is also point `2`
 
 Older files may contain irreducible-k-point weight summaries after these rows.
-LibRPA ignores those summaries because the row weights above are already authoritative.
+LibRPA ignores those numeric summaries because the row weights above are already authoritative.
+
+ABACUS reader-v1 writes an optional `full_kmap` block when its SCF list is
+reduced by time reversal (`symmetry=0`) or spatial symmetry (`symmetry=1`):
+
+```text
+full_kmap N_FULL
+1 kx ky kz SCF_ID
+...
+N_FULL kx ky kz SCF_ID
+```
+
+`N_FULL` equals `nk1 * nk2 * nk3`. Each row gives the original full-grid
+point's 1-based index, Cartesian coordinates in Bohr inverse, and its 1-based
+SCF representative. The SCF and Coulomb representatives share the reduced
+numbering in this format. Folded SCF weights must equal their star sizes
+divided by `N_FULL`. LibRPA checks full-grid coverage, duplicate points modulo
+reciprocal lattice vectors, representative membership, and folded weights.
+It retains the reduced KS storage and reconstructs the full k/q stars for
+symmetry acceleration. Spatial operations come from the `stru_out.txt` tail.
+Existing files without this block retain their previous reader behavior.
 
 A few remarks
 
 - If the SCF k-point count equals `nk1 * nk2 * nk3`, no spatial symmetry was used to shrink the SCF k-list.
 - If that count is larger than the Coulomb irreducible count, time-reversal symmetry was used for Coulomb matrices.
-- If the SCF k-point count is smaller than `nk1 * nk2 * nk3`, spatial symmetry was used and `stru_out` must provide symmetry operations.
+- If the SCF k-point count is smaller than `nk1 * nk2 * nk3`, time reversal or spatial symmetry reduced the SCF list. Spatial reduction requires the operations in `stru_out`.
 
 (cs-data)=
 ## `Cs_data*`
