@@ -351,7 +351,7 @@ static std::vector<std::complex<double>> collect_normalized_blacs_column(
     return vector;
 }
 
-static void project_blacs_matrix_in_basis(const matrix_m<std::complex<double>> &matrix_local,
+void project_blacs_matrix_in_basis(const matrix_m<std::complex<double>> &matrix_local,
                                           const matrix_m<std::complex<double>> &basis_local,
                                           const ArrayDesc &matrix_desc, const int active_size,
                                           matrix_m<std::complex<double>> &work_local,
@@ -363,7 +363,7 @@ static void project_blacs_matrix_in_basis(const matrix_m<std::complex<double>> &
         work_local.nr() != matrix_desc.m_loc() || work_local.nc() != matrix_desc.n_loc() ||
         projected_local.nr() != matrix_desc.m_loc() || projected_local.nc() != matrix_desc.n_loc())
         throw LIBRPA_RUNTIME_ERROR(
-            "strict 2D diagnostic Coulomb-basis projection dimensions are inconsistent");
+            "Gamma Coulomb-basis projection dimensions are inconsistent");
 
     work_local.zero_out();
     projected_local.zero_out();
@@ -374,6 +374,24 @@ static void project_blacs_matrix_in_basis(const matrix_m<std::complex<double>> &
                                 basis_local.ptr(), 1, 1, matrix_desc.desc, work_local.ptr(), 1, 1,
                                 matrix_desc.desc, C_ZERO, projected_local.ptr(), 1, 1,
                                 matrix_desc.desc);
+}
+
+void restore_blacs_matrix_from_basis(
+    const matrix_m<std::complex<double>> &projected_local,
+    const matrix_m<std::complex<double>> &basis_local, const ArrayDesc &matrix_desc,
+    const int active_size, matrix_m<std::complex<double>> &work_local,
+    matrix_m<std::complex<double>> &matrix_local)
+{
+    if (matrix_desc.m() != matrix_desc.n() || active_size < 1 || active_size > matrix_desc.m())
+        throw LIBRPA_RUNTIME_ERROR("Gamma Coulomb-basis restoration dimensions are inconsistent");
+    ScalapackConnector::pgemm_f(
+        'N', 'N', matrix_desc.m(), active_size, active_size, C_ONE,
+        basis_local.ptr(), 1, 1, matrix_desc.desc, projected_local.ptr(), 1, 1,
+        matrix_desc.desc, C_ZERO, work_local.ptr(), 1, 1, matrix_desc.desc);
+    ScalapackConnector::pgemm_f(
+        'N', 'C', matrix_desc.m(), matrix_desc.m(), active_size, C_ONE,
+        work_local.ptr(), 1, 1, matrix_desc.desc, basis_local.ptr(), 1, 1,
+        matrix_desc.desc, C_ZERO, matrix_local.ptr(), 1, 1, matrix_desc.desc);
 }
 
 static Strict2dBlockMetrics collect_strict_2d_block_metrics(
@@ -3746,16 +3764,9 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                         df_headwing->rewrite_metallic_static_3d_wc(
                             gamma_epsilon, ifreq, desc_nabf_nabf_opt,
                             metallic_static_projected_coulomb_sqrt);
-                    ScalapackConnector::pgemm_f(
-                        'N', 'N', n_abf, as_int(n_nonsingular), as_int(n_nonsingular), C_ONE,
-                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
-                        gamma_epsilon.ptr(), 1, 1, desc_nabf_nabf_opt.desc, C_ZERO,
-                        coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc);
-                    ScalapackConnector::pgemm_f(
-                        'N', 'C', n_abf, n_abf, as_int(n_nonsingular), C_ONE,
-                        coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
-                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc, C_ZERO,
-                        chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc);
+                    restore_blacs_matrix_from_basis(
+                        gamma_epsilon, coul_eigen_block, desc_nabf_nabf_opt,
+                        as_int(n_nonsingular), coul_chi0_block, chi0_block);
                 }
                 else
                     df_headwing->rewrite_eps_abf_space(

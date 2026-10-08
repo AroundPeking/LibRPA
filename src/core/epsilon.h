@@ -20,6 +20,18 @@
 
 namespace librpa_int {
 
+// Transform the complete Gamma dielectric/Wc matrices to and from the fixed Coulomb basis.
+void project_blacs_matrix_in_basis(
+    const matrix_m<std::complex<double>> &matrix_local,
+    const matrix_m<std::complex<double>> &basis_local, const ArrayDesc &matrix_desc,
+    int active_size, matrix_m<std::complex<double>> &work_local,
+    matrix_m<std::complex<double>> &projected_local);
+void restore_blacs_matrix_from_basis(
+    const matrix_m<std::complex<double>> &projected_local,
+    const matrix_m<std::complex<double>> &basis_local, const ArrayDesc &matrix_desc,
+    int active_size, matrix_m<std::complex<double>> &work_local,
+    matrix_m<std::complex<double>> &matrix_local);
+
 enum class Strict2dQshellRegion { gamma, first, rest };
 enum class Strict2dQradialRegion { gamma_or_first, near, middle, far };
 enum class Strict2dWcBlock { full, head, wing, body };

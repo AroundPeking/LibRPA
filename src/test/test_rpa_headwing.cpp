@@ -2965,6 +2965,68 @@ void test_finite_temperature_static_metallic_rpa_gamma_path(const BlacsCtxtHandl
 #endif
 }
 
+
+void test_complete_gamma_basis_bridge_with_mixed_charge_channel(const BlacsCtxtHandler &blacs_h)
+{
+    constexpr int n = 3;
+    using C = std::complex<double>;
+    C u[n][n], e[n][n] = {{1.4, C{0.2, 0.1}, C{0.05, -0.03}},
+                          {C{0.2, -0.1}, 2.1, C{-0.1, 0.07}},
+                          {C{0.05, 0.03}, C{-0.1, -0.07}, 3.0}};
+    C wc[n][n] = {{-2.0, C{0.15, -0.08}, C{-0.04, 0.02}},
+                  {C{0.15, 0.08}, -0.3, C{0.06, 0.09}},
+                  {C{-0.04, -0.02}, C{0.06, -0.09}, -0.2}};
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            u[i][j] = std::polar(1.0 / std::sqrt(3.0), librpa_int::TWO_PI * i * j / 3.0);
+    ArrayDesc desc(blacs_h);
+    desc.init_square_blk(n, 1, 0, 0);
+    auto basis = init_local_mat<C>(desc, MAJOR::COL);
+    auto abf = init_local_mat<C>(desc, MAJOR::COL);
+    auto projected = init_local_mat<C>(desc, MAJOR::COL);
+    auto work = init_local_mat<C>(desc, MAJOR::COL);
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+        {
+            const int il = desc.indx_g2l_r(i), jl = desc.indx_g2l_c(j);
+            if (il < 0 || jl < 0) continue;
+            basis(il, jl) = u[i][j];
+            C value = 0.0;
+            for (int a = 0; a < n; ++a)
+                for (int b = 0; b < n; ++b)
+                    value += u[i][a] * e[a][b] * std::conj(u[j][b]);
+            abf(il, jl) = value;
+        }
+    const auto original = abf.copy();
+    for (const int active : {n, n - 1})
+    {
+        abf = original.copy();
+        librpa_int::project_blacs_matrix_in_basis(abf, basis, desc, active, work, projected);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+            {
+                const int il = desc.indx_g2l_r(i), jl = desc.indx_g2l_c(j);
+                if (il < 0 || jl < 0) continue;
+                const C expected = i < active && j < active ? e[i][j] : C{};
+                assert_complex_close(projected(il, jl), expected, 2.0e-12);
+                // Stand-in for the complete integrated Wc, including both wings and body.
+                projected(il, jl) = wc[i][j];
+            }
+        librpa_int::restore_blacs_matrix_from_basis(projected, basis, desc, active, work, abf);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+            {
+                const int il = desc.indx_g2l_r(i), jl = desc.indx_g2l_c(j);
+                if (il < 0 || jl < 0) continue;
+                C expected = 0.0;
+                for (int a = 0; a < active; ++a)
+                    for (int b = 0; b < active; ++b)
+                        expected += u[i][a] * wc[a][b] * std::conj(u[j][b]);
+                assert_complex_close(abf(il, jl), expected, 2.0e-12);
+            }
+    }
+}
+
 void test_finite_temperature_static_metallic_gw_gamma_path(const BlacsCtxtHandler &blacs_h)
 {
 #ifdef LIBRPA_USE_LIBRI
@@ -5032,7 +5094,8 @@ int main(int argc, char *argv[])
             test_metallic_static_3d_converts_internal_reciprocal_units();
             test_metallic_static_3d_inverse_weights_recover_head_only_wc();
             test_metallic_static_3d_gw_routes_only_static_gamma_through_complete_wc_average();
-            test_finite_temperature_static_metallic_gw_gamma_path(blacs_h);
+            test_complete_gamma_basis_bridge_with_mixed_charge_channel(blacs_h);
+        test_finite_temperature_static_metallic_gw_gamma_path(blacs_h);
             goto tests_complete;
         }
         test_replace_rpa_response_headwing_replaces_only_singular_channels(blacs_h);
@@ -5118,6 +5181,7 @@ int main(int argc, char *argv[])
         test_finite_temperature_dynamic_intraband_wing_uses_diagonal_lri_vertex(blacs_h);
         test_fd_degenerate_headwing_is_basis_invariant(blacs_h);
         test_finite_temperature_static_metallic_rpa_gamma_path(blacs_h);
+        test_complete_gamma_basis_bridge_with_mixed_charge_channel(blacs_h);
         test_finite_temperature_static_metallic_gw_gamma_path(blacs_h);
         test_strict_2d_gamma_quadrature_is_ready_after_wing_initialization(blacs_h);
         test_wq_to_wr_symmetry_reduced_q_matches_full_bz();
