@@ -16,7 +16,6 @@
 #include "pbc.h"
 #include "qpoint_view.h"
 #include "ri.h"
-#include "symmetry_context.h"
 #include "thermal_gw_transform.h"
 #include "timefreq.h"
 

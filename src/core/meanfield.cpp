@@ -599,6 +599,46 @@ static ComplexMatrix build_gf_cplx_imagtime_with_kpoint_weight(
     return transpose(*wfc_bra, false) * scaled_wfc_conj;
 }
 
+static ComplexMatrix build_gf_cplx_imagtime_with_prefactor(
+    const MeanField& mf,
+    const int ispin,
+    const int ispinor_bra,
+    const int ispinor_ket,
+    const int ikpt,
+    const double tau,
+    const std::vector<double>& prefactors,
+    const int nbands_G)
+{
+    const int n_aos = mf.get_n_aos();
+    const int n_bands = mf.get_n_bands();
+    const auto wfc_bra = mf.find_wfc(ispin, ispinor_bra, ikpt);
+    const auto wfc_ket = mf.find_wfc(ispin, ispinor_ket, ikpt);
+    if (wfc_bra == nullptr)
+        throw LIBRPA_RUNTIME_ERROR("wfc of ispinor_bra not found");
+    if (wfc_ket == nullptr)
+        throw LIBRPA_RUNTIME_ERROR("wfc of ispinor_ket not found");
+
+    auto scaled_wfc_conj = conj(*wfc_ket);
+    for (int ib = 0; ib != n_bands; ++ib)
+    {
+        const double energy_scale = -tau * (mf.get_eigenvals()[ispin](ikpt, ib) - mf.get_efermi());
+        const double bounded_scale = energy_scale > 0.0 ? 0.0 : energy_scale;
+        const double scale = std::exp(bounded_scale) * prefactors[static_cast<std::size_t>(ib)];
+        LapackConnector::scal(n_aos, scale, scaled_wfc_conj.c + n_aos * ib, 1);
+    }
+    if (nbands_G >= 0)
+    {
+        for (int ib = nbands_G; ib < n_bands; ++ib)
+        {
+            for (int iao = 0; iao != n_aos; ++iao)
+            {
+                scaled_wfc_conj(ib, iao) = 0.0;
+            }
+        }
+    }
+    return transpose(*wfc_bra, false) * scaled_wfc_conj;
+}
+
 //! Zero-fill variant of build_gf_cplx_imagtime_with_prefactor: spinor source
 //! blocks whose wfc channel is missing contribute a zero block (report R11).
 static ComplexMatrix build_gf_cplx_imagtime_with_prefactor_zero_fill(

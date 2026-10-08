@@ -1136,22 +1136,11 @@ void Chi0::build_chi0_q_space_time(const LibrpaParallelRouting routing,
                                    std::map<Vector3_Order<double>, ComplexMatrix> &sinvS,
                                    const BlacsCtxtHandler &blacs_ctxt_h)
 {
-    const bool force_complex_spacetime = force_complex_spacetime_diagnostic_requested(
-        std::getenv("LIBRPA_FORCE_COMPLEX_SPACETIME_DIAG"));
     const bool finite_temperature = tfg.get_grid_type() == LIBRPA_TFGRID_FD_MATSUBARA;
     if (finite_temperature && routing != LIBRPA_ROUTING_LIBRI)
         throw LIBRPA_RUNTIME_ERROR(
             "finite-temperature space-time chi0 currently requires LibRI routing");
-    const bool physical_soc = mf.get_n_spinor() > 1;
-    const bool use_complex_tensor = physical_soc || force_complex_spacetime || finite_temperature;
-    if (force_complex_spacetime && comm_h.is_root())
-    {
-        global::lib_printf(
-            "Diagnostic: complex chi0 space-time tensors are forced; physical inputs and "
-            "symmetry remain unchanged; physical_soc=%s, chi0_spin_scale=%.16g\n",
-            physical_soc ? "true" : "false",
-            chi0_spacetime_spin_scale(mf.get_n_spinor(), mf.get_n_spins()));
-    }
+    const bool use_complex_tensor = mf.get_n_spinor() > 1 || finite_temperature;
     // int R_tau_size = Rlist_gf.size() * tfg_.size();
     if (routing == LIBRPA_ROUTING_LIBRI)
     {
@@ -1159,7 +1148,7 @@ void Chi0::build_chi0_q_space_time(const LibrpaParallelRouting routing,
         {
             std::cout << "Use LibRI for chi0" << std::endl;
         }
-        if (use_soc)
+        if (use_complex_tensor)
             build_chi0_q_space_time_LibRI_routing<std::complex<double>>(Cs, atpairs_ABF, abf_shrink,
                                                                         sinvS, blacs_ctxt_h);
         else
@@ -1679,14 +1668,13 @@ static Chi0CollectMap<Tdata> fold_tetrahedron_chi0_R(const Chi0CollectMap<Tdata>
 template <typename Tdata>
 static void chi_libri_ct_accumulate_R(
     const int &isp,
-    const int &nspins,
+    const double spin_scale,
     const int &it,
     const TFGrids &tfg,
     const Chi0CollectMap<Tdata> &chi0s_IJR,
     const vector<atpair_t> &atpairs_ABF,
     map<double, Chi0CollectMap<Tdata>> &chi0_freq_R)
 {
-    const bool use_soc = std::is_same<Tdata, std::complex<double>>::value;
     const auto tau = tfg.get_time_nodes()[it];
     const auto freqs = tfg.get_freq_nodes();
 
@@ -1823,14 +1811,13 @@ static void chi_libri_ft_Rq_from_freq_R(
 
 template <typename Tdata>
 static void chi_libri_ft_Rq(
-    const int &isp, const int &nspins, const int &it, const TFGrids &tfg,
+    const int &isp, const double spin_scale, const int &it, const TFGrids &tfg,
     const AtomicBasis &atbasis_abf,
     const Matrix3 &latvec,
     const std::map<int, std::map<libri_types<int, int>::TAC, RI::Tensor<Tdata>>> &chi0s_IJR,
     const vector<Vector3_Order<double>> &qlist, const vector<atpair_t> &atpairs_ABF,
     map<double, map<Vector3_Order<double>, atom_mapping<ComplexMatrix>::pair_t_old>> &chi0_q)
 {
-    const bool use_soc = std::is_same<Tdata, std::complex<double>>::value;
     const auto tau = tfg.get_time_nodes()[it];
     // a simple vector container for OpenMP parallel
     vector<pair<std::array<int, 3>, std::vector<std::array<int, 3>>>> iq_mu_nu_to_Rs;
@@ -1889,10 +1876,7 @@ static void chi_libri_ft_Rq(
 
             const double arg = q * (Rint * latvec) * TWO_PI;
             const complex<double> kphase = complex<double>(cos(arg), sin(arg));
-            if (use_soc)
-                LapackConnector::axpy(cm_chi0.size, kphase, cm_chi0.c, 1, chi.c, 1);
-            else
-                LapackConnector::axpy(cm_chi0.size, 2.0 / nspins * kphase, cm_chi0.c, 1, chi.c, 1);
+            LapackConnector::axpy(cm_chi0.size, spin_scale * kphase, cm_chi0.c, 1, chi.c, 1);
         }
     }
 }
@@ -2695,7 +2679,7 @@ void Chi0::build_chi0_q_space_time_LibRI_routing(const Cs_LRI &Cs,
                     }
                 }
                 profiler.start("chi0_libri_routing_ft_Rq");
-                chi_libri_ft_Rq<Tdata>(isp, mf.get_n_spins(), it, tfg, abf_Cs, pbc.latvec, 
+                chi_libri_ft_Rq<Tdata>(isp, spin_scale, it, tfg, abf_Cs, pbc.latvec,
                                        chi0s_IJR, qlist,
                                        atpairs_ABF, chi0_tau_q);
                 profiler.stop("chi0_libri_routing_ft_Rq");

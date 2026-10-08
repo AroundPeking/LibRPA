@@ -2063,8 +2063,7 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
     RI::GW<int, int, 3, cplxdb> gw_libri;
     std::map<int, std::array<double, 3>> atoms_pos;
     for (int i = 0; i < atbasis_wfc.n_atoms; ++i) atoms_pos[i] = {0, 0, 0};
-    libri_set_parallel(gw_libri, comm_h.comm, atoms_pos, pbc.latvec_array, libri_period,
-                       atbasis_wfc.get_atom_nb_map<int>());
+    gw_libri.set_parallel(comm_h.comm, atoms_pos, pbc.latvec_array, libri_period);
     gw_libri.set_symmetry(false, {});
     if (use_rspace_symmetry)
         gw_libri.lri.filter_atom =

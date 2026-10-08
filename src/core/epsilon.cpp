@@ -1781,8 +1781,6 @@ complex<double> compute_pi_det_blacs_2d(Matz &loc_piT, const ArrayDesc &arrdesc_
     // arrdesc_pi.m_loc(),arrdesc_pi.n_loc(),arrdesc_pi.myprow(),arrdesc_pi.mypcol(),arrdesc_pi.nprows(),arrdesc_pi.npcols());
     complex<double> ln_det_loc(0.0, 0.0);
     complex<double> ln_det_all(0.0, 0.0);
-    int row_swaps_loc = 0;
-    int row_swaps_all = 0;
     // complex<double> det_loc(1.0,0.0);
     // complex<double> det_glo(0.0,0.0);
     // vector<complex<double>>  det_dig;
