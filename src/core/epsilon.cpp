@@ -3424,25 +3424,20 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                 false, is_gamma_point(q),
                 !epsmac_LF_imagfreq.empty() && df_headwing != nullptr,
                 has_metallic_static_frequency);
-        matrix_m<std::complex<double>> metallic_static_projected_coulomb_sqrt;
-        if (prepare_metallic_static_3d_complete_wc)
+        matrix_m<std::complex<double>> gamma_projected_coulomb_sqrt;
+        if (prepare_metallic_static_3d_complete_wc ||
+            (strict_2d_requested && is_gamma_point(q)))
         {
-            metallic_static_projected_coulomb_sqrt =
+            gamma_projected_coulomb_sqrt =
                 init_local_mat<complex<double>>(desc_nabf_nabf_opt, MAJOR::COL);
-            metallic_static_projected_coulomb_sqrt.zero_out();
-            const int n_coulomb = as_int(n_nonsingular);
-            ScalapackConnector::pgemm_f('C', 'N', n_coulomb, n_abf, n_abf, C_ONE,
-                                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
-                                        coulwc_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc, C_ZERO,
-                                        coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc);
-            ScalapackConnector::pgemm_f('N', 'N', n_coulomb, n_coulomb, n_abf, C_ONE,
-                                        coul_chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
-                                        coul_eigen_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
-                                        C_ZERO, metallic_static_projected_coulomb_sqrt.ptr(), 1, 1,
-                                        desc_nabf_nabf_opt.desc);
+            // The cell routines extract the regular body of this operator.
+            // It must be expressed in the same fixed Coulomb basis as epsilon.
+            project_blacs_matrix_in_basis(
+                coulwc_block, coul_eigen_block, desc_nabf_nabf_opt,
+                as_int(n_nonsingular), coul_chi0_block, gamma_projected_coulomb_sqrt);
             if (comm_h.is_root())
-                std::cout << "Prepared the truncated-Coulomb square root in the fixed Gamma "
-                             "basis for the metallic static complete-Wc average."
+                std::cout << "Prepared the Wc Coulomb square root in the fixed Gamma "
+                             "basis for the complete-Wc average."
                           << std::endl;
         }
         if (gamma_full_headwing && n_singular != 0)
@@ -3756,14 +3751,14 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                         as_int(n_nonsingular), coul_chi0_block, gamma_epsilon);
                     if (metallic_static_2d_complete_wc_gamma)
                         df_headwing->rewrite_metallic_static_2d_wc(
-                            gamma_epsilon, ifreq, desc_nabf_nabf_opt, coulwc_block);
+                            gamma_epsilon, ifreq, desc_nabf_nabf_opt, gamma_projected_coulomb_sqrt);
                     else if (strict_2d_complete_wc_gamma)
                         df_headwing->rewrite_strict_2d_wc(
-                            gamma_epsilon, ifreq, desc_nabf_nabf_opt, coulwc_block);
+                            gamma_epsilon, ifreq, desc_nabf_nabf_opt, gamma_projected_coulomb_sqrt);
                     else
                         df_headwing->rewrite_metallic_static_3d_wc(
                             gamma_epsilon, ifreq, desc_nabf_nabf_opt,
-                            metallic_static_projected_coulomb_sqrt);
+                            gamma_projected_coulomb_sqrt);
                     restore_blacs_matrix_from_basis(
                         gamma_epsilon, coul_eigen_block, desc_nabf_nabf_opt,
                         as_int(n_nonsingular), coul_chi0_block, chi0_block);

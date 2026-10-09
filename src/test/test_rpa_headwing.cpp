@@ -3024,6 +3024,41 @@ void test_complete_gamma_basis_bridge_with_mixed_charge_channel(const BlacsCtxtH
                         expected += u[i][a] * wc[a][b] * std::conj(u[j][b]);
                 assert_complex_close(abf(il, jl), expected, 2.0e-12);
             }
+        // Nontrivial Coulomb legs must be transformed too. Check the composed
+        // L (epsilon^-1-I) L operator against a direct dense-basis contraction.
+        const double legs[n]{3.0, 1.4, 0.6};
+        auto legs_abf = init_local_mat<C>(desc, MAJOR::COL);
+        auto legs_c = init_local_mat<C>(desc, MAJOR::COL);
+        auto corr = init_local_mat<C>(desc, MAJOR::COL);
+        auto product = init_local_mat<C>(desc, MAJOR::COL);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+            {
+                const int il = desc.indx_g2l_r(i), jl = desc.indx_g2l_c(j);
+                if (il < 0 || jl < 0) continue;
+                C value = 0.0;
+                for (int a = 0; a < n; ++a)
+                    value += u[i][a] * legs[a] * std::conj(u[j][a]);
+                legs_abf(il, jl) = value;
+                corr(il, jl) = i < active && j < active ? wc[i][j] : C{};
+            }
+        librpa_int::project_blacs_matrix_in_basis(legs_abf, basis, desc, active, work, legs_c);
+        librpa_int::ScalapackConnector::pgemm_f('N', 'N', n, n, n, C{1.0}, legs_c.ptr(), 1, 1, desc.desc,
+                                    corr.ptr(), 1, 1, desc.desc, C{}, work.ptr(), 1, 1, desc.desc);
+        librpa_int::ScalapackConnector::pgemm_f('N', 'N', n, n, n, C{1.0}, work.ptr(), 1, 1, desc.desc,
+                                    legs_c.ptr(), 1, 1, desc.desc, C{}, product.ptr(), 1, 1, desc.desc);
+        librpa_int::restore_blacs_matrix_from_basis(product, basis, desc, active, work, abf);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+            {
+                const int il = desc.indx_g2l_r(i), jl = desc.indx_g2l_c(j);
+                if (il < 0 || jl < 0) continue;
+                C expected = 0.0;
+                for (int a = 0; a < active; ++a)
+                    for (int b = 0; b < active; ++b)
+                        expected += u[i][a] * legs[a] * wc[a][b] * legs[b] * std::conj(u[j][b]);
+                assert_complex_close(abf(il, jl), expected, 2.0e-11);
+            }
     }
 }
 
