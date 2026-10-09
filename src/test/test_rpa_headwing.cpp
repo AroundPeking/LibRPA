@@ -2980,7 +2980,7 @@ void test_complete_gamma_basis_bridge_with_mixed_charge_channel(const BlacsCtxtH
         for (int j = 0; j < n; ++j)
             u[i][j] = std::polar(1.0 / std::sqrt(3.0), librpa_int::TWO_PI * i * j / 3.0);
     ArrayDesc desc(blacs_h);
-    desc.init_square_blk(n, 1, 0, 0);
+    desc.init_square_blk_capped(n, n, 1, 0, 0);
     auto basis = init_local_mat<C>(desc, MAJOR::COL);
     auto abf = init_local_mat<C>(desc, MAJOR::COL);
     auto projected = init_local_mat<C>(desc, MAJOR::COL);

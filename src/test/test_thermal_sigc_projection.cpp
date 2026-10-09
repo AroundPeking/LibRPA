@@ -115,7 +115,7 @@ void check_passed_grid_import()
         mf.set_fermi_dirac_reference(make_fermi_dirac_reference(1 / beta, MU, 1, 1e-12));
         TFGrids response_grid(4);
         response_grid.generate_finite_beta_matsubara(8, beta);
-        G0W0 gw(mf, ao, pbc, symmetry, response_grid, context, context, desc, false, false);
+        G0W0 gw(mf, ao, pbc, symmetry, response_grid, context, context, desc, desc, false, false);
         const auto make_result = [&]()
         {
             const auto transform =
@@ -190,7 +190,7 @@ void check_projection(MAJOR major, int ownership, bool k_distributed = false)
     const auto bosons = response_grid.get_freq_nodes();
     const auto times = response_grid.get_time_nodes();
     SymmetryContext symmetry;
-    G0W0 gw(mf, ao, pbc, symmetry, response_grid, context, context, desc, k_distributed, false);
+    G0W0 gw(mf, ao, pbc, symmetry, response_grid, context, context, desc, desc, k_distributed, false);
     require(global_blacs.comm() == gw.comm_h.comm,
             "projection fixture must use the exact global communicator");
     char output_directory[] = "/tmp/librpa_thermal_sigc_projection_XXXXXX";
@@ -374,7 +374,7 @@ void check_projection(MAJOR major, int ownership, bool k_distributed = false)
 
     if (ownership == 0)
     {
-        G0W0 restarted(mf, ao, pbc, symmetry, response_grid, context, context, desc, k_distributed,
+        G0W0 restarted(mf, ao, pbc, symmetry, response_grid, context, context, desc, desc, k_distributed,
                        false);
         restarted.read_sigc(output_directory);
         require(restarted.is_rspace_built() && restarted.get_sigc_frequency_nodes() == positive,

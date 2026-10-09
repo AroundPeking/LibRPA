@@ -61,7 +61,7 @@ void check(MAJOR major, int nk, int nabf = 2)
     const auto desc = context.create_array_desc(nabf, nabf);
     TFGrids response_grid;  // Deliberately uninitialized: no legacy grid may be consulted.
     SymmetryContext symmetry;
-    G0W0 gw(mf, ao, pbc, symmetry, response_grid, context, context, desc, false, false);
+    G0W0 gw(mf, ao, pbc, symmetry, response_grid, context, context, desc, desc, false, false);
     Matz cached(1, 1, MAJOR::ROW);
     cached(0, 0) = Z(3, -7);
     gw.sigc_is_ik_f_KS[7][5][123] = cached;
@@ -363,7 +363,7 @@ void check_multiatom(MAJOR major, bool distribute_cs)
     const auto desc = context.create_array_desc(NABF, NABF);
     TFGrids legacy_grid;
     SymmetryContext symmetry;
-    G0W0 gw(mf, ao, pbc, symmetry, legacy_grid, context, context, desc, false, false);
+    G0W0 gw(mf, ao, pbc, symmetry, legacy_grid, context, context, desc, desc, false, false);
     Cs_LRI cs;
     cs.use_libri = true;
     int block_index = 0;

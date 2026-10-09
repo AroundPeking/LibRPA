@@ -549,7 +549,7 @@ void check_libri_contraction(const Fixture& fixture, const ThermalGWTransform& t
     const librpa_int::TFGrids response_grid;  // No legacy time/frequency grid is initialized.
     const librpa_int::SymmetryContext symmetry;
     const librpa_int::G0W0 production_gw(mf, ao, pbc, symmetry, response_grid, context, context,
-                                         desc, false, false);
+                                         desc, desc, false, false);
     librpa_int::Cs_LRI lri_cs;
     lri_cs.use_libri = true;
     if (rank == 0)

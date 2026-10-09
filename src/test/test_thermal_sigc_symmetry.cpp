@@ -139,7 +139,7 @@ void check(MAJOR major, bool distributed_c, bool identity_only = false, int nban
                 else
                     members.push_back(members.front());
             }
-            G0W0 gw(mf, ao, pbc, symmetry, legacy_grid, context, context, desc, false,
+            G0W0 gw(mf, ao, pbc, symmetry, legacy_grid, context, context, desc, desc, false,
                     !(diagnostic == 2 && rank == size - 1));
             gw.libri_threshold_C = gw.libri_threshold_G = gw.libri_threshold_Wc = 0;
             int caught = 0;
@@ -158,7 +158,7 @@ void check(MAJOR major, bool distributed_c, bool identity_only = false, int nban
     }
     const auto run = [&](bool use_symmetry)
     {
-        G0W0 gw(mf, ao, pbc, symmetry, legacy_grid, context, context, desc, false, use_symmetry);
+        G0W0 gw(mf, ao, pbc, symmetry, legacy_grid, context, context, desc, desc, false, use_symmetry);
         gw.libri_threshold_C = gw.libri_threshold_G = gw.libri_threshold_Wc = 0;
         const auto result = gw.build_thermal_spacetime(abf, cs, wc, desc, transform);
         require_all(
