@@ -185,6 +185,20 @@ void check_projection(MAJOR major, int ownership, bool k_distributed = false)
     global_blacs.reset_comm(context.comm_global_h.comm);
     global_blacs.set_grid(context.blacs_h.nprows, context.blacs_h.npcols);
     const auto desc = context.create_array_desc(3, 3);
+    // The current k-distributed interface consumes permanent local AO-by-band
+    // blocks. Keep the full coefficients separately for the explicit reference.
+    auto projection_wfc = mf.get_eigenvectors();
+    if (k_distributed)
+        for (int spin = 0; spin < 2; ++spin)
+            for (int k = 0; k < 2; ++k)
+            {
+                const auto &full = mf.get_eigenvectors().at(spin).at(0).at(k);
+                auto &local = projection_wfc[spin][0][k];
+                local.create(desc.n_loc(), desc.m_loc());
+                for (int ib = 0; ib < desc.n_loc(); ++ib)
+                    for (int ia = 0; ia < desc.m_loc(); ++ia)
+                        local(ib, ia) = full(desc.indx_l2g_c(ib), desc.indx_l2g_r(ia));
+            }
     TFGrids response_grid(4);
     response_grid.generate_finite_beta_matsubara(8, BETA);
     const auto bosons = response_grid.get_freq_nodes();
@@ -319,7 +333,7 @@ void check_projection(MAJOR major, int ownership, bool k_distributed = false)
             }
     require(has_degeneracy && has_pair_shift, "fixture does not exercise nearest-image averaging");
     gw.output_sigc_ks_mat_kf = true;
-    gw.build_sigc_matrix_KS_band_blacs(mf.get_eigenvectors(), targets, remap, global_blacs);
+    gw.build_sigc_matrix_KS_band_blacs(projection_wfc, targets, remap, global_blacs);
     bool complete = true;
     for (int spin = 0; spin < 2; ++spin)
         for (int k = 0; k < 2; ++k)
@@ -379,7 +393,7 @@ void check_projection(MAJOR major, int ownership, bool k_distributed = false)
         restarted.read_sigc(output_directory);
         require(restarted.is_rspace_built() && restarted.get_sigc_frequency_nodes() == positive,
                 "thermal SigcRF restart did not restore its independent fermionic grid");
-        restarted.build_sigc_matrix_KS_band_blacs(mf.get_eigenvectors(), targets, remap,
+        restarted.build_sigc_matrix_KS_band_blacs(projection_wfc, targets, remap,
                                                   global_blacs);
         double restart_error = 0;
         if (rank == 0)
