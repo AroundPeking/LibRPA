@@ -7,6 +7,7 @@ add_test(NAME test_input_parser COMMAND $<TARGET_FILE:test_input_parser>)
 
 add_executable(test_driver_params test_driver_params.cpp ../driver.cpp)
 target_link_libraries(test_driver_params PRIVATE librpa_file_reader)
+target_compile_options(test_driver_params PRIVATE -UNDEBUG)
 add_test(NAME test_driver_params COMMAND $<TARGET_FILE:test_driver_params>)
 
 add_executable(
@@ -17,7 +18,15 @@ add_executable(
   ../reader_2d_coulomb_head.cpp
 )
 target_link_libraries(test_velocity_reader PRIVATE librpa_file_reader)
+target_compile_options(test_velocity_reader PRIVATE -UNDEBUG)
 add_test(NAME test_velocity_reader COMMAND $<TARGET_FILE:test_velocity_reader>)
+add_executable(test_bz_mapping test_bz_mapping.cpp)
+target_link_libraries(test_bz_mapping PRIVATE librpa_file_reader)
+target_compile_options(test_bz_mapping PRIVATE -UNDEBUG)
+add_test(NAME test_bz_mapping COMMAND $<TARGET_FILE:test_bz_mapping>)
+add_test(NAME test_bz_mapping_mpi COMMAND mpirun -np 2 $<TARGET_FILE:test_bz_mapping>)
+set_tests_properties(test_bz_mapping test_bz_mapping_mpi PROPERTIES TIMEOUT 30)
+
 add_executable(test_stru_symops_parser test_stru_symops_parser.cpp ../stru_symops_parser.cpp)
 target_link_libraries(test_stru_symops_parser PRIVATE rpa_lib)
 add_test(NAME test_stru_symops_parser COMMAND $<TARGET_FILE:test_stru_symops_parser>)

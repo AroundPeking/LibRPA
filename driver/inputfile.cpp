@@ -300,7 +300,8 @@ void parse_inputfile_to_params(const std::string &fn)
     _parse_string(driver_params, fn_bz_sampling);
     _parse_string(driver_params, fn_eigocc_scf);
     _parse_string(driver_params, fn_dielfunc);
-    _parse_string(driver_params, fn_vxc_scf);
+    parser.parse_string("fn_vxc_scf", driver_params.fn_vxc_scf, flag);
+    driver_params.vxc_explicit = (flag == 0);
     _parse_string(driver_params, prefix_velocity);
     _parse_string(driver_params, fn_band_kpath_info);
     std::string task_normalized = driver_params.task;

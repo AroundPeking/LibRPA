@@ -597,7 +597,7 @@ void driver::task_g0w0()
 
     profiler.start("read_vxc", "Load DFT xc potential");
     std::vector<matrix> vxc;
-    int flag_read_vxc = read_vxc(driver_params.input_dir + driver_params.fn_vxc_scf, vxc);
+    int flag_read_vxc = read_vxc(driver_params.vxc_input_path(), vxc);
     if (flag_read_vxc == 0)
     {
         if (mpi_comm_global_h.is_root() && should_output())

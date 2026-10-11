@@ -8,6 +8,7 @@
 #include <string>
 #include "librpa_enums.h"
 #include "../src/io/global_io.h"
+#include "../src/io/fs.h"
 
 namespace driver
 {
@@ -115,7 +116,7 @@ void DriverParams::apply_input_preset()
         fn_basis_aux = "aux_basis.txt";
         fn_basis_aux_shrink = "aux_basis_s.txt";
         fn_eigocc_scf = "band_out.txt";
-        fn_vxc_scf = "vxc_out.txt";
+        fn_vxc_scf = "vxc.txt";
         prefix_lri_coeff = "Cs_";
         prefix_lri_coeff_shrink = "Cs_shrink_";
         prefix_shrink_sinvS = "sinvS_";
@@ -125,6 +126,23 @@ void DriverParams::apply_input_preset()
     }
     if (input_preset == "abacus" || input_preset == "abacus-legacy")
         prefix_velocity = "velocity_matrix";
+}
+
+std::string DriverParams::vxc_input_path() const
+{
+    const auto selected = input_dir + fn_vxc_scf;
+    if (input_preset == "abacus" && !vxc_explicit && fn_vxc_scf == "vxc.txt" &&
+        !librpa_int::file_exists(selected))
+    {
+        const auto previous = input_dir + "vxc_out.txt";
+        if (librpa_int::file_exists(previous))
+        {
+            librpa_int::global::lib_printf_root(
+                "Using previous ABACUS Vxc filename vxc_out.txt; current reader-v1 uses vxc.txt.\n");
+            return previous;
+        }
+    }
+    return selected;
 }
 
 std::string DriverParams::format()

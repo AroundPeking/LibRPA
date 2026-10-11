@@ -1,7 +1,9 @@
-#include "../driver.h"
-
 #include <cassert>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
+
+#include "../driver.h"
 
 void test_fhi_aims_preset()
 {
@@ -38,7 +40,7 @@ void test_abacus_preset()
     assert(params.fn_basis_aux == "aux_basis.txt");
     assert(params.fn_basis_aux_shrink == "aux_basis_s.txt");
     assert(params.fn_eigocc_scf == "band_out.txt");
-    assert(params.fn_vxc_scf == "vxc_out.txt");
+    assert(params.fn_vxc_scf == "vxc.txt");
     assert(params.prefix_lri_coeff == "Cs_");
     assert(params.prefix_lri_coeff_shrink == "Cs_shrink_");
     assert(params.prefix_shrink_sinvS == "sinvS_");
@@ -81,9 +83,34 @@ void test_invalid_preset()
     assert(threw);
 }
 
+void test_vxc_filename_selection()
+{
+    const auto directory = std::filesystem::current_path() / "vxc_filename_test";
+    assert(std::filesystem::create_directory(directory));
+    driver::DriverParams params;
+    params.input_preset = "abacus";
+    params.apply_input_preset();
+    params.input_dir = directory.string() + "/";
+    assert(params.vxc_input_path() == params.input_dir + "vxc.txt");
+    std::ofstream(directory / "vxc_out.txt") << "old\n";
+    assert(params.vxc_input_path() == params.input_dir + "vxc_out.txt");
+    params.vxc_explicit = true;
+    assert(params.vxc_input_path() == params.input_dir + "vxc.txt");
+    params.fn_vxc_scf = "custom.txt";
+    assert(params.vxc_input_path() == params.input_dir + "custom.txt");
+    params.fn_vxc_scf = "vxc.txt";
+    params.vxc_explicit = false;
+    std::ofstream(directory / "vxc.txt") << "new\n";
+    assert(params.vxc_input_path() == params.input_dir + "vxc.txt");
+    std::filesystem::remove(directory / "vxc.txt");
+    std::filesystem::remove(directory / "vxc_out.txt");
+    std::filesystem::remove(directory);
+}
+
 int main()
 {
     test_fhi_aims_preset();
     test_abacus_preset();
     test_invalid_preset();
+    test_vxc_filename_selection();
 }

@@ -442,11 +442,13 @@ struct DriverParams
     //! @par Status
     //! Experimental
     double qsgw_convergence_tolerance_ev;
+    bool vxc_explicit = false;
 
     std::string format();
 
     //! Apply producer-specific defaults to input filename and prefix parameters.
     void apply_input_preset();
+    std::string vxc_input_path() const;
 
     DriverParams();
 };

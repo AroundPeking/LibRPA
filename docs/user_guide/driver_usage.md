@@ -64,10 +64,19 @@ input_preset = abacus
 ```
 
 This selects the short reader-v1 names: `stru_out.txt`, `band_out.txt`,
-`vxc_out.txt`, `bz_sample.txt`, `basis_map.txt`, `wfc_basis.txt`,
+`vxc.txt`, `bz_sample.txt`, `basis_map.txt`, `wfc_basis.txt`,
 `aux_basis.txt`, `aux_basis_s.txt`, `KS_wfc_*`, `Cs_*`, `Cs_shrink_*`,
 `sinvS_*`, `V_cut_*`, and `V_full_*`. It also changes `prefix_velocity` to
-`velocity_matrix`.
+`velocity_matrix`. For the default ABACUS Vxc name, `vxc_out.txt` remains a
+fallback only when `vxc.txt` is absent. An explicit `fn_vxc_scf` override is
+used exactly as supplied; if both default names exist, `vxc.txt` takes priority.
+
+When `bz_sample.txt` contains a `full_kmap` extension, LibRPA reads the
+producer's explicit full-grid-to-SCF mapping, including the actual mesh offset.
+It checks full-grid coverage, unique points, representative membership and
+folded SCF weights before constructing the reduced sampling. Files without the
+extension retain their existing reader path. Spatial operations remain in
+`stru_out.txt`; the existing `use_symmetry_*` switches control their use.
 
 PyATB head/wing sidecars retain their `KS_eigenvector_*` filename contract.
 LibRPA reads those files independently of the `KS_wfc_*` ABACUS preset.
