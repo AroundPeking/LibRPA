@@ -689,6 +689,14 @@ void Exx::build(const LibrpaParallelRouting routing,
         && symmetry_ctx.atom_to_type.size() == static_cast<std::size_t>(n_atoms)
         && symmetry_ctx.input_coord_frac.size() == static_cast<std::size_t>(n_atoms)
         && symmetry_reduces_rspace;
+    if (this->use_symmetry_context && !use_symmetry_exx && !this->pbc.kgrid_no_symmetry())
+    {
+        throw LIBRPA_RUNTIME_ERROR(
+            "EXX symmetry restore was requested but the symmetry context is incomplete "
+            "(missing rotations, sectors or atom maps); refusing to fall back to the inexact "
+            "weighted-IBZ exchange on a symmetry-reduced SCF k-grid. Supply complete symmetry "
+            "metadata or an unreduced full-BZ k-grid.");
+    }
     const auto libri_irreducible_sector =
         use_symmetry_exx
             ? convert_symmetry_irreducible_sector_to_libri(

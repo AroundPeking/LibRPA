@@ -237,10 +237,27 @@ void initialize_ds_atpairs_local(Dataset &ds, LibrpaParallelRouting routing)
     global::profiler.stop(__FUNCTION__);
 }
 
+bool resolve_use_symmetry_exx(const LibrpaOptions &opts, const PeriodicBoundaryData &pbc)
+{
+    if (opts.use_symmetry_exx == LIBRPA_SWITCH_ON)
+        return true;
+    if (!pbc.kgrid_no_symmetry())
+    {
+        throw LIBRPA_RUNTIME_ERROR(
+            "The SCF k-grid is symmetry-reduced, but use_symmetry_exx is off. Exchange from "
+            "a reduced k-grid without the symmetry restore is inexact (star members are "
+            "folded into weights without basis rotations, and the Coulomb star expansion "
+            "only supports the inversion partner). Either set use_symmetry_exx = t, or "
+            "supply an unreduced full-BZ k-list from a producer run with symmetry disabled. "
+            "Refusing to compute silently wrong exchange.");
+    }
+    return false;
+}
+
 void initialize_ds_exx(Dataset &ds, const LibrpaOptions &opts)
 {
     global::profiler.start("initialize_ds_exx");
-    const bool use_symmetry = opts.use_symmetry_exx == LIBRPA_SWITCH_ON;
+    const bool use_symmetry = resolve_use_symmetry_exx(opts, ds.pbc);
     if (use_symmetry)
     {
         reject_spinor_symmetry_speedup(ds, "EXX");

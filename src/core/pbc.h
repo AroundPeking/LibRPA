@@ -78,6 +78,9 @@ public:
     //! Mapping of Coulomb k-points to loaded SCF k-points using that representative
     std::map<Vector3_Order<double>, std::vector<Vector3_Order<double>>> map_irk_ks;
 
+    //! Whether the loaded SCF k-grid covers the full BZ without symmetry reduction
+    bool kgrid_no_symmetry() const { return kgrid_no_symmetry_; }
+
     PeriodicBoundaryData();
 
     //! Setting lattice vectors. latt_mat should be in Bohr unit.
