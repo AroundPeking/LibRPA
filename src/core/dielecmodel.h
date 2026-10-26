@@ -138,6 +138,13 @@ MetallicStatic2dInverseWeights compute_metallic_static_2d_inverse_weights(
     const std::array<std::complex<double>, 3> &schur_q0, const std::vector<double> &qx,
     const std::vector<double> &qy, const std::vector<double> &angular_weights,
     const std::vector<double> &qmax, double gamma_cell_area, int radial_order = 48);
+matrix_m<std::complex<double>> metallic_static_2d_wc_blocks_at_q(
+    const matrix_m<std::complex<double>> &body_inv,
+    const matrix_m<std::complex<double>> &static_intraband_wing,
+    const matrix_m<std::complex<double>> &bw_cart,
+    const matrix_m<std::complex<double>> &wb_cart,
+    const matrix_m<std::complex<double>> &regular_schur,
+    std::complex<double> kappa1_lambda, double qhat_x, double qhat_y, double q_physical);
 std::complex<double> compute_metallic_static_2d_rpa_trace_log_average(
     const matrix_m<std::complex<double>> &regular_chi0v_head,
     const matrix_m<std::complex<double>> &regular_schur, std::complex<double> trace_body,
@@ -277,6 +284,14 @@ private:
     // ( i:3, j:3 )
     matrix_m<std::complex<double>> Lind;
     std::vector<matrix_m<std::complex<double>>> strict_2d_lind_by_freq;
+    // The static metallic 2D Gamma route is also used to build a finite-q
+    // diagnostic reference.  Keep its regular blocks in the same Coulomb
+    // eigenbasis and distribution as the production Gamma calculation.
+    int strict_2d_metallic_static_ifreq_ = -1;
+    matrix_m<std::complex<double>> strict_2d_metallic_static_body_inv_;
+    matrix_m<std::complex<double>> strict_2d_metallic_static_bw_;
+    matrix_m<std::complex<double>> strict_2d_metallic_static_wb_;
+    matrix_m<std::complex<double>> strict_2d_metallic_static_regular_coulomb_basis_;
     // ( i:n_lambda, j:3 )
     matrix_m<std::complex<double>> bw;
     // ( i:3, j:n_lambda )
@@ -580,6 +595,10 @@ public:
         matrix_m<std::complex<double>> &epsilon_block, int ifreq,
         ArrayDesc &desc_nabf_nabf_opt,
         const matrix_m<std::complex<double>> &regular_coulomb_basis);
+    void rewrite_metallic_static_2d_wc_at_q(
+        matrix_m<std::complex<double>> &wc_coulomb_basis, int ifreq,
+        ArrayDesc &desc_nabf_nabf_opt, double qhat_x, double qhat_y,
+        double q_physical) const;
     void rewrite_rpa_response(matrix_m<std::complex<double>> &eps_minus_identity_block,
                               const int ifreq, ArrayDesc &desc_nabf_nabf_opt);
 

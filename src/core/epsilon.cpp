@@ -220,7 +220,9 @@ std::string strict_2d_finite_q_diagnostics_header()
            "analytic_wc_limit_real,analytic_wc_limit_imag,q_wc_head_real,"
            "q_wc_head_imag,weighted_wc_head_real,weighted_wc_head_imag,"
            "weighted_wc_head_body_fro,weighted_wc_body_head_fro,"
-           "weighted_wc_body_body_fro";
+           "weighted_wc_body_body_fro,metal_analytic_wc_head_real,"
+           "metal_analytic_wc_head_imag,metal_analytic_wc_head_body_fro,"
+           "metal_analytic_wc_body_head_fro,metal_analytic_wc_body_body_fro";
 }
 
 std::string strict_2d_raw_gamma_chi0_diagnostics_header()
@@ -3495,6 +3497,17 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                 desc_1x1.set_ddla_desc(blacs_h.ddla_handle);
 #endif
         }
+        // The finite-temperature metallic 2D Gamma branch uses the static
+        // intraband wing in the same Coulomb eigenbasis as the complete-Wc
+        // rewrite below.  The GW path does not otherwise need the contracted
+        // head/wing object, so perform the mu->lambda projection explicitly
+        // before releasing sqrt(V).  Without this, the static branch reaches
+        // rewrite_metallic_static_2d_wc() with an empty coefficient vector.
+        if (is_gamma_point(q) && df_headwing != nullptr && has_metallic_static_frequency &&
+            df_headwing->use_2d_dielectric)
+        {
+            df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf_opt, n_nonsingular);
+        }
         // The scaled Coulomb eigenvectors are no longer needed in the frequency
         // loop: the ABF-space path uses coul_block (sqrt(V)) directly.
         sqrtveig_blacs.clear();
@@ -4047,12 +4060,55 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                         "strict 2D finite-q diagnostic encountered invalid q");
                 const double qhat_x = q.x / q_internal;
                 const double qhat_y = q.y / q_internal;
-                const auto reference =
-                    df_headwing->get_strict_2d_finite_q_reference(ifreq, q.x, q.y);
+                Strict2dBlockMetrics metal_analytic_wc_metrics;
+                bool metal_analytic_wc_available = false;
+                // The old finite-q reference is the insulating head limit.
+                // The static metallic mode has a 1/q head and static wings;
+                // keep the insulating columns as NaN and compare Wc against
+                // the metal-specific block reference below.
+                const bool metallic_static_2d_reference =
+                    df_headwing->is_metallic_static_2d_frequency(ifreq);
+                Strict2dFiniteQReference reference{};
+                if (metallic_static_2d_reference)
+                {
+                    const double nan = std::numeric_limits<double>::quiet_NaN();
+                    reference.epsilon_minus_identity_over_q = {nan, nan};
+                    reference.schur_a = {nan, nan};
+                    reference.wc_head_limit = {nan, nan};
+                }
+                else
+                {
+                    reference = df_headwing->get_strict_2d_finite_q_reference(
+                        ifreq, q.x, q.y);
+                }
+                if (metallic_static_2d_reference)
+                {
+                    diagnostic_projection.zero_out();
+                    df_headwing->rewrite_metallic_static_2d_wc_at_q(
+                        diagnostic_projection, ifreq, desc_nabf_nabf_opt, qhat_x, qhat_y,
+                        q_physical);
+                    metal_analytic_wc_metrics = collect_strict_2d_block_metrics(
+                        diagnostic_projection, desc_nabf_nabf_opt, gamma_n_nonsingular, comm_h);
+                    metal_analytic_wc_available = true;
+                }
                 const auto wc_head = wc_metrics.head;
                 const double q_weight = chi0.q_weight(q);
                 const auto p_over_q = finite_q_p_head / q_physical;
                 const auto analytic_p_over_q = -reference.epsilon_minus_identity_over_q;
+                const double nan = std::numeric_limits<double>::quiet_NaN();
+                const auto metal_analytic_head =
+                    metal_analytic_wc_available
+                        ? metal_analytic_wc_metrics.head
+                        : std::complex<double>{nan, nan};
+                const double metal_analytic_head_body = metal_analytic_wc_available
+                                                            ? metal_analytic_wc_metrics.head_body_frobenius
+                                                            : nan;
+                const double metal_analytic_body_head = metal_analytic_wc_available
+                                                            ? metal_analytic_wc_metrics.body_head_frobenius
+                                                            : nan;
+                const double metal_analytic_body_body = metal_analytic_wc_available
+                                                            ? metal_analytic_wc_metrics.body_body_frobenius
+                                                            : nan;
                 if (comm_h.is_root())
                     finite_q_diagnostics
                         << iq << ',' << qf.x << ',' << qf.y << ',' << qf.z << ',' << q_physical
@@ -4076,7 +4132,10 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                         << q_weight * wc_head.imag() << ','
                         << q_weight * wc_metrics.head_body_frobenius << ','
                         << q_weight * wc_metrics.body_head_frobenius << ','
-                        << q_weight * wc_metrics.body_body_frobenius << '\n';
+                        << q_weight * wc_metrics.body_body_frobenius << ','
+                        << metal_analytic_head.real() << ',' << metal_analytic_head.imag() << ','
+                        << metal_analytic_head_body << ',' << metal_analytic_body_head << ','
+                        << metal_analytic_body_body << '\n';
             }
             // convert back to initial distribution
             ScalapackConnector::pgemr2d_f(n_abf, n_abf, chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,

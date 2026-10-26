@@ -705,6 +705,11 @@ void read_headwing_input(const string &dir_path, bool need_wing,
     {
         const auto metadata = read_strict_2d_coulomb_head_metadata(
             librpa_int::join_path(dir_path, "librpa_2d_coulomb_head.txt"));
+        // Preserve the reader-v1 normalization in Dataset.  The public GW
+        // API rebuilds the analytic head/wing object for a finite-temperature
+        // reference, so the metadata must survive that replacement.
+        pds->strict_2d_auxiliary_monopole_norm_squared =
+            metadata.auxiliary_monopole_norm_squared;
         const auto normalization = librpa_int::strict_2d_coulomb_head_normalization(
             pds->pbc, metadata.auxiliary_monopole_norm_squared);
         const double area_scale = std::max(normalization.inplane_area_bohr2,
@@ -727,6 +732,7 @@ void read_headwing_input(const string &dir_path, bool need_wing,
     }
     else
     {
+        pds->strict_2d_auxiliary_monopole_norm_squared = 0.0;
         pds->p_headwing->configure_strict_2d_coulomb_head(false);
     }
     pds->p_headwing->use_soc = mf.get_n_spinor() > 1;

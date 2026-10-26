@@ -172,6 +172,13 @@ public:
     std::vector<double> epsmacs_imagfreq;
     std::vector<double> omegas_imagfreq;
 
+    // Reader-v1 strict-2D auxiliary normalization retained across the
+    // finite-temperature head/wing cache rebuild.  The driver reads this
+    // metadata from the input directory; initialize_ds_headwing() may reset
+    // p_headwing when the FD reference is active and must be able to restore
+    // the same normalization on the replacement object.
+    double strict_2d_auxiliary_monopole_norm_squared = 0.0;
+
     std::unique_ptr<diele_func> p_headwing;
 
     // Output data, held by computation objects

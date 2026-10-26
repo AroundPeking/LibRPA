@@ -839,12 +839,12 @@ void inverse(const matrix_m<T> &m, matrix_m<T> &m_inv)
     if (m.is_row_major())
     {
         LapackConnector::getrf(m_inv.nr(), m_inv.nc(), m_inv.ptr(), m_inv.nr(), ipiv, info);
-        LapackConnector::getri(m_inv.nr(), m_inv.ptr(), m_inv.nr(), ipiv, work, lwork, info);
+        LapackConnector::getri(m_inv.nr(), m_inv.ptr(), m_inv.nr(), ipiv, work.data(), lwork, info);
     }
     else
     {
         LapackConnector::getrf_f(m_inv.nr(), m_inv.nc(), m_inv.ptr(), m_inv.nr(), ipiv, info);
-        LapackConnector::getri_f(m_inv.nr(), m_inv.ptr(), m_inv.nr(), ipiv, work, lwork, info);
+        LapackConnector::getri_f(m_inv.nr(), m_inv.ptr(), m_inv.nr(), ipiv, work.data(), lwork, info);
     }
     m_inv.reshape(m_inv.nc(), m_inv.nr());
 }
