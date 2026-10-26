@@ -6010,16 +6010,31 @@ void diele_func::rewrite_strict_2d_wc(matrix_m<std::complex<double>> &chi0_block
     this->body_inv.clear();
 }
 
-bool diele_func::is_metallic_static_3d_frequency(const int ifreq) const
+bool diele_func::is_metallic_static_frequency(const int ifreq) const
 {
-    return !use_2d_dielectric && meanfield_df.get_fermi_dirac_reference().enabled && ifreq >= 0 &&
+    return meanfield_df.get_fermi_dirac_reference().enabled && ifreq >= 0 &&
            static_cast<std::size_t>(ifreq) < omega.size() && omega.at(as_size(ifreq)) == 0.0;
 }
 
 bool diele_func::is_metallic_static_2d_frequency(const int ifreq) const
 {
-    return use_2d_dielectric && meanfield_df.get_fermi_dirac_reference().enabled && ifreq >= 0 &&
-           static_cast<std::size_t>(ifreq) < omega.size() && omega.at(as_size(ifreq)) == 0.0;
+    return use_2d_dielectric && is_metallic_static_frequency(ifreq);
+}
+
+void diele_func::rewrite_metallic_static_wc(
+    matrix_m<std::complex<double>> &epsilon_block, const int ifreq,
+    ArrayDesc &desc_nabf_nabf_opt,
+    const matrix_m<std::complex<double>> &projected_coulomb_sqrt)
+{
+    if (!is_metallic_static_frequency(ifreq))
+        throw std::logic_error(
+            "metallic complete-Wc replacement requires a finite-temperature zero frequency");
+    if (use_2d_dielectric)
+        rewrite_metallic_static_2d_wc(epsilon_block, ifreq, desc_nabf_nabf_opt,
+                                      projected_coulomb_sqrt);
+    else
+        rewrite_metallic_static_3d_wc(epsilon_block, ifreq, desc_nabf_nabf_opt,
+                                      projected_coulomb_sqrt);
 }
 
 void diele_func::rewrite_metallic_static_2d_wc(
@@ -6415,7 +6430,7 @@ void diele_func::rewrite_metallic_static_3d_wc(
     matrix_m<std::complex<double>> &epsilon_block, const int ifreq, ArrayDesc &desc_nabf_nabf_opt,
     const matrix_m<std::complex<double>> &projected_coulomb_sqrt)
 {
-    if (!is_metallic_static_3d_frequency(ifreq))
+    if (use_2d_dielectric || !is_metallic_static_frequency(ifreq))
         throw std::logic_error(
             "metallic static complete-Wc replacement requires a 3D finite-temperature zero "
             "frequency");

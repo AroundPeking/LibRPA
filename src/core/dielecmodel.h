@@ -586,8 +586,12 @@ public:
     std::complex<double> compute_rpa_trace_log_average(
         matrix_m<std::complex<double>> &response_block, const int ifreq, ArrayDesc &desc_response,
         const RpaHeadwingSettings &settings);
-    bool is_metallic_static_3d_frequency(int ifreq) const;
+    bool is_metallic_static_frequency(int ifreq) const;
     bool is_metallic_static_2d_frequency(int ifreq) const;
+    void rewrite_metallic_static_wc(
+        matrix_m<std::complex<double>> &epsilon_block, int ifreq,
+        ArrayDesc &desc_nabf_nabf_opt,
+        const matrix_m<std::complex<double>> &projected_coulomb_sqrt);
     void rewrite_metallic_static_3d_wc(
         matrix_m<std::complex<double>> &epsilon_block, int ifreq, ArrayDesc &desc_nabf_nabf_opt,
         const matrix_m<std::complex<double>> &projected_coulomb_sqrt);

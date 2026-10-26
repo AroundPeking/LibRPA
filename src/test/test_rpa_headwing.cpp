@@ -1288,22 +1288,14 @@ void test_strict_2d_gw_routes_gamma_through_complete_wc_average()
                   "missing head/wing data must keep the standard route");
 }
 
-void test_metallic_static_3d_gw_routes_only_static_gamma_through_complete_wc_average()
+void test_metallic_static_gw_routes_only_static_gamma_through_complete_wc_average()
 {
-    assert(librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 3, false, true, true,
-                                                                      true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(false, 3, false, true, true,
-                                                                       true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 2, false, true, true,
-                                                                       true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 3, true, true, true,
-                                                                       true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 3, false, false, true,
-                                                                       true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 3, false, true, false,
-                                                                       true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 3, false, true, true,
-                                                                       false));
+    assert(librpa_int::use_metallic_static_complete_wc_gamma_route(true, 3, true, true, true));
+    assert(!librpa_int::use_metallic_static_complete_wc_gamma_route(false, 3, true, true, true));
+    assert(!librpa_int::use_metallic_static_complete_wc_gamma_route(true, 2, true, true, true));
+    assert(!librpa_int::use_metallic_static_complete_wc_gamma_route(true, 3, false, true, true));
+    assert(!librpa_int::use_metallic_static_complete_wc_gamma_route(true, 3, true, false, true));
+    assert(!librpa_int::use_metallic_static_complete_wc_gamma_route(true, 3, true, true, false));
 }
 
 void test_strict_2d_gw_fails_closed_for_incomplete_runtime_configuration()
@@ -3203,8 +3195,8 @@ void test_finite_temperature_static_metallic_gw_gamma_path(const BlacsCtxtHandle
         if (iloc >= 0 && jloc >= 0) identity_sqrt_coulomb(iloc, jloc) = 1.0;
     }
     df.wing_mu_to_lambda(identity_sqrt_coulomb, desc_coulomb, 2);
-    assert(df.is_metallic_static_3d_frequency(0));
-    assert(!df.is_metallic_static_3d_frequency(1));
+    assert(df.is_metallic_static_frequency(0));
+    assert(!df.is_metallic_static_frequency(1));
 
     auto quadrature = librpa_int::lebedev_laikov::grid(5810);
     std::vector<double> angular_weights(quadrature.weights.size());
@@ -3246,7 +3238,7 @@ void test_finite_temperature_static_metallic_gw_gamma_path(const BlacsCtxtHandle
     auto epsilon = init_local_mat<std::complex<double>>(desc_coulomb, MAJOR::COL);
     if (head_row >= 0 && head_col >= 0) epsilon(head_row, head_col) = 1.0;
     if (body_row >= 0 && body_col >= 0) epsilon(body_row, body_col) = 1.2;
-    df.rewrite_metallic_static_3d_wc(epsilon, 0, desc_coulomb, projected_coulomb_sqrt);
+    df.rewrite_metallic_static_wc(epsilon, 0, desc_coulomb, projected_coulomb_sqrt);
 
     const auto expected_head =
         2.0 * librpa_int::TWO_PI * (inverse_weights.inverse_q2 - inverse_weights.bare_qminus2);
@@ -3301,7 +3293,7 @@ void test_finite_temperature_static_metallic_gw_gamma_path(const BlacsCtxtHandle
     auto mixed_epsilon = init_local_mat<std::complex<double>>(desc_coulomb, MAJOR::COL);
     if (head_row >= 0 && head_col >= 0) mixed_epsilon(head_row, head_col) = 1.0;
     if (body_row >= 0 && body_col >= 0) mixed_epsilon(body_row, body_col) = 1.2;
-    df.rewrite_metallic_static_3d_wc(mixed_epsilon, 0, desc_coulomb, mixed_coulomb_sqrt);
+    df.rewrite_metallic_static_wc(mixed_epsilon, 0, desc_coulomb, mixed_coulomb_sqrt);
     for (int i = 0; i != 2; ++i)
     {
         const int iloc = desc_coulomb.indx_g2l_r(i);
@@ -5225,7 +5217,7 @@ int main(int argc, char *argv[])
         {
             test_metallic_static_3d_converts_internal_reciprocal_units();
             test_metallic_static_3d_inverse_weights_recover_head_only_wc();
-            test_metallic_static_3d_gw_routes_only_static_gamma_through_complete_wc_average();
+            test_metallic_static_gw_routes_only_static_gamma_through_complete_wc_average();
             test_metallic_static_2d_wc_blocks_match_dense_finite_q_inverse();
             test_complete_gamma_basis_bridge_with_mixed_charge_channel(blacs_h);
         test_finite_temperature_static_metallic_gw_gamma_path(blacs_h);
@@ -5264,7 +5256,7 @@ int main(int argc, char *argv[])
         test_strict_2d_screening_denominator_must_stay_on_physical_branch();
         test_strict_2d_gw_uses_full_coulomb_at_all_q();
         test_strict_2d_gw_routes_gamma_through_complete_wc_average();
-        test_metallic_static_3d_gw_routes_only_static_gamma_through_complete_wc_average();
+        test_metallic_static_gw_routes_only_static_gamma_through_complete_wc_average();
         test_strict_2d_gw_fails_closed_for_incomplete_runtime_configuration();
         test_strict_2d_diagnostic_schema_and_qpoint_order_are_stable();
         test_strict_2d_qshell_uses_minimum_image_q();
