@@ -10,8 +10,8 @@ This fixed-reference prescription is retained throughout iteration and restart.
 It is distinct from applying Mode B in the current eigenbasis and rotating the
 result back, even with exact analytic continuation.
 The effective Hamiltonian replaces the initial DFT exchange-correlation
-potential with exchange and a Hermitian correlation potential. Hartree updates
-are not implemented. Same-grid analytic head and wing updates are supported
+potential with exchange and a Hermitian correlation potential. Hartree
+density feedback is enabled by default and described below. Same-grid analytic head and wing updates are supported
 with an explicit velocity convention; independent-grid updates are rejected.
 
 QSGW reuses the G0W0 input readers and EXX/Sigma kernels. The driver reads
@@ -20,6 +20,64 @@ controls from `librpa_options.h` and numerical input from `librpa_input.h`.
 Iteration, numerical state and checkpoint handling live in `src/core/qsgw`;
 the driver's output callback writes the requested tables and native CSR files.
 The task API is available without building the command-line driver.
+
+## Hartree density feedback
+
+`qsgw_update_hartree` defaults to `true`. Every update includes the change in
+the physical Hartree potential and requires the following dedicated inputs.
+To retain a fixed-Hartree trajectory or use inputs without these exports, set
+`qsgw_update_hartree = false` explicitly:
+
+```ini
+qsgw_update_hartree = true
+parallel_routing = libri
+prefix_coul_hartree = v1_coulomb_hartree_
+prefix_lri_coeff_hartree = v1_Cs_hartree_shrinked_data
+use_shrink_abfs = true
+```
+
+The target Hamiltonian becomes
+`H_DFT - Vxc_DFT + V_H[D_t-D_DFT] + Sigma_x,t + Vc,t`. The density is rebuilt
+from the entering eigenvectors and their physical k-weighted occupations,
+summing spin channels and diagonal spinor components. The Hartree difference
+is the same scalar spatial AO operator for both collinear spin channels. The
+initial DFT state has zero density difference. This adds feedback between QSGW
+updates; it does not add an inner Hartree SCF loop or change the mixing/cut rules.
+
+`prefix_coul_hartree` must contain the matched **bare three-dimensional q=0
+auxiliary metric with G=0 set to zero**, in Hartree. Its zero mode fixes the
+background convention; the driver applies no potential shift or density fit.
+The ordinary full/cut Coulomb files are still required for GW and remain in
+their original storage. Hartree input never replaces those GW matrices.
+
+`prefix_lri_coeff_hartree` must contain both directed LRI fitting endpoints
+with their **unwrapped physical lattice translations**, at full output
+precision, in the existing binary v1 format. These dedicated full-precision inputs are kept separate from ordinary GW
+coefficients. Hartree path matrices are interpolated from the mesh operator
+using the same `option_bvk_remap` convention as EXX; no auxiliary-potential
+extension to LibRI is required.
+The raw coefficients and dedicated metric must match the auxiliary basis
+selected by `use_shrink_abfs`. For a full-basis run, use the producer's full
+`v1_Cs_hartree_data` family instead of the shrunk family shown above. Both
+dedicated prefixes are required whenever feedback is enabled; neither has a
+fallback to the ordinary GW input.
+
+This first periodic feedback route requires LibRI, a complete regular Gamma-containing
+three-dimensional SCF grid, and `bloch_ratom=0`; the library task checks these
+constraints collectively. AUTO selects LibRI before data
+input; explicit RTAU and atom-pair routes are rejected collectively. Supply the
+matching band-path E/C/Vxc payload when the path channel is enabled.
+
+`qsgw_hartree.csv` reports the entering/updated Hartree difference for the grid
+and optional band channel, with AO and projected maximum/Frobenius diagnostics
+in eV. Enabling feedback does not establish material accuracy or convergence.
+
+For library clients, `LibrpaQsgwControls.update_hartree` enables the same task
+through the C API and the C++ `Handler::create_qsgw_task` wrapper. Supply the
+dedicated root matrix and `LibrpaQsgwLriBlock` array in `LibrpaQsgwInput`; the
+task copies these inputs independently of the handler's GW data. The existing
+Fortran module exposes standalone Hartree calculation but does not yet expose
+the opaque QSGW task API.
 
 ## Quasiparticle roots during iteration
 
@@ -40,7 +98,8 @@ the driver does not perform an extra final self-energy calculation for this outp
 
 The collected exchange and frequency-dependent Sigma matrices are rotated from
 the initial KS basis to the current eigenbasis. The subtracted static potential is
-`Vstatic_t = H_t - H_DFT + Vxc_DFT`, including the actual mixing/cut correction.
+`Vstatic_t = H_t - H_DFT + Vxc_DFT - V_H[D_t-D_DFT]` when Hartree feedback is
+enabled (the last term is zero otherwise), including the actual mixing/cut correction.
 The diagonal equation is therefore
 `E = epsilon_t - Vstatic_t + Sigma_x,t + Re Sigma_c,t(E - mu_t)`.
 The initial state uses the original uncut DFT operator. This output reuses the
@@ -187,6 +246,14 @@ Source occupations are normalized once to f/N_full; source Vxc remains paired
 with its source KS gauge. Complete AO-spinor/state frames and all three symmetry
 switches are required. This does not introduce another eigenproblem or accept
 an arbitrary magnetic odd-frequency response.
+
+Unpolarized scalar inputs originally supplied on the complete full mesh, with
+complete square AO/state frames and an implicit spatial-operation table, retain
+the historical spatial-symmetry reconstruction and direct/full-grid fallback
+checks. The strict magnetic sewing check applies to explicit spin operations,
+spinful storage and inputs expanded from paired IBZ sources. Finite E/C/f and
+storage-shape checks apply to every live state. Retaining the historical scalar
+route does not establish the numerical accuracy of its symmetry approximation.
 
 
 The native-velocity preset moved from 5 to **6**. Use 6 for native QSGW
@@ -483,8 +550,10 @@ H_{\rm current}^{AO}(k_i)-H_{0,\rm native}^{AO}(k_i)
 \right](R).
 $$
 
-The correction includes any selected post-mixing cut and all high-state
-blocks; it is not merely the bare exchange-correlation potential difference.
+The correction includes the Hartree density difference together with exchange,
+correlation, DFT Vxc subtraction, any selected post-mixing cut and all high-state
+blocks. Hartree and EXX therefore pass through the same total-Hamiltonian
+reconstruction; there is no separate Hartree export or second Hartree addition.
 The original DFT H must match the loaded immutable reference on the full
 SCF grid. Every complex entry and native H/S/r support is retained; the
 existing Fourier roundtrip check still compares the complete exported
@@ -600,6 +669,14 @@ Iteration limits are global. Restoring completed iteration 1 with a maximum
 of 3 computes updates 2 and 3. The maximum must exceed the saved iteration;
 the minimum and stopping tolerance may also change. New traces begin at the
 restored boundary, so a separate output directory preserves earlier traces.
+
+With `qsgw_update_hartree=true`, the format adds 200 to the corresponding
+checkpoint version and checks the dedicated bare q=0 metric, unwrapped
+LRI coefficients, BvK convention and actual atom-pair image mapping. A restart
+cannot switch Hartree feedback on or off. Earlier +100 checkpoints used the
+direct-R Hartree path and require a fresh start. The initial DFT density remains
+the reference; it is reconstructed from the original inputs before the saved
+live state is restored.
 
 The checkpoint retains the grid and optional band-path Hamiltonians in the
 immutable initial KS basis, live eigenvalues, wavefunctions, occupation weights,

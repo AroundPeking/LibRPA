@@ -21,6 +21,7 @@ list(APPEND exe_sources
   # Specific task implementations
   tasks/task_helper.cpp
   tasks/exx.cpp
+  tasks/hartree.cpp
   tasks/exx_band.cpp
   tasks/g0w0.cpp
   tasks/g0w0_band.cpp

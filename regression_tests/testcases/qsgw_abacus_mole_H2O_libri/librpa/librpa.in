@@ -34,3 +34,6 @@ version_lri_reader = 1
 
 # This retained fixture has no native H/S/r export.
 qsgw_export_hamiltonian_for_pyatb = false
+
+# Preserve the fixed-Hartree reference trajectory.
+qsgw_update_hartree = false

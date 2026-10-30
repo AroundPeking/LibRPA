@@ -28,6 +28,34 @@ void librpa_get_imaginary_frequency_grids(LibrpaHandler *h, const LibrpaOptions 
                                           double *omegas, double *weights);
 
 /**
+ * @brief Compute the physical, spin-summed periodic Hartree potential in the spatial AO basis.
+ *
+ * Collective on the handler communicator. Rebuilds from the current eigenvectors
+ * and occupations on every call, without EXX spin factors or an occupation cutoff.
+ * Requires a complete Gamma-centred full-BZ grid, matched full/shrunk RI data, and a bare q=0
+ * Coulomb metric supplied through the normal Coulomb-input API. Its electrostatic
+ * zero mode must be chosen explicitly by the host (e.g. G=0 omitted). An EXX
+ * singularity-corrected q=0 metric is not interchangeable with that metric.
+ * Uses the native RI Fourier orientation exp(+2*pi*i*k.R); mean-field and RI
+ * inputs must share this orientation. Atom-position phase must be zero.
+ * Requires official LibRI Hartree support and complete directed coefficients
+ * loaded with LIBRPA_ROUTING_LIBRI, with unique MPI ownership of each Cs block.
+ * Strict 2D is not yet supported.
+ *
+ * @param h Handler.
+ * @param p_opts Options; use_shrink_abfs selects both RI and auxiliary metric basis.
+ * @param n_kpoints Number of requested SCF k indices on this rank; may be zero.
+ * @param kpoints Zero-based indices in the loaded full SCF grid.
+ * @param n_aos Spatial AO dimension.
+ * @param values_re Real output in Hartree, row-major [requested k][AO row][AO column].
+ * @param values_im Imaginary output, same layout. Each buffer holds n_kpoints*n_aos*n_aos doubles.
+ */
+void librpa_compute_hartree_ao(LibrpaHandler* h, const LibrpaOptions* p_opts,
+                              int n_kpoints, const int* kpoints, int n_aos,
+                              double* values_re, double* values_im);
+
+
+/**
  * @brief Compute RPA correlation energy.
  *
  * Calculates the RPA correlation energy using the input data (wavefunctions,
@@ -325,7 +353,8 @@ typedef enum
     LIBRPA_QSGW_EXX_BAND,
     LIBRPA_QSGW_QSGW_BAND,
     LIBRPA_QSGW_HAMILTONIAN,
-    LIBRPA_QSGW_HEAD_HAMILTONIAN
+    LIBRPA_QSGW_HEAD_HAMILTONIAN,
+    LIBRPA_QSGW_HARTREE
 } LibrpaQsgwOutputKind;
 /** Borrowed output on rank zero only, valid during the callback. spin is
  * zero-based; text_size excludes the terminating zero. The callback presents

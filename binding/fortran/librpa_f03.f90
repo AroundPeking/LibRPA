@@ -544,6 +544,7 @@ module librpa_f03
          procedure :: get_imaginary_frequency_grids => librpa_get_imaginary_frequency_grids
          procedure :: get_rpa_correlation_energy => librpa_get_rpa_correlation_energy
          procedure :: build_exx => librpa_build_exx
+         procedure :: compute_hartree_ao => librpa_compute_hartree_ao
          procedure :: get_exx_pot_kgrid => librpa_get_exx_pot_kgrid
          procedure :: get_exx_pot_band_k => librpa_get_exx_pot_band_k
          procedure :: build_g0w0_sigma => librpa_build_g0w0_sigma
@@ -878,6 +879,16 @@ module librpa_f03
          real(c_double), dimension(*), intent(inout) :: contrib_ibzk_re, contrib_ibzk_im
          real(c_double) :: librpa_get_rpa_correlation_energy_c
       end function librpa_get_rpa_correlation_energy_c
+
+      subroutine librpa_compute_hartree_ao_c(h, opts, nk, iks, nao, re, im) &
+            bind(c, name="librpa_compute_hartree_ao")
+         import :: LibrpaOptions_c, c_ptr, c_int, c_double
+         type(c_ptr), value :: h
+         type(LibrpaOptions_c), intent(in) :: opts
+         integer(c_int), value :: nk, nao
+         integer(c_int), dimension(*), intent(in) :: iks
+         real(c_double), dimension(*), intent(out) :: re, im
+      end subroutine librpa_compute_hartree_ao_c
 
       subroutine librpa_build_exx_c(h, opts) bind(c, name="librpa_build_exx")
          import :: LibrpaOptions_c, c_ptr
@@ -2391,6 +2402,35 @@ contains
       end if
       deallocate(contrib_ibzk_re, contrib_ibzk_im)
    end function librpa_get_rpa_correlation_energy
+
+   !> Physical spin-summed periodic Hartree AO operator, in Hartree.
+   !> Collective; iks are one-based full-grid indices. The host must supply
+   !> a matched bare q=0 metric with an explicit electrostatic zero mode.
+   subroutine librpa_compute_hartree_ao(this, opts, iks, nao, vh)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      type(LibrpaOptions), intent(inout) :: opts
+      integer, intent(in) :: iks(:), nao
+      complex(dp), intent(out) :: vh(nao, nao, size(iks))
+      integer(c_int), allocatable :: iks_c(:)
+      real(c_double), allocatable :: re(:), im(:)
+      integer :: k, i, j, index, count
+
+      call sync_opts(opts, SYNC_OPTS_F2C)
+      count = size(iks) * nao * nao
+      allocate(iks_c(size(iks)), re(count), im(count))
+      iks_c = int(iks - 1, c_int)
+      call librpa_compute_hartree_ao_c(this%ptr_c_handle, opts%opts_c, &
+         int(size(iks), c_int), iks_c, int(nao, c_int), re, im)
+      do k = 1, size(iks)
+         do i = 1, nao
+            do j = 1, nao
+               index = ((k - 1) * nao + i - 1) * nao + j
+               vh(i, j, k) = cmplx(re(index), im(index), kind=dp)
+            end do
+         end do
+      end do
+   end subroutine librpa_compute_hartree_ao
 
    !> @brief Build exact-exchange matrix in real space.
    !> @param[in,out] this  Handler.

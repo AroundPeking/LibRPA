@@ -78,6 +78,7 @@ list(APPEND lib_sources
         ${CMAKE_CURRENT_BINARY_DIR}/envs_cmake.cpp
 
         api/compute_exx.cpp
+        api/compute_hartree.cpp
         api/compute_crpa.cpp
         api/compute_orbital.cpp
         api/compute_helper.cpp
@@ -116,6 +117,8 @@ list(APPEND lib_sources
         core/dielecmodel.cpp
         core/epsilon.cpp
         core/exx.cpp
+        core/hartree.cpp
+        api/hartree_input.cpp
         core/geometry.cpp
         core/gw.cpp
         core/headwing_velocity.cpp

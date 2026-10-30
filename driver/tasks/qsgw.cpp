@@ -107,6 +107,9 @@ struct OutputFiles
                 case LIBRPA_QSGW_EIGENVALUES:
                     filename = "qsgw_eigenvalues.dat";
                     break;
+                case LIBRPA_QSGW_HARTREE:
+                    filename = "qsgw_hartree.csv";
+                    break;
                 case LIBRPA_QSGW_MATRICES:
                     filename = "qsgw_matrices.dat";
                     break;
@@ -212,12 +215,26 @@ void driver::task_qsgw()
     controls.restart_file = driver_params.qsgw_restart_file.c_str();
     controls.checkpoint_file = driver_params.qsgw_checkpoint_file.c_str();
     controls.output_matrices = driver_params.qsgw_write_iteration_matrices;
+    controls.update_hartree = driver_params.qsgw_update_hartree;
     controls.output_qp = driver_params.qsgw_output_qp;
     controls.export_hamiltonian = driver_params.qsgw_export_hamiltonian_for_pyatb;
     controls.state_low = driver_params.i_state_low;
     controls.state_high = driver_params.i_state_high;
     controls.interband_velocity = driver_params.constants_choice == "aims";
     controls.expand_ibz = driver_params.crpa_enabled;
+    std::optional<librpa::reader::HartreeCoulombQ0> hartree_metric;
+    std::vector<librpa::reader::HartreeLriBlock> hartree_lri;
+    if (controls.update_hartree)
+        root_stage("QSGW dedicated Hartree metric input",
+                   [&]
+                   {
+                       hartree_metric = read_hartree_coulomb_q0(
+                           driver_params.input_dir, driver_params.prefix_coul_hartree,
+                           driver_params.version_coul_reader, get_bool(opts.use_shrink_abfs));
+                       hartree_lri = read_hartree_lri_blocks(driver_params.input_dir,
+                                                             driver_params.prefix_lri_coeff_hartree,
+                                                             get_bool(opts.use_shrink_abfs));
+                   });
     auto task = h.create_qsgw_task(opts, controls);
     librpa_prepare_qsgw_task(task.get());
     librpa_get_meanfield_dimensions(handler, 0, &ns, &nk, &nstates, &naos, &nspinor);
@@ -255,6 +272,7 @@ void driver::task_qsgw()
     std::optional<NativeViews> native_views;
     librpa::reader::VxcMatrices vxc, vxc_band;
     std::vector<LibrpaQsgwMatrix> vxc_views, band_views;
+    std::vector<LibrpaQsgwLriBlock> hartree_lri_views;
     LibrpaQsgwInput input{};
     root_stage(
         "QSGW host numerical input",
@@ -278,6 +296,23 @@ void driver::task_qsgw()
             input.n_vxc_band = band_views.size();
             input.vxc_band = band_views.data();
             input.vxc_in_ao_basis = driver_params.qsgw_vxc_basis == "nao";
+            if (hartree_metric)
+            {
+                input.hartree_n_aux = hartree_metric->dimension;
+                input.hartree_coulomb_q0_ri =
+                    reinterpret_cast<const double*>(hartree_metric->values.data());
+                for (const auto& block : hartree_lri)
+                    hartree_lri_views.push_back(
+                        {block.atom_i,
+                         block.atom_j,
+                         {block.translation[0], block.translation[1], block.translation[2]},
+                         block.n_aos_i,
+                         block.n_aos_j,
+                         block.n_aux_i,
+                         block.values.data()});
+                input.n_hartree_lri_blocks = static_cast<int>(hartree_lri_views.size());
+                input.hartree_lri_blocks = hartree_lri_views.data();
+            }
             if (driver_params.qsgw_export_hamiltonian_for_pyatb ||
                 (update_head && driver_params.qsgw_headwing_velocity == "current_hr"))
             {

@@ -3,12 +3,15 @@
 #endif
 
 #include <cassert>
+#include <chrono>
 #include <complex>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
 
+#include "../core/qsgw/checkpoint.h"
 #include "../core/qsgw/effective_hamiltonian.h"
 
 using librpa_int::cplxdb;
@@ -134,6 +137,107 @@ void test_reference_hamiltonian_is_the_initial_eigenvalue_diagonal()
     }
 }
 
+void test_nonzero_hartree_feedback_and_qp_subtraction()
+{
+    const auto h0 = one_block(hermitian(-0.8, 0.6, {0.0, 0.0}));
+    const auto vxc = one_block(hermitian(-0.2, -0.1, {0.03, 0.02}));
+    const auto sx = one_block(hermitian(-0.4, -0.3, {0.08, -0.06}));
+    const auto sc = one_block(hermitian(0.05, 0.12, {-0.02, 0.04}));
+    const auto dh = one_block(hermitian(0.17, -0.09, {0.07, 0.13}, librpa_int::MAJOR::COL));
+    const auto initial_dh = dh.at(0).at(0).copy();
+    const auto updated = assemble_effective_hamiltonian(h0, vxc, sx, sc, &dh);
+    const auto subtract = librpa_int::qsgw::build_qp_static_subtraction(updated, h0, vxc, &dh);
+    for (int i = 0; i != 2; ++i)
+        for (int j = 0; j != 2; ++j)
+        {
+            assert_close(updated.at(0).at(0)(i, j),
+                         h0.at(0).at(0)(i, j) - vxc.at(0).at(0)(i, j) + sx.at(0).at(0)(i, j) +
+                             sc.at(0).at(0)(i, j) + dh.at(0).at(0)(i, j));
+            // A QP correction must retain the explicit Hartree already in H_live.
+            assert_close(subtract.at(0).at(0)(i, j), sx.at(0).at(0)(i, j) + sc.at(0).at(0)(i, j));
+            assert_close(dh.at(0).at(0)(i, j), initial_dh(i, j));
+        }
+    // Mixing/cuts can change the entering H independently. Subtract the actual
+    // entering static part, rather than reconstructing it from the latest GW build.
+    auto entering = one_block(hermitian(-0.51, 0.72, {-0.02, 0.11}));
+    const auto actual = librpa_int::qsgw::build_qp_static_subtraction(entering, h0, vxc, &dh);
+    for (int i = 0; i != 2; ++i)
+        for (int j = 0; j != 2; ++j)
+            assert_close(actual.at(0).at(0)(i, j),
+                         entering.at(0).at(0)(i, j) - h0.at(0).at(0)(i, j) + vxc.at(0).at(0)(i, j) -
+                             dh.at(0).at(0)(i, j));
+}
+
+void test_hartree_restart_preserves_dft_reference_and_live_operator()
+{
+#ifdef LIBRPA_USE_LIBRI
+    using namespace librpa_int;
+    using namespace librpa_int::qsgw;
+    MeanField reference(1, 1, 2, 2, 1);
+    reference.get_efermi() = -0.15;
+    reference.get_eigenvals()[0](0, 0) = -0.8;
+    reference.get_eigenvals()[0](0, 1) = 0.6;
+    reference.get_weight()[0](0, 0) = 2.0;
+    reference.get_eigenvectors()[0][0][0] = ComplexMatrix(2, 2);
+    reference.get_eigenvectors()[0][0][0](0, 0) = 1.0;
+    reference.get_eigenvectors()[0][0][0](1, 1) = 1.0;
+    MeanField live = reference;
+    live.get_eigenvectors()[0][0][0](0, 0) = 0.8;
+    live.get_eigenvectors()[0][0][0](0, 1) = cplxdb(0.0, 0.6);
+    live.get_eigenvectors()[0][0][0](1, 0) = cplxdb(0.0, 0.6);
+    live.get_eigenvectors()[0][0][0](1, 1) = 0.8;
+    live.get_weight()[0](0, 0) = 1.2;
+    live.get_weight()[0](0, 1) = 0.8;
+    live.get_eigenvals()[0](0, 0) = -0.51;
+    live.get_eigenvals()[0](0, 1) = 0.72;
+    const auto vxc = one_block(hermitian(-0.2, -0.1, {0.03, 0.02}));
+    const auto entering = one_block(hermitian(-0.51, 0.72, {-0.02, 0.11}));
+    SpinKMatrixMap empty;
+    const std::vector<Vector3_Order<double>> points{{0.0, 0.0, 0.0}}, no_points;
+    const std::vector<double> weights{1.0};
+    Matz metric(1, 1);
+    metric(0, 0) = 1.7;
+    Cs_LRI raw;
+    raw.use_libri = true;
+    RI::Tensor<double> c({1, 2, 2});
+    c(0, 0, 0) = 0.3;
+    c(0, 0, 1) = -0.11;
+    c(0, 1, 1) = 0.21;
+    raw.data_libri[0][{0, {3, 0, 0}}] = c;
+    CheckpointContext context{reference, nullptr, points, no_points, weights, vxc, empty,
+                              0,         2,       0.0,    1.0,       8,       0};
+    context.hartree_coulomb_q0 = &metric;
+    context.hartree_cs_raw = &raw;
+    IterationSummary summary;
+    summary.iteration = 2;
+    summary.electron_count = 2.0;
+    const auto path =
+        std::filesystem::temp_directory_path() /
+        ("librpa-qsgw-hartree-control-" +
+         std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()) +
+         ".bin");
+    write_qsgw_checkpoint(path.string(), context, summary, live, nullptr, entering, empty);
+    MeanField restored = reference;
+    SpinKMatrixMap restored_h, unused;
+    const auto restored_summary =
+        read_qsgw_checkpoint(path.string(), context, restored, nullptr, restored_h, unused);
+    std::filesystem::remove(path);
+    assert(restored_summary.iteration == 2);
+    assert_close(reference.get_weight()[0](0, 0), 2.0);
+    assert_close(reference.get_eigenvectors().at(0).at(0).at(0)(0, 1), 0.0);
+    for (int i = 0; i != 2; ++i)
+    {
+        assert_close(restored.get_weight()[0](0, i), live.get_weight()[0](0, i));
+        for (int j = 0; j != 2; ++j)
+        {
+            assert_close(restored.get_eigenvectors().at(0).at(0).at(0)(i, j),
+                         live.get_eigenvectors().at(0).at(0).at(0)(i, j));
+            assert_close(restored_h.at(0).at(0)(i, j), entering.at(0).at(0)(i, j));
+        }
+    }
+#endif
+}
+
 }  // namespace
 
 int main()
@@ -141,6 +245,8 @@ int main()
     test_qsgw_formula();
     test_nonhermitian_components_use_the_legacy_upper_triangle();
     test_reference_hamiltonian_is_the_initial_eigenvalue_diagonal();
+    test_nonzero_hartree_feedback_and_qp_subtraction();
+    test_hartree_restart_preserves_dft_reference_and_live_operator();
     std::cout << "test_qsgw_effective_hamiltonian: all tests passed\n";
     return 0;
 }

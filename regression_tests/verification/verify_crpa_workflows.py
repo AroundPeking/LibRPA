@@ -174,6 +174,7 @@ def run_rank(binary, mpiexec, ranks, root, template, dataset):
         home / name for name in ("continuous", "initial", "resumed", "uncoupled"))
     qsgw = {
         **common, "task": "qsgw", "crpa_enabled": "true", "crpa_track_orbitals": "true",
+        "qsgw_update_hartree": "false",  # Fixed-Hartree control; no bare metric in this model.
         "qsgw_headwing_velocity": "current_hr", "qsgw_output_qp": "true",
         "qsgw_write_iteration_matrices": "true", "qsgw_cut_mode": "0",
         "qsgw_checkpoint_file": "checkpoint.bin",

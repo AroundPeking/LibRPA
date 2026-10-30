@@ -19,7 +19,7 @@ struct DriverParams
 
     //! Task type.
     //! @par Default
-    //! required (`rpa`, `g0w0`, `exx`, `exx_band`)
+    //! required (`rpa`, `g0w0`, `exx`, `exx_band`, `hartree`)
     std::string task;
 
     //! Physical constants source.
@@ -65,6 +65,16 @@ struct DriverParams
     //! Experimental
     std::string prefix_lri_coeff_shrink;
 
+    //! Dedicated unwrapped, full-precision LRI coefficient prefix for Hartree
+    //! feedback. Uses existing binary v1 blocks with true physical translations
+    //! and the auxiliary basis selected by use_shrink_abfs; no normal Cs fallback.
+    //! @par Default
+    //! empty (required when qsgw_update_hartree=true)
+    //! @par Status
+    //! Experimental
+    //! @since Unreleased
+    std::string prefix_lri_coeff_hartree;
+
     //! Prefix of shrink auxiliary-basis transform files.
     //! @par Default
     //! `shrink_sinvS_`
@@ -77,6 +87,37 @@ struct DriverParams
     //! @par Default
     //! `coulomb_mat`
     std::string prefix_coul_full;
+
+    //! Bare three-dimensional Coulomb prefix for task=hartree or QSGW Hartree feedback, with reciprocal
+    //! G=0 set to zero. Must be supplied explicitly; no EXX metric fallback.
+    //! @par Default
+    //! empty (required for task=hartree or qsgw_update_hartree=true)
+    //! @par Status
+    //! Experimental
+    std::string prefix_coul_hartree;
+
+    //! Optional complete complex ABACUS Hartree H(R) CSR reference.
+    //! Relative paths are resolved from input_dir. No gauge shift is fitted.
+    //! @par Default
+    //! empty
+    //! @par Status
+    //! Experimental
+    std::string hartree_fn_reference;
+
+    //! Reference CSR energy conversion to Hartree (0.5 for Rydberg input).
+    //! @par Default
+    //! 0.5
+    //! @par Status
+    //! Experimental
+    double hartree_reference_scale;
+
+    //! Positive maximum complex AO-entry comparison tolerance, in Hartree.
+    //! A negative value only reports differences; a positive gate requires a reference.
+    //! @par Default
+    //! -1 (report only)
+    //! @par Status
+    //! Experimental
+    double hartree_check_tolerance;
 
     //! Prefix of Sternheimer chi0 v1 response files.
     //! @par Default
@@ -506,6 +547,16 @@ struct DriverParams
     //! @par Status
     //! Experimental
     bool qsgw_write_iteration_matrices;
+
+    //! Include V_H[D_t-D_DFT] in each QSGW update, using current physical occupations.
+    //! Requires a dedicated prefix_coul_hartree bare 3D G=0-zero metric matching
+    //! the selected auxiliary basis. Ordinary GW Coulomb inputs remain required.
+    //! @par Default
+    //! true
+    //! @par Status
+    //! Experimental
+    //! @since Unreleased
+    bool qsgw_update_hartree;
 
     //! Solve the diagonal G0W0 quasiparticle equation on every entering QSGW state.
     //! Reuses the existing EXX/Sigma matrices in the current eigenbasis and the

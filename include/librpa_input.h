@@ -575,6 +575,16 @@ typedef struct
     int spin, kpoint, dimension, row_major;
     const double* values_ri;
 } LibrpaQsgwMatrix;
+/** One directed, unwrapped physical LRI coefficient block. Atom indices are
+ * zero-based; translation is a true lattice translation, never BvK-folded.
+ * Real values are packed as ((i*n_aos_j+j)*n_aux_i+mu), matching the ordinary
+ * LRI setter. Include both directed fitting endpoints without duplicate keys. */
+typedef struct
+{
+    int atom_i, atom_j, translation[3];
+    int n_aos_i, n_aos_j, n_aux_i;
+    const double* values;
+} LibrpaQsgwLriBlock;
 typedef struct
 {
     int n_vxc, n_vxc_band;
@@ -582,6 +592,16 @@ typedef struct
     int vxc_in_ao_basis;
     const LibrpaNativeVelocityInput* native_operators;
     double inplane_area_bohr2, auxiliary_monopole_norm_squared;
+    /** Optional dedicated bare q=0 auxiliary Coulomb metric, in Hartree.
+     * Full row-major interleaved complex matrix, copied from root. Supplying
+     * it asserts the 3D bare kernel with G=0 set to zero, matched to the
+     * selected full/shrunk auxiliary basis. Never substitutes for GW V(q). */
+    int hartree_n_aux;
+    const double* hartree_coulomb_q0_ri;
+    /** Dedicated unwrapped coefficients in the same auxiliary basis as the
+     * Hartree metric. Copied from root; independent of folded GW input. */
+    int n_hartree_lri_blocks;
+    const LibrpaQsgwLriBlock* hartree_lri_blocks;
 } LibrpaQsgwInput;
 
 /** Collective. Vxc and native operators are supplied on root; ignored elsewhere. */

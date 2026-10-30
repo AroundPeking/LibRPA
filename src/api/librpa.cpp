@@ -11,6 +11,8 @@
 
 // Internal headers
 #include "../utils/error.h"
+#include "../mpi/collective_stage.h"
+#include "instance_manager.h"
 
 namespace librpa
 {
@@ -507,6 +509,31 @@ LIBRPA_CPP_H_METHOD_DEF_WRAP_RET_WOPT(
 void Handler::build_exx(const Options &opts)
 {
     ::librpa_build_exx(this->h_, &opts);
+}
+
+std::vector<std::complex<double>> Handler::compute_hartree_ao(
+    const Options& opts, const std::vector<int>& iks_this, const int n_aos)
+{
+    const auto dataset = librpa_int::api::get_dataset_instance(h_);
+    std::vector<double> real, imag;
+    std::vector<std::complex<double>> result;
+    librpa_int::collective_all_stage(dataset->comm_h, "Hartree C++ output storage", [&]() {
+        if (n_aos <= 0 || n_aos != static_cast<int>(dataset->basis_wfc.nb_total) ||
+            iks_this.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            throw std::invalid_argument("Invalid Hartree AO dimensions or k-point count");
+        const auto n = static_cast<std::size_t>(n_aos);
+        if (n > std::numeric_limits<std::size_t>::max() / n ||
+            (!iks_this.empty() && n * n > std::numeric_limits<std::size_t>::max() / iks_this.size()))
+            throw std::invalid_argument("Hartree AO output size overflows");
+        const std::size_t size = iks_this.size() * n * n;
+        real.resize(size);
+        imag.resize(size);
+        result.resize(size);
+    });
+    ::librpa_compute_hartree_ao(h_, &opts, static_cast<int>(iks_this.size()), iks_this.data(),
+                               n_aos, real.data(), imag.data());
+    for (std::size_t i = 0; i < result.size(); ++i) result[i] = {real[i], imag[i]};
+    return result;
 }
 
 std::vector<double> Handler::get_exx_pot_kgrid(const Options& opts, const int n_spins,

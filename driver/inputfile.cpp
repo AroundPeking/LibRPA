@@ -265,6 +265,21 @@ static void validate_input_parameters()
                    [](const unsigned char ch) {
                        return static_cast<char>(std::tolower(ch));
                    });
+    if (task == "hartree")
+    {
+        if (params.prefix_coul_hartree.empty())
+            throw std::runtime_error(
+                "task=hartree requires explicit prefix_coul_hartree for bare 3D G=0-zero Coulomb input");
+        if (!(params.hartree_reference_scale > 0.0) ||
+            !std::isfinite(params.hartree_reference_scale))
+            throw std::runtime_error("hartree_reference_scale must be finite and positive");
+        if (!std::isfinite(params.hartree_check_tolerance) || params.hartree_check_tolerance == 0.0)
+            throw std::runtime_error(
+                "hartree_check_tolerance must be finite and positive, or negative for report only");
+        if (params.hartree_check_tolerance > 0.0 && params.hartree_fn_reference.empty())
+            throw std::runtime_error(
+                "A positive hartree_check_tolerance requires hartree_fn_reference");
+    }
     if (params.output_gw_spec_func)
     {
         if (params.sf_omega_step <= 0.0)
@@ -385,6 +400,12 @@ static void validate_input_parameters()
     }
     if (task == "qsgw")
     {
+        if (params.qsgw_update_hartree && params.prefix_coul_hartree.empty())
+            throw std::runtime_error(
+                "qsgw_update_hartree requires a dedicated prefix_coul_hartree for bare 3D G=0-zero Coulomb input");
+        if (params.qsgw_update_hartree && params.prefix_lri_coeff_hartree.empty())
+            throw std::runtime_error(
+                "qsgw_update_hartree requires prefix_lri_coeff_hartree with unwrapped physical translations");
         if (driver::opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON)
             throw std::runtime_error(
                 "QSGW fixed-basis iteration requires replicated SCF wavefunctions; set use_kpara_scf_eigvec = false");
@@ -476,8 +497,13 @@ void parse_inputfile_to_params(const std::string &fn)
     }
     _parse_string(driver_params, prefix_lri_coeff);
     _parse_string(driver_params, prefix_lri_coeff_shrink);
+    _parse_string(driver_params, prefix_lri_coeff_hartree);
     _parse_string(driver_params, prefix_shrink_sinvS);
     _parse_string(driver_params, prefix_coul_full);
+    _parse_string(driver_params, prefix_coul_hartree);
+    _parse_string(driver_params, hartree_fn_reference);
+    _parse_double(driver_params, hartree_reference_scale);
+    _parse_double(driver_params, hartree_check_tolerance);
     _parse_string(driver_params, prefix_sternheimer_chi0);
     _parse_string(driver_params, fn_sternheimer_qpoints);
     _parse_string(driver_params, fn_sternheimer_partial_manifest);
@@ -543,7 +569,7 @@ void parse_inputfile_to_params(const std::string &fn)
                 "qsgw_system_type was removed; QSGW selects mixing automatically from the SCF "
                 "k-point input");
         for (const std::string removed :
-             {"qsgw_update_hartree", "qsgw_hartree_coulomb", "qsgw_hartree_normalization",
+             {"qsgw_hartree_coulomb", "qsgw_hartree_normalization",
               "qsgw_hr_export_full_mp_rgrid"})
         {
             std::string ignored;
@@ -581,6 +607,7 @@ void parse_inputfile_to_params(const std::string &fn)
         parse_qsgw_double(parser, "qsgw_cut_shift_ha", driver_params.qsgw_cut_shift_ha);
         parse_qsgw_bool(parser, "qsgw_write_iteration_matrices",
                         driver_params.qsgw_write_iteration_matrices);
+        parse_qsgw_bool(parser, "qsgw_update_hartree", driver_params.qsgw_update_hartree);
         parse_qsgw_bool(parser, "qsgw_output_qp", driver_params.qsgw_output_qp);
         parse_qsgw_bool(parser, "qsgw_export_hamiltonian_for_pyatb",
                         driver_params.qsgw_export_hamiltonian_for_pyatb);

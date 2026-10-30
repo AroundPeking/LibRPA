@@ -50,6 +50,11 @@ using librpa::reader::check_coulomb_file_binary;
 using librpa::reader::detect_coulomb_reader_version;
 size_t read_Vq_full(const std::string &dir_path, const std::string &vq_fprefix, bool is_cut_coulomb,
                     int reader_version = 0, bool use_shrink_basis = false);
+librpa::reader::HartreeCoulombQ0 read_hartree_coulomb_q0(const std::string& dir_path,
+                                                       const std::string& prefix,
+                                                       int reader_version, bool use_shrink_basis);
+std::vector<librpa::reader::HartreeLriBlock> read_hartree_lri_blocks(
+    const std::string& dir_path, const std::string& prefix, bool use_shrink_basis);
 size_t read_Vq_row(const std::string &dir_path, const std::string &vq_fprefix, double threshold,
                    const std::vector<librpa_int::atpair_t> &local_atpair, bool is_cut_coulomb,
                    int reader_version = 0, bool use_shrink_basis = false);
@@ -84,7 +89,7 @@ void read_scf_occ_eigenvalues(const string &file_path, MeanField &mf, bool use_s
 int read_vxc(const string &file_path, std::vector<matrix> &vxc);
 
 // high-level reader for RI coefficients and bare Coulomb interactions
-void read_ri(const string &dir_path, librpa::ParallelRouting &routing);
+void read_ri(const string &dir_path, librpa::ParallelRouting &routing, bool hartree);
 
 void read_velocity(const string &file_path, int n_spins, int n_kpoints, int n_states,
                    velocity_matrix_t &velocity);

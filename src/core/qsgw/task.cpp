@@ -1,13 +1,17 @@
 #include "task.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <exception>
 #include <iomanip>
+#include <limits>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 
 #include "../../io/fs.h"
 #include "../../io/global_io.h"
@@ -18,6 +22,7 @@
 #include "../../utils/profiler.h"
 #include "qp_diagnostics.h"
 #include "band_remap.h"
+#include "../hartree.h"
 #include "band_output.h"
 #include "checkpoint.h"
 #include "convergence.h"
@@ -330,9 +335,10 @@ void write_qsgw_qp_state(std::ostream& output, int state_index, int update,
                          const std::vector<Vector3_Order<double>>& kpoints,
                          const SpinKMatrixMap& rotation, const SpinKMatrixMap& entering_hamiltonian,
                          const SpinKMatrixMap& reference_hamiltonian, const SpinKMatrixMap& dft_vxc,
-                         const SpinKMatrixMap& exchange, const SigmaMatrixMap& sigma,
-                         const librpa_int::TFGrids& tfg, const std::vector<double>& kpoint_weights,
-                         const LibrpaOptions& options, const TaskControls& controls,
+                         const SpinKMatrixMap* delta_hartree, const SpinKMatrixMap& exchange,
+                         const SigmaMatrixMap& sigma, const librpa_int::TFGrids& tfg,
+                         const std::vector<double>& kpoint_weights, const LibrpaOptions& options,
+                         const TaskControls& controls,
                          const std::function<void(OutputKind, const std::string&, int, int)>& emit)
 {
     const int low = std::max(0, controls.i_state_low);
@@ -345,6 +351,8 @@ void write_qsgw_qp_state(std::ostream& output, int state_index, int update,
     std::vector<double> potential(ns * nk * n), exx(potential.size());
     std::vector<cplxdb> diagonal;
     diagonal.reserve(potential.size() * frequencies.size());
+    const auto static_subtraction = build_qp_static_subtraction(
+        entering_hamiltonian, reference_hamiltonian, dft_vxc, delta_hartree);
     for (int spin = 0; spin < ns; ++spin)
         for (int kpoint = 0; kpoint < nk; ++kpoint)
         {
@@ -358,15 +366,7 @@ void write_qsgw_qp_state(std::ostream& output, int state_index, int update,
                                    u.major());
                 return adjoint * aligned * u;
             };
-            // H_t = H_DFT - Vxc_DFT + Vstatic_t, including mixing/cuts/restart.
-            Matz static_reference(u.nr(), u.nc(), u.major());
-            for (int row = 0; row < u.nr(); ++row)
-                for (int column = 0; column < u.nc(); ++column)
-                    static_reference(row, column) =
-                        entering_hamiltonian.at(spin).at(kpoint)(row, column) -
-                        reference_hamiltonian.at(spin).at(kpoint)(row, column) +
-                        dft_vxc.at(spin).at(kpoint)(row, column);
-            const auto vstatic = rotate(static_reference);
+            const auto vstatic = rotate(static_subtraction.at(spin).at(kpoint));
             const auto sigx = rotate(exchange.at(spin).at(kpoint));
             for (int band = low; band < high; ++band)
             {
@@ -485,6 +485,87 @@ void Task::set_input(TaskInput input)
     dataset_->comm_h.bcast(normalization, 2, 0);
     input_.inplane_area_bohr2 = normalization[0];
     input_.auxiliary_monopole_norm_squared = normalization[1];
+    if (controls_.qsgw_update_hartree)
+    {
+#ifndef LIBRPA_LIBRI_HAS_HARTREE
+        throw LIBRPA_INVALID_ARGUMENT(
+            "QSGW Hartree feedback requires LibRI Hartree support");
+#else
+        const auto& comm = dataset_->comm_h;
+        const auto& aux =
+            enabled(options_.use_shrink_abfs) ? dataset_->basis_aux_shrink : dataset_->basis_aux;
+        collective_root_stage(
+            comm, "QSGW Hartree input",
+            [&]
+            {
+                if (!input_.hartree_coulomb_q0 || !input_.hartree_cs_raw ||
+                    input_.hartree_cs_raw->data_libri.empty())
+                    throw LIBRPA_INVALID_ARGUMENT(
+                        "QSGW Hartree requires a dedicated G0=0 q0 metric and unwrapped Cs on "
+                        "root");
+                const auto& v = *input_.hartree_coulomb_q0;
+                if (v.nr() != static_cast<int>(aux.nb_total) || v.nc() != v.nr())
+                    throw LIBRPA_INVALID_ARGUMENT(
+                        "QSGW Hartree metric does not match the selected auxiliary basis");
+                for (const auto& row : input_.hartree_cs_raw->data_libri)
+                    for (const auto& entry : row.second)
+                    {
+                        const auto& t = entry.second;
+                        if (row.first < 0 || row.first >= static_cast<int>(aux.n_atoms) ||
+                            entry.first.first < 0 ||
+                            entry.first.first >= static_cast<int>(aux.n_atoms) ||
+                            t.shape.size() != 3 || !t.data ||
+                            t.shape[0] != aux.get_atom_nb(row.first) ||
+                            t.shape[1] != dataset_->basis_wfc.get_atom_nb(row.first) ||
+                            t.shape[2] != dataset_->basis_wfc.get_atom_nb(entry.first.first) ||
+                            t.data->size() != t.shape[0] * t.shape[1] * t.shape[2])
+                            throw LIBRPA_INVALID_ARGUMENT(
+                                "QSGW Hartree raw Cs has an incompatible tensor");
+                    }
+            });
+        const int naux = static_cast<int>(aux.nb_total);
+        Matz metric(naux, naux, MAJOR::ROW);
+        if (comm.is_root())
+            for (int i = 0; i != naux; ++i)
+                for (int j = 0; j != naux; ++j) metric(i, j) = (*input_.hartree_coulomb_q0)(i, j);
+        comm.bcast(metric.ptr(), metric.size(), 0);
+        input_.hartree_coulomb_q0 = std::move(metric);
+        using RawBlock = std::tuple<int, libri_types<int, int>::TAC, RI::Tensor<double>>;
+        std::vector<RawBlock> source;
+        if (comm.is_root())
+            for (const auto& i : input_.hartree_cs_raw->data_libri)
+                for (const auto& jr : i.second) source.emplace_back(i.first, jr.first, jr.second);
+        int count = static_cast<int>(source.size());
+        comm.bcast(&count, 1, 0);
+        if (!comm.is_root()) input_.hartree_cs_raw.emplace();
+        input_.hartree_cs_raw->use_libri = true;
+        for (int block = 0; block != count; ++block)
+        {
+            int header[8]{};
+            if (comm.is_root())
+            {
+                const auto& key = std::get<1>(source[block]);
+                const auto& tensor = std::get<2>(source[block]);
+                header[0] = std::get<0>(source[block]);
+                header[1] = key.first;
+                for (int d = 0; d != 3; ++d) header[2 + d] = key.second[d];
+                for (int d = 0; d != 3; ++d) header[5 + d] = static_cast<int>(tensor.shape[d]);
+            }
+            comm.bcast(header, 8, 0);
+            RI::Tensor<double> tensor({static_cast<std::size_t>(header[5]),
+                                       static_cast<std::size_t>(header[6]),
+                                       static_cast<std::size_t>(header[7])});
+            if (comm.is_root())
+                std::copy(std::get<2>(source[block]).ptr(),
+                          std::get<2>(source[block]).ptr() + tensor.data->size(), tensor.ptr());
+            comm.bcast(tensor.ptr(), tensor.data->size(), 0);
+            if (!comm.is_root())
+                input_.hartree_cs_raw
+                    ->data_libri[header[0]][{header[1], {header[2], header[3], header[4]}}] =
+                    std::move(tensor);
+        }
+#endif
+    }
     input_set_ = true;
 }
 void Task::set_output(std::function<void(const TaskOutput&)> sink) { sink_ = std::move(sink); }
@@ -531,6 +612,7 @@ void Task::prepare()
     auto& expanded_reference = expanded_reference_;
     if (dataset->pbc.kfrac_list.size() < dataset->pbc.kfrac_list_full.size() &&
         (controls_.expand_ibz || controls_.qsgw_export_hamiltonian_for_pyatb ||
+         controls_.qsgw_update_hartree ||
          (update_head && controls_.qsgw_headwing_velocity == "current_hr")))
     {
         collective_all_stage(
@@ -581,6 +663,62 @@ void Task::prepare()
                 "QSGW current-HR velocity requires the complete full-BZ SCF mesh; "
                 "IBZ velocity sewing is unsupported");
     }
+    if (controls_.qsgw_update_hartree)
+    {
+        collective_all_stage(
+            dataset->comm_h, "QSGW Hartree geometry and Fourier convention",
+            [&]
+            {
+                if (enabled(opts.use_2d_dielectric))
+                    throw LIBRPA_INVALID_ARGUMENT(
+                        "QSGW Hartree requires a bare three-dimensional Coulomb metric");
+                if (dataset->basis_convention.bloch_ratom != 0)
+                    throw LIBRPA_INVALID_ARGUMENT(
+                        "QSGW Hartree requires the native RI translation convention and "
+                        "atom-position phase 0");
+                const auto& pbc = dataset->pbc;
+                const int nk = dataset->mf.get_n_kpoints();
+                std::size_t mesh_size = 1;
+                for (int period : pbc.period_array)
+                {
+                    if (period <= 0 || nk <= 0 || mesh_size > static_cast<std::size_t>(nk) / period)
+                        throw LIBRPA_INVALID_ARGUMENT(
+                            "QSGW Hartree requires a complete regular full-BZ SCF mesh");
+                    mesh_size *= period;
+                }
+                if (mesh_size != static_cast<std::size_t>(nk) || pbc.klist.size() != mesh_size ||
+                    pbc.kfrac_list.size() != mesh_size || pbc.kfrac_list_full.size() != mesh_size)
+                    throw LIBRPA_INVALID_ARGUMENT(
+                        "QSGW Hartree requires a complete regular full-BZ SCF mesh");
+                const bool has_gamma =
+                    std::any_of(pbc.klist.begin(), pbc.klist.end(),
+                                [](const auto& k) { return k.norm() < 1.0e-10; });
+                if (!has_gamma)
+                    throw LIBRPA_INVALID_ARGUMENT(
+                        "QSGW Hartree currently requires a Gamma-containing SCF mesh");
+                std::set<std::array<int, 3>> residues;
+                for (const auto& k : pbc.kfrac_list)
+                {
+                    const std::array<double, 3> fraction{k.x, k.y, k.z};
+                    std::array<int, 3> residue{};
+                    for (int d = 0; d != 3; ++d)
+                    {
+                        const double index = fraction[d] * pbc.period_array[d];
+                        if (!std::isfinite(index) ||
+                            std::abs(index) > std::numeric_limits<int>::max() ||
+                            std::abs(index - std::round(index)) > 1.0e-8)
+                            throw LIBRPA_INVALID_ARGUMENT(
+                                "QSGW Hartree requires an unshifted regular SCF mesh");
+                        const int integer = static_cast<int>(std::round(index));
+                        residue[d] = integer % pbc.period_array[d];
+                        if (residue[d] < 0) residue[d] += pbc.period_array[d];
+                    }
+                    if (!residues.insert(residue).second)
+                        throw LIBRPA_INVALID_ARGUMENT(
+                            "QSGW Hartree SCF mesh contains equivalent duplicate k points");
+                }
+            });
+    }
     if (opts.parallel_routing != LIBRPA_ROUTING_LIBRI &&
         opts.parallel_routing != LIBRPA_ROUTING_AUTO)
     {
@@ -612,6 +750,10 @@ void Task::run()
                               validate_qsgw_reference(*dataset, compute_band, opts);
                           });
     const MeanField reference = dataset->mf;
+    // Capture the DFT density before checkpoint restoration or any live update.
+    // Each matrix owns separate storage; subsequent signed differences never mutate it.
+    const auto hartree_reference_density =
+        controls_.qsgw_update_hartree ? dataset->build_hartree_density() : std::vector<Matz>{};
     // Use the full SCF mesh as well as the loaded count: one IBZ representative
     // of a multi-k mesh must not enter the single-k supercell branch.
     const bool single_kpoint =
@@ -703,24 +845,31 @@ void Task::run()
                                              dataset->mf_band, cut_options)
                      : band_reference_hamiltonian;
 
-    const CheckpointContext checkpoint_context{reference,
-                                               band_reference ? &*band_reference : nullptr,
-                                               dataset->pbc.kfrac_list,
-                                               dataset->kfrac_band_list,
-                                               dataset->pbc.weight_k,
-                                               dft_vxc,
-                                               dft_vxc_band,
-                                               controls_.qsgw_cut_mode,
-                                               controls_.qsgw_unoccupied_keep,
-                                               controls_.qsgw_cut_shift_ha,
-                                               mixing_beta,
-                                               opts.nfreq,
-                                               update_head ? opts.option_dielect_func : 0,
-                                               controls_.qsgw_headwing_velocity,
-                                               ao_operators ? &*ao_operators : nullptr,
-                                               &reference_velocity,
-                                               &dataset->pbc.period,
-                                               &dataset->pbc.latvec};
+    const auto hartree_remap = controls_.qsgw_update_hartree
+        ? build_qsgw_band_bvk_remap(dataset->atoms, dataset->pbc, opts.option_bvk_remap)
+        : AtomPairBvKRemap<atom_t>{};
+    const CheckpointContext checkpoint_context{
+        reference,
+        band_reference ? &*band_reference : nullptr,
+        dataset->pbc.kfrac_list,
+        dataset->kfrac_band_list,
+        dataset->pbc.weight_k,
+        dft_vxc,
+        dft_vxc_band,
+        controls_.qsgw_cut_mode,
+        controls_.qsgw_unoccupied_keep,
+        controls_.qsgw_cut_shift_ha,
+        mixing_beta,
+        opts.nfreq,
+        update_head ? opts.option_dielect_func : 0,
+        controls_.qsgw_headwing_velocity,
+        ao_operators ? &*ao_operators : nullptr,
+        &reference_velocity,
+        &dataset->pbc.period,
+        &dataset->pbc.latvec,
+        controls_.qsgw_update_hartree ? &*input_.hartree_coulomb_q0 : nullptr,
+        controls_.qsgw_update_hartree ? &*input_.hartree_cs_raw : nullptr,
+        opts.option_bvk_remap, controls_.qsgw_update_hartree ? &hartree_remap : nullptr};
     int starting_iteration = 0;
     IterationSummary starting_summary;
     starting_summary.fermi_energy_ev = reference.get_efermi() * HA2EV;
@@ -770,10 +919,144 @@ void Task::run()
     std::ostringstream trace;
     std::ostringstream eigenvalue_trace;
     std::ostringstream matrix_trace;
+    SpinKMatrixMap delta_hartree, delta_hartree_band;
+    std::map<int, Matz> delta_hartree_ao;
+    double density_delta_frobenius = 0.0;
+    std::vector<Vector3_Order<double>> hartree_kpoints = dataset->pbc.kfrac_list;
+    if (compute_band)
+        hartree_kpoints.insert(hartree_kpoints.end(), dataset->kfrac_band_list.begin(),
+                               dataset->kfrac_band_list.end());
+    const auto evaluate_hartree = [&]
+    {
+        if (!controls_.qsgw_update_hartree) return;
+        auto density = dataset->build_hartree_density();
+        double norm2 = 0.0;
+        for (std::size_t k = 0; k != density.size(); ++k)
+            for (std::size_t n = 0; n != density[k].size(); ++n)
+            {
+                density[k].ptr()[n] -= hartree_reference_density[k].ptr()[n];
+                norm2 += std::norm(density[k].ptr()[n]);
+            }
+        density_delta_frobenius = std::sqrt(norm2);
+        Cs_LRI unique_cs;
+        unique_cs.use_libri = true;
+        if (dataset->comm_h.is_root()) unique_cs = *input_.hartree_cs_raw;
+        const auto& aux =
+            enabled(opts.use_shrink_abfs) ? dataset->basis_aux_shrink : dataset->basis_aux;
+        delta_hartree_ao =
+            compute_hartree_ao_k(dataset->basis_wfc, aux, unique_cs, *input_.hartree_coulomb_q0,
+                                 dataset->pbc, density, dataset->comm_h, &hartree_kpoints, hartree_remap);
+        collective_root_stage(
+            dataset->comm_h, "QSGW Delta Hartree projection",
+            [&]
+            {
+                const auto project = [&](const MeanField& ref, int offset, SpinKMatrixMap& result)
+                {
+                    result.clear();
+                    const int nao = ref.get_n_aos(), nspinor = ref.get_n_spinor();
+                    for (int spin = 0; spin != ref.get_n_spins(); ++spin)
+                        for (int k = 0; k != ref.get_n_kpoints(); ++k)
+                        {
+                            Matz lifted(nao * nspinor, nao * nspinor, MAJOR::ROW);
+                            const auto& spatial = delta_hartree_ao.at(offset + k);
+                            for (int i = 0; i != nao; ++i)
+                                for (int j = 0; j != nao; ++j)
+                                    for (int s = 0; s != nspinor; ++s)
+                                        lifted(i * nspinor + s, j * nspinor + s) = spatial(i, j);
+                            result[spin][k] = project_vxc_nao_to_fixed_basis(lifted, ref, spin, k);
+                        }
+                };
+                project(reference, 0, delta_hartree);
+                if (compute_band)
+                    project(*band_reference, reference.get_n_kpoints(), delta_hartree_band);
+            });
+    };
+    const auto report_hartree = [&](int state, const char* phase)
+    {
+        if (!controls_.qsgw_update_hartree) return;
+        collective_root_stage(
+            dataset->comm_h, "QSGW Delta Hartree output",
+            [&]
+            {
+                std::ostringstream out;
+                out << std::scientific << std::setprecision(17);
+                const double electrons =
+                    physical_electron_count(dataset->mf, dataset->pbc.weight_k);
+                const auto write_channel =
+                    [&](const char* channel, int offset, const SpinKMatrixMap& matrices)
+                {
+                    for (const auto& [spin, by_k] : matrices)
+                        for (const auto& [k, matrix] : by_k)
+                        {
+                            const auto& ao = delta_hartree_ao.at(offset + k);
+                            double am = 0, af = 0, km = 0, kf = 0, kd = 0;
+                            for (std::size_t n = 0; n != ao.size(); ++n)
+                            {
+                                am = std::max(am, std::abs(ao.ptr()[n]));
+                                af += std::norm(ao.ptr()[n]);
+                            }
+                            for (int i = 0; i != matrix.nr(); ++i)
+                                for (int j = 0; j != matrix.nc(); ++j)
+                                {
+                                    km = std::max(km, std::abs(matrix(i, j)));
+                                    kf += std::norm(matrix(i, j));
+                                    if (i == j) kd = std::max(kd, std::abs(matrix(i, j)));
+                                }
+                            af = std::sqrt(af);
+                            kf = std::sqrt(kf);
+                            const auto row = [&, output_spin = spin + 1, output_k = k + 1](
+                                                 const char* kind, int i, int j, cplxdb z)
+                            {
+                                out << state << ',' << phase << ',' << channel << ',' << output_spin
+                                    << ',' << output_k << ',' << kind << ',' << i << ',' << j << ','
+                                    << z.real() << ',' << z.imag() << ',' << z.real() * HA2EV << ','
+                                    << z.imag() * HA2EV << ',' << am << ',' << af << ',' << km
+                                    << ',' << kf << ',' << kd << ',' << am * HA2EV << ','
+                                    << af * HA2EV << ',' << km * HA2EV << ',' << kf * HA2EV << ','
+                                    << kd * HA2EV << ',' << electrons << ','
+                                    << density_delta_frobenius << '\n';
+                            };
+                            row("summary", 0, 0, 0.0);
+                            if (offset == 0)
+                            {
+                                for (int i = 0; i != ao.nr(); ++i)
+                                    for (int j = 0; j != ao.nc(); ++j)
+                                        row("ao", i + 1, j + 1, ao(i, j));
+                                for (int i = 0; i != matrix.nr(); ++i)
+                                    for (int j = 0; j != matrix.nc(); ++j)
+                                        row("ks", i + 1, j + 1, matrix(i, j));
+                            }
+                            else
+                                for (int i = 0; i != matrix.nr(); ++i)
+                                    row("ks_diagonal", i + 1, i + 1, matrix(i, i));
+                        }
+                };
+                write_channel("grid", 0, delta_hartree);
+                if (compute_band)
+                    write_channel("band", reference.get_n_kpoints(), delta_hartree_band);
+                output_text(OutputKind::Hartree, out.str(), state, 0, true);
+                if (controls_.qsgw_write_iteration_matrices)
+                {
+                    const std::string component = std::string("delta_vh_") + phase;
+                    write_matrix_component_trace(matrix_trace, state, IterationChannel::Grid,
+                                                 component, delta_hartree);
+                    if (compute_band)
+                        write_matrix_component_trace(matrix_trace, state, IterationChannel::Band,
+                                                     component, delta_hartree_band);
+                }
+            });
+    };
     collective_root_stage(
         dataset->comm_h, "QSGW trace setup",
         [&]
         {
+            if (controls_.qsgw_update_hartree)
+                output_text(
+                    OutputKind::Hartree,
+                    "state_index,phase,channel,spin,kpoint,kind,row,column,re_Ha,im_Ha,re_eV,im_eV,"
+                    "ao_max_Ha,ao_frobenius_Ha,ks_max_Ha,ks_frobenius_Ha,ks_max_diagonal_Ha,"
+                    "ao_max_eV,ao_frobenius_eV,ks_max_eV,ks_frobenius_eV,ks_max_diagonal_eV,"
+                    "electrons,density_delta_frobenius\n");
             if (controls_.qsgw_output_qp)
             {
                 qp_output << "state_index,gw_update,channel,spin,kpoint,kx,ky,kz,band,occupation,"
@@ -914,9 +1197,9 @@ void Task::run()
                                  [&]
                                  {
                                      dataset->initialize_symmetry(true);
-                                     validate_symmetry_band_weights(dataset->mf, dataset->basis_wfc,
-                                                                    dataset->pbc,
-                                                                    dataset->symmetry_context);
+                                     validate_live_symmetry_state(
+                                         dataset->mf, dataset->basis_wfc, dataset->pbc,
+                                         dataset->symmetry_context, expanded_reference_.has_value());
                                  });
         if (update_head)
         {
@@ -1007,10 +1290,12 @@ void Task::run()
                 });
         }
     };
+    evaluate_hartree();
     for (int iteration = starting_iteration + 1; iteration <= controls_.qsgw_max_iter; ++iteration)
     {
         completed_iterations = iteration;
         const EigenvalueSnapshot previous = eigenvalue_snapshot(dataset->mf);
+        report_hartree(iteration - 1, "entering");
         dataset->invalidate_compute_objects();
         prepare_optical_state(iteration, true);
         const int entering_state = iteration - 1;
@@ -1079,16 +1364,18 @@ void Task::run()
                         qp_output, entering_state, iteration, "grid", dataset->mf,
                         dataset->pbc.kfrac_list, qp_rotation,
                         entering_state == 0 ? reference_hamiltonian : current_hamiltonian,
-                        reference_hamiltonian, dft_vxc, exchange, sigma, dataset->tfg,
-                        dataset->pbc.weight_k, opts, controls_, emit);
+                        reference_hamiltonian, dft_vxc,
+                        controls_.qsgw_update_hartree ? &delta_hartree : nullptr, exchange, sigma,
+                        dataset->tfg, dataset->pbc.weight_k, opts, controls_, emit);
                     if (compute_band)
-                        write_qsgw_qp_state(qp_output, entering_state, iteration, "band",
-                                            dataset->mf_band, dataset->kfrac_band_list,
-                                            qp_band_rotation,
-                                            entering_state == 0 ? band_reference_hamiltonian
-                                                                : current_band_hamiltonian,
-                                            band_reference_hamiltonian, dft_vxc_band, exchange_band,
-                                            sigma_band, dataset->tfg, {}, opts, controls_, emit);
+                        write_qsgw_qp_state(
+                            qp_output, entering_state, iteration, "band", dataset->mf_band,
+                            dataset->kfrac_band_list, qp_band_rotation,
+                            entering_state == 0 ? band_reference_hamiltonian
+                                                : current_band_hamiltonian,
+                            band_reference_hamiltonian, dft_vxc_band,
+                            controls_.qsgw_update_hartree ? &delta_hartree_band : nullptr,
+                            exchange_band, sigma_band, dataset->tfg, {}, opts, controls_, emit);
                     output_text(OutputKind::Quasiparticles, qp_output.str(), 0, 0, true);
                     qp_output.str("");
                 });
@@ -1112,7 +1399,8 @@ void Task::run()
                         build_correlation_map(dataset->mf_band, sigma_band, frequencies, opts);
                 }
                 const SpinKMatrixMap raw_uncut = assemble_effective_hamiltonian(
-                    reference_hamiltonian, dft_vxc, exchange, correlation);
+                    reference_hamiltonian, dft_vxc, exchange, correlation,
+                    controls_.qsgw_update_hartree ? &delta_hartree : nullptr);
                 const SpinKMatrixMap raw =
                     apply_cut ? apply_hamiltonian_cut(raw_uncut, reference_hamiltonian, dataset->mf,
                                                       cut_options)
@@ -1122,7 +1410,8 @@ void Task::run()
                 {
                     band_exchange_output = exchange_band;
                     const SpinKMatrixMap raw_band_uncut = assemble_effective_hamiltonian(
-                        band_reference_hamiltonian, dft_vxc_band, exchange_band, correlation_band);
+                        band_reference_hamiltonian, dft_vxc_band, exchange_band, correlation_band,
+                        controls_.qsgw_update_hartree ? &delta_hartree_band : nullptr);
                     raw_band = apply_hamiltonian_cut(raw_band_uncut, band_reference_hamiltonian,
                                                      dataset->mf_band, cut_options);
                 }
@@ -1200,6 +1489,10 @@ void Task::run()
             if (compute_band) qp_band_rotation = band_diagonalization->unitary;
         }
         if (compute_band) dataset->mf_band.get_efermi() = occupations.chemical_potential;
+        // Evaluate the density-induced operator even on the last requested update.
+        // This is a Hartree contraction only; it does not perform another GW build.
+        evaluate_hartree();
+        report_hartree(iteration, "updated");
         // Tracking is cheap and independent of the requested U-output interval.
         // The saved parent belongs to this updated state, also on restart.
         if (extension_) extension_->state_updated(*dataset, iteration);

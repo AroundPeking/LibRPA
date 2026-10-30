@@ -10,6 +10,7 @@ enum class task_t
     cRPA,
     SternheimerRPA,
     EXX,
+    Hartree,
     EXX_band,
     G0W0,
     G0W0_band,
@@ -33,6 +34,7 @@ void task_sternheimer_rpa();
 void task_g0w0();
 void task_g0w0_band();
 void task_exx();
+void task_hartree();
 void task_exx_band();
 void task_screened_coulomb_real_freq();
 void task_print_minimax();

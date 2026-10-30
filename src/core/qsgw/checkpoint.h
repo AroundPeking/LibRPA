@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 
+#include "../ri.h"
 #include "distributed_matrix.h"
 #include "headwing_velocity.h"
 #include "iteration_trace.h"
@@ -26,6 +27,12 @@ struct CheckpointContext
     const VelocityMatrix* reference_velocity = nullptr;
     const Vector3_Order<int>* velocity_period = nullptr;
     const Matrix3* velocity_lattice = nullptr;
+    // Non-null together enables fixed-DFT-density Hartree feedback. Bind the
+    // physical kernel and unwrapped fit, rather than input filenames.
+    const Matz* hartree_coulomb_q0 = nullptr;
+    const Cs_LRI* hartree_cs_raw = nullptr;
+    int hartree_bvk_remap = 0;
+    const AtomPairBvKRemap<atom_t>* hartree_remap = nullptr;
 };
 
 IterationSummary read_qsgw_checkpoint(const std::string&, const CheckpointContext&, MeanField&,

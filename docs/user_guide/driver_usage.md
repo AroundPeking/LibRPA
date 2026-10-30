@@ -231,4 +231,5 @@ This will run the LibRPA calculation using 4 MPI processes, each with 4 OpenMP t
 
 QSGW <qsgw>
 cRPA <crpa>
+Hartree AO operator <hartree>
 ```

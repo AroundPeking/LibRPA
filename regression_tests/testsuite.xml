@@ -133,6 +133,33 @@
     </testcase>
   </group>
 
+  <group name="Hartree potentials and QSGW feedback" prefix="Hartree">
+    <testcase name="H2 standalone Hartree (ABACUS input)" directory="hartree_abacus_H2">
+      <build require_libri="true"/>
+      <validate name="Complete complex Hartree AO matrices on the k-grid (Ha)"
+                file="librpa/hartree_ao.dat" headers="6"
+                comparison="cmp_table.abs_diff(1e-8)"/>
+    </testcase>
+    <testcase name="H2 QSGW Hartree feedback (ABACUS input)" directory="qsgw_abacus_H2_hartree">
+      <build require_libri="true"/>
+      <validate name="QSGW Hartree AO matrices over two updates (Ha)"
+                file="librpa/qsgw_hartree.csv"
+                regex="^([12]),(?:entering|updated),grid,([0-9]+),([0-9]+),ao,([0-9]+),([0-9]+),([^,]+),([^,]+),"
+                comparison="cmp_table.abs_diff(1e-8)"/>
+      <validate name="QSGW Hartree KS matrices over two updates (Ha)"
+                file="librpa/qsgw_hartree.csv"
+                regex="^([12]),(?:entering|updated),grid,([0-9]+),([0-9]+),ks,([0-9]+),([0-9]+),([^,]+),([^,]+),"
+                comparison="cmp_table.abs_diff(1e-8)"/>
+      <validate name="QSGW spectra over two updates (eV)"
+                file="librpa/qsgw_eigenvalues.dat" headers="1"
+                comparison="cmp_table.abs_diff(1e-5)"/>
+      <validate name="QSGW quasiparticle energies over two updates (Ha)"
+                file="librpa/energy_qp_*"
+                regex="^\s*([0-9]+)\s+([0-9.]+)\s+([-+0-9.Ee]+)\s+([-+0-9.Ee]+)\s*$"
+                comparison="cmp_table.abs_diff(1e-6)"/>
+    </testcase>
+  </group>
+
   <group name="Exact-exchange (EXX) potentials" prefix="EXX">
     <testcase name="BCC He, with eigenvector parallelized over k (aims input)" directory="exx_aims_bccHe_k_parallel_libri">
       <labels refhash="7beb910a6b5d92b0c5e8d842bf1916a231b5a1dc" />

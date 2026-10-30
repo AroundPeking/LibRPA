@@ -66,12 +66,26 @@ blocks:
       - driver.fn_band_kpath_info
       - driver.prefix_lri_coeff
       - driver.prefix_lri_coeff_shrink
+      - driver.prefix_lri_coeff_hartree
       - driver.prefix_shrink_sinvS
       - driver.prefix_coul_full
+      - driver.prefix_coul_hartree
       - driver.prefix_coul_cut
       - driver.prefix_eigvecs_scf
       - driver.version_coul_reader
       - driver.version_lri_reader
+
+  - heading: Hartree operator
+    text: |
+      The experimental standalone `task = hartree` builds complete spatial AO
+      matrices from the loaded physical density. It requires an explicit bare
+      three-dimensional q=0 metric with reciprocal G=0 set to zero; no ordinary
+      EXX Coulomb prefix is substituted. See [the Hartree guide](hartree.md).
+      This endpoint does not update the QSGW Hamiltonian.
+    fields:
+      - driver.hartree_fn_reference
+      - driver.hartree_reference_scale
+      - driver.hartree_check_tolerance
 
   - heading: Sternheimer RPA
     text: |
@@ -310,6 +324,11 @@ blocks:
       figures are not generated automatically. Keep band-channel presence and
       original path inputs unchanged when restarting a checkpoint.
       These experimental parameters apply to `task = qsgw`.
+      `qsgw_update_hartree = true` adds the physical density-difference Hartree
+      potential to each update. It defaults to true and requires separate
+      `prefix_coul_hartree` and unwrapped binary-v1 `prefix_lri_coeff_hartree`
+      inputs matched to the selected auxiliary basis. Ordinary GW full/cut
+      Coulomb matrices and folded coefficients remain unchanged.
       `option_dielect_func = 6` selects
       `qsgw_headwing_velocity = current_hr` and resolves to existing numerical
       option 3: rebuild velocity from the current native-baseline Hamiltonian
@@ -369,6 +388,7 @@ blocks:
       - driver.qsgw_cut_mode
       - driver.qsgw_cut_shift_ha
       - driver.qsgw_write_iteration_matrices
+      - driver.qsgw_update_hartree
       - driver.qsgw_output_qp
       - driver.qsgw_export_hamiltonian_for_pyatb
       - driver.qsgw_headwing_velocity

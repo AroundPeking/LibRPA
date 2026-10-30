@@ -1,3 +1,4 @@
+#include <array>
 #include <cmath>
 #include <memory>
 #include <stdexcept>
@@ -7,6 +8,7 @@
 #include "../mpi/collective_stage.h"
 #include "instance_manager.h"
 #include "dataset_helper.h"
+#include "hartree_input.h"
 #include "gw_response_helper.h"
 #include "librpa_compute.h"
 #include "qsgw_helper.h"
@@ -62,6 +64,53 @@ LocalizedMatrix decode_localized(const LibrpaLocalizedOperator& source, int dime
     }
     return result;
 }
+Cs_LRI decode_hartree_lri(const LibrpaQsgwInput& source, const AtomicBasis& basis_wfc)
+{
+#ifndef LIBRPA_LIBRI_HAS_HARTREE
+    (void)source;
+    (void)basis_wfc;
+    throw LIBRPA_INVALID_ARGUMENT(
+        "QSGW Hartree feedback requires LibRI Hartree support");
+#else
+    if (source.n_hartree_lri_blocks < 0 ||
+        (source.n_hartree_lri_blocks && !source.hartree_lri_blocks))
+        throw LIBRPA_INVALID_ARGUMENT("QSGW unwrapped Hartree LRI blocks are incomplete");
+    Cs_LRI result;
+    result.use_libri = true;
+    for (int index = 0; index < source.n_hartree_lri_blocks; ++index)
+    {
+        const auto& block = source.hartree_lri_blocks[index];
+        if (block.atom_i < 0 || block.atom_j < 0 ||
+            static_cast<std::size_t>(block.atom_i) >= basis_wfc.n_atoms ||
+            static_cast<std::size_t>(block.atom_j) >= basis_wfc.n_atoms || block.n_aos_i <= 0 ||
+            block.n_aos_j <= 0 || block.n_aux_i <= 0 || !block.values ||
+            static_cast<std::size_t>(block.n_aos_i) != basis_wfc[block.atom_i] ||
+            static_cast<std::size_t>(block.n_aos_j) != basis_wfc[block.atom_j])
+            throw LIBRPA_INVALID_ARGUMENT("QSGW unwrapped Hartree LRI dimensions are invalid");
+        const auto ni = static_cast<std::size_t>(block.n_aos_i);
+        const auto nj = static_cast<std::size_t>(block.n_aos_j);
+        const auto nmu = static_cast<std::size_t>(block.n_aux_i);
+        RI::Tensor<double> tensor({nmu, ni, nj});
+        for (std::size_t i = 0; i < ni; ++i)
+            for (std::size_t j = 0; j < nj; ++j)
+                for (std::size_t mu = 0; mu < nmu; ++mu)
+                {
+                    const double value = block.values[(i * nj + j) * nmu + mu];
+                    if (!std::isfinite(value))
+                        throw LIBRPA_INVALID_ARGUMENT(
+                            "QSGW unwrapped Hartree LRI value is nonfinite");
+                    tensor(mu, i, j) = value;
+                }
+        const std::array<int, 3> r{block.translation[0], block.translation[1],
+                                   block.translation[2]};
+        if (!result.data_libri[block.atom_i]
+                 .emplace(std::make_pair(block.atom_j, r), std::move(tensor))
+                 .second)
+            throw LIBRPA_INVALID_ARGUMENT("QSGW unwrapped Hartree LRI repeats a physical key");
+    }
+    return result;
+#endif
+}
 }  // namespace
 
 librpa_int::qsgw::Task& librpa_int::api::qsgw_task_instance(LibrpaQsgwTask* task)
@@ -96,7 +145,8 @@ void librpa_init_qsgw_controls(LibrpaQsgwControls* controls)
                  0,
                  2147483647,
                  0,
-                 0};
+                 0,
+                 1};
 }
 LibrpaQsgwTask* librpa_create_qsgw_task(LibrpaHandler* handler, const LibrpaOptions* options,
                                         const LibrpaQsgwControls* controls)
@@ -129,6 +179,12 @@ LibrpaQsgwTask* librpa_create_qsgw_task(LibrpaHandler* handler, const LibrpaOpti
             input.i_state_high = controls->state_high;
             input.interband_velocity = controls->interband_velocity != 0;
             input.expand_ibz = controls->expand_ibz != 0;
+            input.qsgw_update_hartree = controls->update_hartree != 0;
+#ifndef LIBRPA_LIBRI_HAS_HARTREE
+            if (input.qsgw_update_hartree)
+                throw LIBRPA_INVALID_ARGUMENT(
+                    "QSGW Hartree feedback requires LibRI Hartree support");
+#endif
             if (input.qsgw_min_iter < 1 || input.qsgw_max_iter < input.qsgw_min_iter ||
                 input.qsgw_unoccupied_keep < 0 ||
                 (input.qsgw_cut_mode != 0 && input.qsgw_cut_mode != 1) ||
@@ -149,6 +205,8 @@ LibrpaQsgwTask* librpa_create_qsgw_task(LibrpaHandler* handler, const LibrpaOpti
         ds->atoms, ds->basis_wfc, ds->blacs_h, ds->comm_h, ds->is_band_calc_done, ds->kfrac_band_list,
         ds->mf, ds->mf_band, ds->p_exx, ds->p_g0w0, ds->p_headwing, ds->pbc,
         ds->symmetry_context, ds->tfg, ds->velocity_matrix,
+        ds->basis_aux, ds->basis_aux_shrink, ds->basis_convention,
+        [ds] { return build_hartree_density_k(*ds); },
         [ds] { ds->invalidate_compute_objects(); },
         [ds](int spins, int kpoints, int bands, int aos, int spinor)
         {
@@ -199,6 +257,15 @@ void librpa_set_qsgw_input(LibrpaQsgwTask* task, const LibrpaQsgwInput* root_inp
             input.vxc_basis = root_input->vxc_in_ao_basis ? VxcBasis::Nao : VxcBasis::State;
             input.inplane_area_bohr2 = root_input->inplane_area_bohr2;
             input.auxiliary_monopole_norm_squared = root_input->auxiliary_monopole_norm_squared;
+            if (root_input->hartree_n_aux < 0 ||
+                (root_input->hartree_n_aux > 0 && !root_input->hartree_coulomb_q0_ri) ||
+                (root_input->hartree_n_aux == 0 && root_input->hartree_coulomb_q0_ri))
+                throw LIBRPA_INVALID_ARGUMENT("QSGW Hartree auxiliary metric is incomplete");
+            if (root_input->hartree_n_aux > 0)
+                input.hartree_coulomb_q0 = decode_matrix(
+                    {0, 0, root_input->hartree_n_aux, 1, root_input->hartree_coulomb_q0_ri});
+            if (root_input->n_hartree_lri_blocks != 0 || root_input->hartree_lri_blocks)
+                input.hartree_cs_raw = decode_hartree_lri(*root_input, task->dataset->basis_wfc);
             if (const auto* source = root_input->native_operators)
             {
                 auto& operators = input.ao_operators.emplace();

@@ -258,6 +258,10 @@ public:
      */
     ~Handler();
 
+    /** Create an owning QSGW task; numerical state and checkpoints belong to the library.
+     * controls.update_hartree defaults on. When enabled, supply dedicated raw
+     * LRI blocks and the bare q=0 metric through LibrpaQsgwInput, leaving GW
+     * input unchanged. */
     QsgwTask create_qsgw_task(const Options &opts, const LibrpaQsgwControls &controls) const;
 
     /* Input (set) functions */
@@ -703,6 +707,13 @@ public:
      * @param[in] opts  Runtime options.
      * */
     void build_exx(const Options &opts);
+
+    /** @brief Physical spin-summed Hartree AO matrices on selected full-grid k points.
+     * Collective; see librpa_compute_hartree_ao for metric/zero-mode requirements.
+     * Returns Hartree-unit complex values, row-major [requested k][AO row][AO column].
+     */
+    std::vector<std::complex<double>> compute_hartree_ao(
+        const Options& opts, const std::vector<int>& iks_this, int n_aos);
 
     /** @brief Get exact-exchange potential for k-grid states.
      *

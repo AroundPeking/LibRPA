@@ -17,6 +17,7 @@ constexpr std::uint32_t CHECKPOINT_BYTE_ORDER = 0x01020304;
 // ASCII format tags, not content hashes. Preserve the existing checkpoint bytes.
 constexpr std::uint32_t REFERENCE_VELOCITY_TAG = 0x48575631;  // HWV1
 constexpr std::uint32_t NATIVE_VELOCITY_TAG = 0x48575632;     // HWV2
+constexpr std::uint32_t HARTREE_TAG = 0x48525431;             // HRT1
 
 template <typename T>
 void put(std::ostream& output, const T& value)
@@ -399,6 +400,107 @@ void check_context(std::istream& input, const CheckpointContext& context,
     if (context.band_reference) check_channel(*context.band_reference, context.dft_vxc_band);
 }
 
+bool hartree_checkpoint(const CheckpointContext& context)
+{
+    if ((context.hartree_coulomb_q0 != nullptr) != (context.hartree_cs_raw != nullptr))
+        throw std::runtime_error("Incomplete QSGW Hartree checkpoint context");
+    return context.hartree_coulomb_q0 != nullptr;
+}
+
+// The image map is the geometric information actually used by Hartree path
+// interpolation. Bind it as well as the selected convention across restarts.
+std::vector<std::int32_t> hartree_images(const CheckpointContext& context)
+{
+    std::vector<std::int32_t> values;
+    if (context.hartree_remap)
+        for (const auto& [pair, translations] : context.hartree_remap->data())
+            for (const auto& [r, images] : translations)
+            {
+                values.insert(values.end(), {static_cast<std::int32_t>(pair.first),
+                    static_cast<std::int32_t>(pair.second), r.x, r.y, r.z,
+                    static_cast<std::int32_t>(images.size())});
+                for (const auto& image : images)
+                    values.insert(values.end(), {image.x, image.y, image.z});
+            }
+    return values;
+}
+
+// HRT1: physical spin-summed weighted density, bare 3D G0=0 q0 metric in Ha,
+// both unwrapped LRI endpoints, native +k.R Fourier convention, frozen DFT P0.
+// Reuse the immutable reference mean field already stored in write_context.
+void write_hartree_context(std::ostream& output, const CheckpointContext& context)
+{
+    put(output, std::int32_t(context.hartree_bvk_remap));
+    const auto images = hartree_images(context);
+    put(output, std::uint64_t(images.size()));
+    for (const auto value : images) put(output, value);
+#ifdef LIBRPA_USE_LIBRI
+    put(output, HARTREE_TAG);
+    const auto& v = *context.hartree_coulomb_q0;
+    put(output, std::int32_t(v.nr()));
+    for (int i = 0; i != v.nr(); ++i)
+        for (int j = 0; j != v.nc(); ++j) put_complex(output, v(i, j));
+    std::uint64_t count = 0;
+    for (const auto& i : context.hartree_cs_raw->data_libri) count += i.second.size();
+    put(output, count);
+    for (const auto& i : context.hartree_cs_raw->data_libri)
+        for (const auto& jr : i.second)
+        {
+            put(output, std::int32_t(i.first));
+            put(output, std::int32_t(jr.first.first));
+            for (int r : jr.first.second) put(output, std::int32_t(r));
+            for (auto n : jr.second.shape) put(output, std::uint64_t(n));
+            for (double value : *jr.second.data) put(output, value);
+        }
+#else
+    throw std::runtime_error("Hartree checkpoint requires LibRI");
+#endif
+}
+
+void check_hartree_context(std::istream& input, const CheckpointContext& context)
+{
+    if (get<std::int32_t>(input) != context.hartree_bvk_remap)
+        throw std::runtime_error("QSGW checkpoint Hartree BvK convention differs");
+    const auto images = hartree_images(context);
+    if (get<std::uint64_t>(input) != images.size())
+        throw std::runtime_error("QSGW checkpoint Hartree BvK images differ");
+    for (const auto value : images)
+        if (get<std::int32_t>(input) != value)
+            throw std::runtime_error("QSGW checkpoint Hartree BvK images differ");
+#ifdef LIBRPA_USE_LIBRI
+    if (get<std::uint32_t>(input) != HARTREE_TAG)
+        throw std::runtime_error(
+            "QSGW checkpoint Hartree kernel convention differs from the input");
+    const auto& v = *context.hartree_coulomb_q0;
+    require_equal(get<std::int32_t>(input), v.nr());
+    for (int i = 0; i != v.nr(); ++i)
+        for (int j = 0; j != v.nc(); ++j)
+        {
+            const auto z = get_complex(input);
+            require_equal(z.real(), v(i, j).real());
+            require_equal(z.imag(), v(i, j).imag());
+        }
+    std::uint64_t count = 0;
+    for (const auto& i : context.hartree_cs_raw->data_libri) count += i.second.size();
+    if (get<std::uint64_t>(input) != count)
+        throw std::runtime_error("QSGW checkpoint raw Hartree Cs support differs from the input");
+    for (const auto& i : context.hartree_cs_raw->data_libri)
+        for (const auto& jr : i.second)
+        {
+            require_equal(get<std::int32_t>(input), i.first);
+            require_equal(get<std::int32_t>(input), jr.first.first);
+            for (int r : jr.first.second) require_equal(get<std::int32_t>(input), r);
+            for (auto n : jr.second.shape)
+                if (get<std::uint64_t>(input) != n)
+                    throw std::runtime_error(
+                        "QSGW checkpoint Hartree tensor shape differs from input");
+            for (double value : *jr.second.data) require_equal(get_real(input), value);
+        }
+#else
+    throw std::runtime_error("Hartree checkpoint requires LibRI");
+#endif
+}
+
 void write_qsgw_checkpoint(const std::string& filename, const CheckpointContext& context,
                            const IterationSummary& summary, const MeanField& live,
                            const MeanField* band_live, const SpinKMatrixMap& hamiltonian,
@@ -420,9 +522,12 @@ void write_qsgw_checkpoint(const std::string& filename, const CheckpointContext&
     const std::uint32_t version =
         native_velocity ? (shifted_cut ? 11 : 10)
                         : (shifted_cut ? (live_velocity ? 9 : 8) : (live_velocity ? 5 : 3));
-    put(output, version);
+    // A +200 envelope identifies mesh-interpolated Hartree and binds its BvK convention.
+    const bool hartree = hartree_checkpoint(context);
+    put(output, version + (hartree ? 200u : 0u));
     put(output, CHECKPOINT_BYTE_ORDER);
     write_context(output, context);
+    if (hartree) write_hartree_context(output, context);
     if (live_velocity) write_velocity_context(output, context);
     put(output, std::int32_t(summary.iteration));
     for (const double value :
@@ -455,11 +560,17 @@ IterationSummary read_qsgw_checkpoint(const std::string& filename, const Checkpo
     input.read(magic, sizeof(magic));
     if (!input || std::string(magic, sizeof(magic)) != CHECKPOINT_MAGIC)
         throw std::runtime_error("Unsupported QSGW checkpoint format");
-    const auto version = get<std::uint32_t>(input);
+    const auto encoded_version = get<std::uint32_t>(input);
+    if (encoded_version >= 100 && encoded_version < 200)
+        throw std::runtime_error("QSGW checkpoint uses the previous direct-R Hartree path; start fresh");
+    const bool hartree = encoded_version >= 200;
+    const auto version = hartree ? encoded_version - 200 : encoded_version;
     if ((version < 1 || (version > 3 && version != 5 && version != 6 && version != 7 &&
                          version != 8 && version != 9 && version != 10 && version != 11)) ||
         get<std::uint32_t>(input) != CHECKPOINT_BYTE_ORDER)
         throw std::runtime_error("Unsupported QSGW checkpoint format or byte order");
+    if (hartree != hartree_checkpoint(context))
+        throw std::runtime_error("QSGW checkpoint Hartree feedback enable differs from the input");
     if (version == 6 || version == 7)
         throw std::runtime_error(
             "QSGW checkpoint versions 6/7 use the historical mode-2 cut; "
@@ -485,6 +596,7 @@ IterationSummary read_qsgw_checkpoint(const std::string& filename, const Checkpo
     if (live_velocity != live_velocity_checkpoint(context))
         throw std::runtime_error("QSGW checkpoint lacks the requested head/wing velocity contract");
     check_context(input, context, version);
+    if (hartree) check_hartree_context(input, context);
     if (live_velocity) check_velocity_context(input, context);
     IterationSummary summary;
     summary.iteration = get<std::int32_t>(input);

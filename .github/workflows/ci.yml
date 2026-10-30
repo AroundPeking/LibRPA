@@ -100,6 +100,12 @@ jobs:
             --work-dir workspace_qsgw_restart --ranks 4 --case h2o-band
           python verification/verify_qsgw_headwing.py --binary ../build_libri/chi0_main.exe \
             --work-dir workspace_qsgw_headwing --ranks 4 --case aims-rotate
+      - name: Hartree band projection, QP and restart control
+        run: |
+          source /opt/intel/oneapi/setvars.sh
+          cd regression_tests
+          python verification/verify_hartree_band.py --binary ../build_libri/chi0_main.exe \
+            --work-dir workspace_hartree_band --ranks 4
       - name: cRPA standalone, shared-GW and tracked current-HR trajectories
         run: |
           set -o pipefail
@@ -129,6 +135,8 @@ jobs:
             regression_tests/test_np4.log
             regression_tests/test_libri_np4.log
             regression_tests/test_libri_si_np1.log
+            regression_tests/workspace_hartree_band/comparison.json
+            regression_tests/workspace_hartree_band/*/run.log
             regression_tests/test_crpa_workflows.log
             regression_tests/workspace_crpa_workflows/comparison.json
             regression_tests/workspace_crpa_workflows/np*/*/run.log

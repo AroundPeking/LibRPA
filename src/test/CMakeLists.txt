@@ -167,7 +167,8 @@ foreach(target
     test_qsgw_effective_hamiltonian
     test_qsgw_occupation
     test_qsgw_convergence
-    test_qsgw_hamiltonian_cut)
+    test_qsgw_hamiltonian_cut
+    test_qsgw_symmetry_validation)
   config_test(${target} 1)
 endforeach()
 config_test(test_qsgw_fixed_basis_mpi 4)
@@ -184,4 +185,12 @@ if(LIBRPA_USE_LIBRI)
     add_test(NAME ${target}_mpi COMMAND mpirun -np 4 $<TARGET_FILE:${target}>)
   endforeach()
   config_test(test_crpa_model 1)
+endif()
+
+if(LIBRPA_LIBRI_HAS_HARTREE)
+  config_test(test_hartree 1)
+  add_test(NAME test_hartree_mpi2 COMMAND mpirun -np 2 $<TARGET_FILE:test_hartree>)
+  add_test(NAME test_hartree_mpi4 COMMAND mpirun -np 4 $<TARGET_FILE:test_hartree>)
+  set_tests_properties(test_hartree test_hartree_mpi2 test_hartree_mpi4
+    PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1;MKL_NUM_THREADS=1;OPENBLAS_NUM_THREADS=1" TIMEOUT 180)
 endif()

@@ -21,8 +21,13 @@ DriverParams::DriverParams():
     use_spinor_wfc(false),
     prefix_lri_coeff("Cs_data"),
     prefix_lri_coeff_shrink("Cs_shrinked_data"),
+    prefix_lri_coeff_hartree(""),
     prefix_shrink_sinvS("shrink_sinvS_"),
     prefix_coul_full("coulomb_mat"),
+    prefix_coul_hartree(""),
+    hartree_fn_reference(""),
+    hartree_reference_scale(0.5),
+    hartree_check_tolerance(-1.0),
     prefix_sternheimer_chi0("v1_sternheimer_chi0_iq_"),
     fn_sternheimer_qpoints(""),
     fn_sternheimer_partial_manifest(""),
@@ -80,6 +85,7 @@ DriverParams::DriverParams():
     qsgw_cut_mode(0),
     qsgw_cut_shift_ha(2.0 / 27.211386245988),
     qsgw_write_iteration_matrices(false),
+    qsgw_update_hartree(true),
     qsgw_output_qp(true),
     qsgw_export_hamiltonian_for_pyatb(true),
     qsgw_headwing_velocity("reference"),
@@ -161,8 +167,11 @@ std::string DriverParams::format()
             normal_pair(input_dir),
             normal_pair(prefix_lri_coeff),
             normal_pair(prefix_lri_coeff_shrink),
+            normal_pair(prefix_lri_coeff_hartree),
             normal_pair(prefix_shrink_sinvS),
             normal_pair(prefix_coul_full),
+            normal_pair(prefix_coul_hartree),
+            normal_pair(hartree_fn_reference),
             normal_pair(prefix_sternheimer_chi0),
             normal_pair(fn_sternheimer_qpoints),
             normal_pair(fn_sternheimer_partial_manifest),
@@ -218,6 +227,11 @@ std::string DriverParams::format()
         ss << "option_dielect_func_requested = 6" << std::endl;
         ss << "option_dielect_func_effective = 3" << std::endl;
     }
+    if (normalized_task == "hartree")
+    {
+        ss << "hartree_reference_scale = " << hartree_reference_scale << '\n';
+        ss << "hartree_check_tolerance = " << hartree_check_tolerance << '\n';
+    }
     if (normalized_task == "g0w0" || normalized_task == "g0w0_band")
     {
         ss << "g0w0_headwing_velocity = " << g0w0_headwing_velocity << std::endl;
@@ -254,6 +268,7 @@ std::string DriverParams::format()
            << qsgw_convergence_tolerance_ev << std::endl;
         ss << "qsgw_write_iteration_matrices = " << std::boolalpha
            << qsgw_write_iteration_matrices << std::endl;
+        ss << "qsgw_update_hartree = " << std::boolalpha << qsgw_update_hartree << std::endl;
         ss << "qsgw_output_qp = " << std::boolalpha << qsgw_output_qp << std::endl;
         ss << "qsgw_export_hamiltonian_for_pyatb = " << std::boolalpha
            << qsgw_export_hamiltonian_for_pyatb << std::endl;

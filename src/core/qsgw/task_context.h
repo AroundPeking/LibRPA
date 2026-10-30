@@ -41,6 +41,12 @@ struct TaskContext
     TFGrids& tfg;
     velocity_matrix_t& velocity_matrix;
 
+    const AtomicBasis& basis_aux;
+    const AtomicBasis& basis_aux_shrink;
+    const BasisConvention& basis_convention;
+    // The API owner handles dense or k-BLACS wavefunctions and MPI ownership.
+    std::function<std::vector<Matz>()> build_hartree_density;
+
     std::function<void()> invalidate_compute_objects;
     std::function<void(int, int, int, int, int)> initialize_scf_dimension;
     std::function<void(const LibrpaOptions&)> initialize_tfgrids;

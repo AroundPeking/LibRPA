@@ -6,6 +6,7 @@
 
 #include "task_context.h"
 #include "../meanfield_mpi.h"
+#include "../ri.h"
 #include "headwing_velocity.h"
 #include "librpa_options.h"
 #include "task_extension.h"
@@ -22,6 +23,9 @@ struct TaskControls
     double qsgw_cut_shift_ha = 2.0 / 27.211386245988;
     bool qsgw_write_iteration_matrices = false, qsgw_output_qp = true;
     bool qsgw_export_hamiltonian_for_pyatb = true;
+    // Bare 3D q0 feedback on a Gamma-containing full regular mesh, native
+    // translation-only Bloch gauge (bloch_ratom=0), with unwrapped Cs.
+    bool qsgw_update_hartree = true;
     std::string qsgw_headwing_velocity = "reference";
     std::string qsgw_restart_file = "none", qsgw_checkpoint_file = "qsgw_checkpoint.bin";
     double qsgw_convergence_tolerance_ev = 1.0e-4;
@@ -40,7 +44,8 @@ enum class OutputKind
     ExxBand,
     QsgwBand,
     Hamiltonian,
-    HeadHamiltonian
+    HeadHamiltonian,
+    Hartree
 };
 struct TaskOutput
 {
@@ -55,6 +60,8 @@ struct TaskInput
     SpinKMatrixMap vxc, vxc_band;
     VxcBasis vxc_basis = VxcBasis::State;
     std::optional<HeadwingAoOperators> ao_operators;
+    std::optional<Matz> hartree_coulomb_q0;
+    std::optional<Cs_LRI> hartree_cs_raw;
     double inplane_area_bohr2 = 0.0, auxiliary_monopole_norm_squared = 0.0;
 };
 class Task

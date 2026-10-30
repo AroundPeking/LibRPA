@@ -134,6 +134,7 @@ def main():
     fixtures = Path(__file__).resolve().parents[1] / "testcases"
     controls = {
         "task": "qsgw", "qsgw_min_iter": "2", "qsgw_max_iter": "2",
+        "qsgw_update_hartree": "false",  # Fixed-Hartree control; no bare metric in this model.
         "qsgw_cut_mode": "0", "qsgw_headwing_velocity": "current_hr",
         "qsgw_write_iteration_matrices": "true", "qsgw_output_qp": "true",
         "use_fullcoul_eps": "true", "use_fullcoul_wc": "true",

@@ -2,6 +2,16 @@
 
 This folder contains regression test cases used to verify LibRPA features.
 
+The LibRI suite includes two ABACUS H2 cases: standalone Hartree compares the
+complete complex AO matrix on the k-grid, and QSGW Hartree feedback compares
+the AO and KS corrections, spectra and QP energies across two updates. Both use the same
+regression runner and reference comparisons as the EXX cases. Their finite
+input data and reference snapshots are not material-convergence benchmarks.
+`verification/verify_hartree_band.py` additionally constructs a finite SciPy path
+control from the same H2 H(R)/S(R) (with zero path Vxc), runs actual grid/path
+GW/QSGW updates, and compares Hartree path projection, spectra, QP roots, MPI
+and split restart. The generated path input is not an ABACUS NSCF result.
+
 The LibRI CI also runs `verification/verify_qsgw_restart.py --case h2o-band` and
 `verification/verify_qsgw_headwing.py --case aims-rotate` with four MPI ranks. These reuse
 the bundled datasets to compare three continuous updates with a one-update

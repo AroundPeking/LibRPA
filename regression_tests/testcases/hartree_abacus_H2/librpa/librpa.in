@@ -1,0 +1,13 @@
+task = hartree
+input_preset = abacus-legacy
+input_dir = ../dataset
+version_coul_reader = 1
+version_lri_reader = 1
+prefix_lri_coeff = v1_Cs_data_
+prefix_coul_hartree = v1_coulomb_hartree_iq_
+parallel_routing = libri
+use_shrink_abfs = false
+use_kpara_scf_eigvec = false
+cs_threshold = 0
+vq_threshold = 0
+output_level = info
