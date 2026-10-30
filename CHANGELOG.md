@@ -4,44 +4,180 @@
 
 ### Breaking changes
 
+- Replaced `task = qsgw_band` with `task = qsgw` for grid and band-path
+  calculations. Used band-path input metadata to select the optional band channel
+  ([#67](https://github.com/AESM-Group/LibRPA/pull/67)).
+- Renamed `qsgw_band0_*` controls to `qsgw_unoccupied_keep`, `qsgw_cut_mode`,
+  and `qsgw_cut_shift_ha`. Assigned the shifted-reference cut to mode 1 and rejected the former mode 2.
+  Changed the default cut shift to 2 eV. Kept explicit
+  `qsgw_cut_shift_ha` values in Hartree
+  ([#67](https://github.com/AESM-Group/LibRPA/pull/67)).
+- Enabled complete native real-space QSGW Hamiltonian export by default. Required
+  `qsgw_export_hamiltonian_for_pyatb = false` for inputs without matching
+  native ABACUS H(R), S(R), and r(R) files
+  ([#67](https://github.com/AESM-Group/LibRPA/pull/67)).
+- Enabled QSGW Hartree density feedback by default. Required dedicated
+  `prefix_coul_hartree` and `prefix_lri_coeff_hartree` inputs for this feature.
+  Kept fixed-Hartree calculations available through
+  `qsgw_update_hartree = false`
+  ([#73](https://github.com/AESM-Group/LibRPA/pull/73)).
+- Updated `input_preset = abacus` to current reader-v1 filenames and prefixes.
+  Kept older exports accessible through `abacus-legacy` or explicit filename overrides
+  ([#49](https://github.com/AESM-Group/LibRPA/pull/49)).
+- Removed the separate bundled `thirdparty/LibRI_GPU` tree and unified CPU/GPU
+  builds under `thirdparty/LibRI`. Used LibDDLA for CUDA and HIP tensor
+  contractions. Required external GPU-enabled LibRI headers to support
+  `__GPU_RI`, the DDLA backend, and `RI::LRI_Cal_Mode::GPU`.
+  Required LibRI and one GPU backend for `LIBRPA_USE_LIBRI_GPU`.
+  Kept CPU tensor contractions when this option is off
+  ([#76](https://github.com/AESM-Group/LibRPA/pull/76)).
 - Stopped installing the experimental `file_reader.hpp` and
   `librpa_file_reader.hpp` headers and the `librpa_file_reader` library. The
   headers include headers under `src/` and work only from a LibRPA source tree.
   Built `librpa_file_reader` as a static library with position-independent code,
-  so the installed driver does not depend on it at run time.
+  so the installed driver does not depend on it at run time
+  ([#78](https://github.com/AESM-Group/LibRPA/pull/78)).
 
 ### Added
 
-- Added `output_exx_mat_r` for binary real-space NAO EXX blocks, with MPI-independent
-  filenames and BCC He regression monitoring. EXX and Sigma_c share the
-  real-space block writer and checkpoint layout.
-
-- Documented the reader-v1 `librpa_2d_coulomb_head.txt` contract used by
-  strict-2D complete-Wc calculations.
-- Added a small serial/MPI regression for the strict-2D production Wc path.
-
+- Added experimental `task = crpa` for bare, partially screened, and fully
+  screened onsite interaction tensors, with independent response and local-orbital
+  spaces, band or orbital-projector response weights, and scalar/spinor support.
+  Added orbital-character and PDOS analysis, G0W0/QSGW coupling, and local-frame
+  tracking with QSGW checkpoint continuation. Extended
+  `option_dielect_func = 6` to native optical calculations in cRPA
+  ([#71](https://github.com/AESM-Group/LibRPA/pull/71)).
+- Extended experimental fixed-basis QSGW with checkpoint restart, per-update
+  quasiparticle solutions, and live same-grid analytic head/wing updates.
+  Added `option_dielect_func = 6` for current-HR QSGW velocities and a public
+  C/C++ task API available without the standalone driver. Added regression
+  checks for iteration and restart workflows
+  ([#67](https://github.com/AESM-Group/LibRPA/pull/67)).
+- Added experimental standalone periodic Hartree AO matrices through LibRI.
+  Limited standalone Hartree and QSGW Hartree feedback to a complete regular
+  Gamma-containing 3D SCF grid with `bloch_ratom = 0`. Required a dedicated
+  bare q=0 Coulomb metric with G=0 set to zero
+  ([#73](https://github.com/AESM-Group/LibRPA/pull/73)).
+- Added native optical velocities from H(R), S(R), and r(R), public velocity
+  preparation APIs, and driver preset `option_dielect_func = 6` for G0W0
+  analytic head/wing calculations. Added numerical checks for native velocities
+  ([#70](https://github.com/AESM-Group/LibRPA/pull/70)).
+- Added explicit `spin_symmetry` input and spatial/spin operation tables
+  for SOC symmetry restoration
+  ([#43](https://github.com/AESM-Group/LibRPA/pull/43)).
+- Added unitary/antiunitary magnetic reconstruction for SOC exchange, optical
+  head/wing calculations, and cRPA. Validated compatible states and
+  correlated subspaces
+  ([#72](https://github.com/AESM-Group/LibRPA/pull/72)).
+- Added experimental strict-2D analytic head/wing screening and Gamma-cell
+  RPA integration. Documented the reader-v1 `librpa_2d_coulomb_head.txt`
+  contract for complete Wc calculations. Aligned Gamma body, wing, and
+  Coulomb legs in the same eigenbasis and corrected Wc redistribution
+  ([#44](https://github.com/AESM-Group/LibRPA/pull/44)).
+- Added compact serial/MPI regressions for strict-2D complete Wc and
+  Delta-Sternheimer head/wing calculations
+  ([#49](https://github.com/AESM-Group/LibRPA/pull/49)).
+- Added experimental `task = sternheimer_rpa` for Delta-Sternheimer RPA input
+  and response reconstruction from aggregate or partial producer data, with
+  symmetry routes and external frequency grids. Kept the consumer-side v1
+  input format provisional
+  ([#45](https://github.com/AESM-Group/LibRPA/pull/45)).
+- Added s-subspace dielectric-head replacement (`option_dielect_func = 5`)
+  and analytic head/wing correction (`53`). Limited option `53` to the
+  ScaLAPACK Wc path for 3D G0W0 grid and band calculations
+  ([#64](https://github.com/AESM-Group/LibRPA/pull/64)).
+- Added `output_exx_mat_r` for binary real-space NAO EXX blocks, with
+  MPI-independent filenames. Reused the Sigma_c real-space block
+  writer and checkpoint layout for EXX
+  ([#48](https://github.com/AESM-Group/LibRPA/pull/48)).
 - Added `n_bands_exclude_chi0` and `n_bands_exclude_sigc` to independently
   exclude the lowest input bands from response and correlation self-energy
-  Green's functions. Both default to zero and leave EXX unchanged.
+  Green functions. Set both defaults to zero and left EXX unchanged
+  ([#41](https://github.com/AESM-Group/LibRPA/pull/41)).
+- Added optional explicit full-grid k-point mappings to the BZ input format
+  ([#53](https://github.com/AESM-Group/LibRPA/pull/53)).
+
+### Changed
+
+- Updated the design diagrams and added architecture views, with LaTeX and
+  PlantUML sources and build targets to regenerate the figures
+  ([#75](https://github.com/AESM-Group/LibRPA/pull/75)).
+- Removed the obsolete `gw_old` and `meanfield_old` source and header files
+  ([#77](https://github.com/AESM-Group/LibRPA/pull/77)).
+- Updated bundled LibRI to `a0661cb`
+  ([#74](https://github.com/AESM-Group/LibRPA/pull/74)).
+- Enabled CPU fine-grained locking when supported by the selected LibRI
+  headers
+  ([#50](https://github.com/AESM-Group/LibRPA/pull/50)).
+- Moved QSGW iteration state and checkpoint handling into the library core.
+  Kept input parsing and output formatting in the driver
+  ([#67](https://github.com/AESM-Group/LibRPA/pull/67)).
+- Strengthened regression comparisons to reject nonfinite results and expanded
+  symmetry, MPI, and input-contract checks
+  ([#63](https://github.com/AESM-Group/LibRPA/pull/63)).
 
 ### Fixed
 
-- Kept strict-2D Gamma body, wing, and Coulomb legs in the same eigenbasis,
-  aligned the MPI wing layout, and restored the returned Wc redistribution.
-
-- Applied `n_bands_sigc` to correlation self-energy Green functions in serial,
-  k-point/BLACS parallel, and symmetry-restored routes; rejected upper bounds
-  exceeding the number of input bands.
-
-- Applied the `n_bands_chi0` mask consistently in serial, k-point/BLACS
-  parallel, and symmetry-restored response Green-function construction.
-  Preserved k-parallel Green-function blocks in the atom-pair/R-tau routes
-  and zero-response frequency entries in the LibRI route.
-- Preserved one-sided imaginary-time self-energy contributions and handled
-  identically zero self-energy in analytic continuation when bands are excluded.
-
+- Fixed allocator cleanup in bundled LibRI for macOS
+  ([#76](https://github.com/AESM-Group/LibRPA/pull/76)).
+- Fixed driver test linking with MPI and math libraries in shared-library builds
+  ([#77](https://github.com/AESM-Group/LibRPA/pull/77)).
+- Used external frequency nodes directly for Delta-Sternheimer head/wing
+  calculations, avoiding redundant minimax-grid generation
+  ([#55](https://github.com/AESM-Group/LibRPA/pull/55)).
+- Corrected Gamma screening to subtract the retained Coulomb projector
+  after channel filtering. Added numerical checks for filtered-Coulomb screening
+  ([#70](https://github.com/AESM-Group/LibRPA/pull/70)).
+- Corrected distributed head/wing layouts and RPA log-determinant handling
+  ([#51](https://github.com/AESM-Group/LibRPA/pull/51)).
+- Corrected strict-2D Gamma-cell RPA integration by integrating the
+  trace-log radially
+  ([#62](https://github.com/AESM-Group/LibRPA/pull/62)).
+- Fixed Padé construction for zero or repeated samples using a checked
+  barycentric fallback that preserves the selected samples and Padé degree
+  class. Corrected scalar distributed matrix powers and rejected nonfinite
+  minimax grids and transform coefficients before use. Added numerical
+  checks for these paths
+  ([#70](https://github.com/AESM-Group/LibRPA/pull/70)).
+- Corrected SOC charge vertices and reversed Green-function buffers
+  ([#69](https://github.com/AESM-Group/LibRPA/pull/69)).
+- Corrected k-star wavefunction rotations and supercell symmetry handling
+  ([#54](https://github.com/AESM-Group/LibRPA/pull/54)).
+- Restored supercell q-star Coulomb reconstruction and ensured unique
+  Coulomb ownership across MPI ranks
+  ([#59](https://github.com/AESM-Group/LibRPA/pull/59)).
+- Corrected the operator transformation of real-space self-energy
+  ([#56](https://github.com/AESM-Group/LibRPA/pull/56)).
+- Restored occupations using per-IBZ k-point weights
+  ([#52](https://github.com/AESM-Group/LibRPA/pull/52)).
+- Canonicalized BvK k-point coordinates
+  ([#40](https://github.com/AESM-Group/LibRPA/pull/40)).
+- Handled empty local wavefunction blocks in scalar and spinor k-point/BLACS
+  calculations
+  ([#60](https://github.com/AESM-Group/LibRPA/pull/60)).
+- Rejected symmetry-reduced SCF k-grids when `use_symmetry_exx = false`
+  instead of producing incomplete exchange results
+  ([#68](https://github.com/AESM-Group/LibRPA/pull/68)).
+- Applied `n_bands_chi0` and `n_bands_sigc` to response and correlation
+  self-energy Green functions across serial and k-point/BLACS-parallel routes.
+  Rejected band upper bounds exceeding the input size. Preserved
+  k-parallel blocks, zero-response frequency entries,
+  and one-sided or zero self-energies when bands are excluded
+  ([#41](https://github.com/AESM-Group/LibRPA/pull/41)).
+- Adapted scalar and spinor symmetry restoration helpers to band masks
+  and cutoffs
+  ([#43](https://github.com/AESM-Group/LibRPA/pull/43)).
+- Fixed distributed Wc Hermitian completion and compressed auxiliary-basis
+  unfolding
+  ([#42](https://github.com/AESM-Group/LibRPA/pull/42)).
+- Fixed distributed Wc export scheduling to keep MPI collectives aligned
+  across ranks with different local frequency data
+  ([#43](https://github.com/AESM-Group/LibRPA/pull/43)).
 - Fixed out-of-bounds access in binary v1 LRI and Coulomb readers when input
-  files contain zero data blocks.
+  files contain zero data blocks
+  ([#39](https://github.com/AESM-Group/LibRPA/pull/39)).
+- Corrected the ABACUS preset Vxc filename
+  ([#53](https://github.com/AESM-Group/LibRPA/pull/53)).
 
 ## [0.8.0] - 2026-09-23
 
