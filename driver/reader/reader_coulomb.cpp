@@ -10,6 +10,7 @@
 #include <cassert>
 #include <cerrno>
 #include <complex>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -930,6 +931,113 @@ int detect_coulomb_reader_version(const string &dir_path, const string &vq_fpref
 
     throw std::logic_error("Failed to detect Coulomb reader version from " +
                            files.front());
+}
+
+HartreeCoulombQ0 read_hartree_coulomb_q0(ReaderContext &ctx, const std::string &dir_path,
+                                         const std::string &prefix, int reader_version,
+                                         const bool use_shrink_basis)
+{
+    if (prefix.empty())
+        throw std::invalid_argument("A dedicated Hartree metric prefix is required");
+    if (reader_version < 0) reader_version = detect_coulomb_reader_version(dir_path, prefix);
+    const auto &basis = target_coulomb_basis(ctx, use_shrink_basis);
+    if (basis.nb_total == 0 ||
+        basis.nb_total > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("Invalid Hartree auxiliary dimension");
+    int nspins, nkpoints, nstates, naos, nspinor;
+    librpa_get_meanfield_dimensions(ctx.h.get_c_handler(), 0, &nspins, &nkpoints, &nstates,
+                                     &naos, &nspinor);
+    std::vector<double> fractional_k(static_cast<std::size_t>(nkpoints) * 3);
+    librpa_get_crpa_kgrid(ctx.h.get_c_handler(), nkpoints, fractional_k.data());
+    int iq_gamma = -1;
+    for (int k = 0; k < nkpoints; ++k)
+    {
+        const auto offset = 3 * k;
+        if (std::abs(fractional_k[offset]) +
+                std::abs(fractional_k[offset + 1]) +
+                std::abs(fractional_k[offset + 2]) <
+            1.0e-10)
+            iq_gamma = k;
+    }
+    if (iq_gamma < 0)
+        throw std::invalid_argument("Hartree metric input requires a Gamma-centred SCF grid");
+    HartreeCoulombQ0 result;
+    result.dimension = static_cast<int>(basis.nb_total);
+    const auto n = basis.nb_total;
+    result.values.resize(n * n);
+    const auto files = librpa_int::discover_files_with_prefix(dir_path, prefix);
+    if (files.empty())
+        throw std::runtime_error("No Hartree metric files found with prefix " + prefix);
+    bool found_gamma = false;
+    if (reader_version == 1)
+    {
+        std::vector<std::size_t> offsets(basis.n_atoms + 1);
+        for (std::size_t atom = 0; atom < basis.n_atoms; ++atom)
+            offsets[atom + 1] = offsets[atom] + basis[atom];
+        std::set<std::pair<std::size_t, std::size_t>> seen;
+        for (const auto &path : files)
+        {
+            CoulombV1File file(path);
+            validate_coulomb_v1_basis(file, basis);
+            if (file.iq - 1 != iq_gamma) continue;
+            found_gamma = true;
+            for (std::size_t I = 0; I < basis.n_atoms; ++I)
+                for (std::size_t J = I; J < basis.n_atoms; ++J)
+                {
+                    const auto block = read_coulomb_v1_atom_pair(file, I, J);
+                    if (block.empty()) continue;  // legal omitted zero blocks
+                    const bool duplicate = !seen.emplace(I, J).second;
+                    for (std::size_t i = 0; i < basis[I]; ++i)
+                        for (std::size_t j = 0; j < basis[J]; ++j)
+                        {
+                            const auto value = block[i * basis[J] + j];
+                            auto &target = result.values[(offsets[I] + i) * n + offsets[J] + j];
+                            if (duplicate &&
+                                std::abs(target - value) >
+                                    1.0e-11 * std::max({1.0, std::abs(target), std::abs(value)}))
+                                throw std::runtime_error(
+                                    "Conflicting duplicate Hartree metric atom-pair blocks");
+                            target = value;
+                            if (I != J)
+                                result.values[(offsets[J] + j) * n + offsets[I] + i] =
+                                    std::conj(value);
+                        }
+                }
+        }
+    }
+    else if (reader_version == 0)
+    {
+        std::map<int, librpa_int::ComplexMatrix> matrices;
+        for (const auto &path : files)
+        {
+            if (!is_legacy_coulomb_filename(path.substr(path.find_last_of('/') + 1), prefix))
+                continue;
+            const auto status =
+                handle_Vq_full_file(path, matrices, check_coulomb_file_binary(path));
+            if (status != 0)
+                throw std::runtime_error("Failed to read Hartree metric " + path + ": code " +
+                                         std::to_string(status));
+        }
+        const auto gamma = matrices.find(iq_gamma);
+        if (gamma != matrices.end())
+        {
+            if (gamma->second.nr != result.dimension || gamma->second.nc != result.dimension)
+                throw std::runtime_error(
+                    "Hartree metric dimension differs from selected auxiliary basis");
+            found_gamma = true;
+            for (std::size_t i = 0; i < n; ++i)
+                for (std::size_t j = 0; j < n; ++j) result.values[i * n + j] = gamma->second(i, j);
+        }
+    }
+    else
+        throw std::invalid_argument("Unknown Hartree Coulomb reader version " +
+                                    std::to_string(reader_version));
+    if (!found_gamma)
+        throw std::runtime_error("Dedicated Hartree metric contains no Gamma q=0 matrix");
+    for (const auto value : result.values)
+        if (!std::isfinite(value.real()) || !std::isfinite(value.imag()))
+            throw std::runtime_error("Hartree metric contains a nonfinite value");
+    return result;
 }
 
 size_t read_Vq_full(ReaderContext &ctx, const string &dir_path, const string &vq_fprefix, bool is_cut_coulomb,

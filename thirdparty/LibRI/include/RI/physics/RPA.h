@@ -27,10 +27,10 @@ public:
 	using Tatom_pos = std::array<double,Ndim>;		// tmp
 
 	void set_parallel(
-		const MPI_Comm &mpi_comm,
-		const std::map<TA,Tatom_pos> &atoms_pos,
-		const std::array<Tatom_pos,Ndim> &latvec,
-		const std::array<Tcell,Ndim> &period);
+		const MPI_Comm &mpi_comm_in,
+		const std::map<TA,Tatom_pos> &atoms_pos_in,
+		const std::array<Tatom_pos,Ndim> &latvec_in,
+		const std::array<Tcell,Ndim> &period_in);
 
 	void set_symmetry(
 		const bool flag_symmetry,
@@ -71,6 +71,11 @@ public:
 		bool Gs_neg=false;
 	};
 	Flag_Finish flag_finish;
+
+	MPI_Comm mpi_comm;
+	std::map<TA,Tatom_pos> atoms_pos;
+	std::array<Tatom_pos,Ndim> latvec;
+	std::array<Tcell,Ndim> period;
 };
 
 }

@@ -5,7 +5,10 @@
 #include "librpa_enums.h"
 #include "librpa_options.h"
 
+#include <memory>
+
 // Internal headers
+#include "../core/dielecmodel.h"
 #include "dataset.h"
 
 namespace librpa_int
@@ -22,6 +25,7 @@ void initialize_ds_atpairs_local(Dataset &ds, LibrpaParallelRouting routing);
 
 // Initialize response function component
 void initialize_ds_chi0(Dataset &ds, const LibrpaOptions &opts);
+void initialize_ds_chi0_qstar(Dataset &ds, const LibrpaOptions &opts);
 
 // Initialize EXX component
 void initialize_ds_exx(Dataset &ds, const LibrpaOptions &opts);
@@ -36,7 +40,14 @@ bool resolve_use_symmetry_exx(const LibrpaOptions &opts, const PeriodicBoundaryD
 // Initialize G0W0 component
 void initialize_ds_g0w0(Dataset &ds, const LibrpaOptions &opts);
 
-// Initialize analytic dielectric head/wing component from Dataset::velocity_matrix.
+// Build a fresh analytic head/wing from the Dataset, optionally excluding
+// weighted band pairs. Does not change Dataset::p_headwing or its output snapshots.
+// The returned object borrows Dataset inputs, which must outlive it.
+std::unique_ptr<diele_func> make_analytic_headwing(Dataset &ds, const LibrpaOptions &opts,
+                                                   bool need_wing,
+                                                   const HeadwingBandSelection *excluded = nullptr);
+
+// Initialize/reuse the ordinary GW head/wing cache and its output snapshots.
 void initialize_ds_headwing(Dataset &ds, const LibrpaOptions &opts, bool need_wing);
 
 void initialize_symmetry_context(Dataset &ds, bool build_shell_rotations);

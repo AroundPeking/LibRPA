@@ -5,6 +5,8 @@
  * @date      2024-04-23
  */
 #pragma once
+#include <optional>
+#include <utility>
 #include <vector>
 
 #include "../utils/base_utility.h"
@@ -33,11 +35,35 @@ public:
     const std::vector<cplxdb> &get_source_data() const { return source_data; };
 };
 
+// Barycentric Padé interpolation of the supplied selected samples, with type
+// [floor((N-1)/2) / floor(N/2)]. It can represent zero samples directly.
+class AnalyContPadeBarycentric : public AnalyCont
+{
+private:
+    std::vector<int> rational_supports;
+    std::vector<std::complex<long double>> rational_weights;
+    long double rational_x_scale = 1.0L;
+    long double rational_y_scale = 1.0L;
+    int rational_anchor = -1;
+
+    bool initialize_rational();
+    std::pair<cplxdb, cplxdb> evaluate_rational(const cplxdb &x) const;
+
+public:
+    AnalyContPadeBarycentric(const std::vector<cplxdb> &xs, const std::vector<cplxdb> &data);
+
+    cplxdb get(const cplxdb &x) const override;
+    cplxdb get_derivative(const cplxdb &x) const;
+};
+
+// Thiele reciprocal differences, with explicit delegation to the barycentric
+// implementation when construction cannot produce a valid finite fraction.
 class AnalyContPade: public AnalyCont
 {
 private:
     int n_pars;
     std::vector<cplxdb> par_y;
+    std::optional<AnalyContPadeBarycentric> barycentric_fallback;
 
 public:
     AnalyContPade(int n_pars_in,

@@ -79,8 +79,13 @@ void Parallel_LRI_Equally<TA,Tcell,Ndim,Tdata>::set_atoms_loop3(
 		switch(label)
 		{
 			case Label::Aab_Aab::a01b01_a01b01:
+			  #ifdef __GPU_RI
+				atoms.a01 = atoms_split_list1.first;
+				atoms.b2 = atoms_split_list1.second[0];
+			  #else
 				atoms.a2  = atoms_split_list2[0];
 				atoms.b01 = atoms_split_list2[1];
+			  #endif
 				break;
 			case Label::Aab_Aab::a01b01_a2b01:
 				atoms.a01 = atoms_split_list1.first;

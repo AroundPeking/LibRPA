@@ -26,6 +26,14 @@
 namespace RI
 {
 
+enum class LRI_Cal_Mode {
+	CPU,
+	CPU_fine_grained_lock,
+	#ifdef __GPU_RI
+	GPU,
+	#endif
+};
+
 template<typename TA, typename Tcell, std::size_t Ndim, typename Tdata>
 class LRI
 {
@@ -59,10 +67,29 @@ public:
 	void free_tensors_map2(
 		const std::string &save_name);
 
+	LRI_Cal_Mode cal_mode = LRI_Cal_Mode::CPU;
+
 	void cal_loop3(
 		const std::vector<Label::ab_ab> &labels,
 		std::map<TA, std::map<TAC, Tensor<Tdata>>> &Ds_result,
-		const double fac_add_Ds = 1.0);
+		const Tdata fac_add_Ds = Tdata(1.0));
+
+	void cal_loop3_CPU(
+		const std::vector<Label::ab_ab> &labels,
+		std::map<TA, std::map<TAC, Tensor<Tdata>>> &Ds_result,
+		const Tdata fac_add_Ds = Tdata(1.0));
+
+	void cal_loop3_CPU_fine_grained_lock(
+		const std::vector<Label::ab_ab> &labels,
+		std::map<TA, std::map<TAC, Tensor<Tdata>>> &Ds_result,
+		const Tdata fac_add_Ds = Tdata(1.0));
+	
+	#ifdef __GPU_RI
+	void cal_loop3_GPU(
+		const std::vector<Label::ab_ab> &labels,
+		std::map<TA, std::map<TAC, Tensor<Tdata>>> &Ds_result,
+		const Tdata fac_add_Ds = Tdata(1.0));
+	#endif
 
 public:
 	std::shared_ptr<Parallel_LRI<TA,Tcell,Ndim,Tdata>>
@@ -93,4 +120,9 @@ public:		// private:
 
 #include "LRI.hpp"
 #include "LRI-set.hpp"
-#include "LRI-cal_loop3.hpp"
+#include "LRI-cal_loop3_CPU.hpp"
+#include "LRI-cal_loop3_CPU_fine_grained_lock.hpp"
+
+#ifdef __GPU_RI
+#include "LRI-cal_loop3_GPU.hpp"
+#endif

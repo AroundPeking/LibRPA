@@ -1,0 +1,39 @@
+INPUT_PARAMETERS
+suffix hartree_h2
+pseudo_dir .
+orbital_dir .
+calculation scf
+ntype 1
+nspin 1
+basis_type lcao
+ks_solver scalapack_gvx
+gamma_only 0
+nbands 10
+dft_functional pbe
+ecutwfc 40
+scf_thr 1e-10
+scf_nmax 100
+symmetry -1
+smearing_method gaussian
+smearing_sigma 1e-4
+mixing_type broyden
+mixing_beta 0.3
+mixing_gg0 0
+out_mat_h_vh 1
+out_mat_hs 1 16
+out_mat_hs2 1 16
+out_chg 1
+rpa 1
+out_librpa_reader_version 1
+out_ri_cv 1
+exx_pca_threshold 1e-4
+shrink_abfs_pca_thr -1
+shrink_lu_inv_thr 1e-8
+exx_singularity_correction massidda
+exx_ccp_rmesh_times 2
+rpa_ccp_rmesh_times 2
+exx_real_number 1
+out_mat_r 1 16
+out_mat_xc 1
+out_wfc_lcao 2
+out_ndigits 16

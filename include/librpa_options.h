@@ -238,7 +238,8 @@ typedef struct
     //! BvK remapping convention for band interpolation.
     /*!
      * Available values:
-     * - 0: map each atom-pair R to one nearest BvK image.
+     * - 0: map each atom-pair R to one nearest BvK image; equally split
+     *   inconsistent opposite-pair ties to preserve the adjoint relation.
      * - 1: Wigner-Seitz remapping; split over all nearest BvK images at equal distance.
      *
      * @par Default
@@ -471,6 +472,13 @@ typedef struct
      *   head direction, projected onto the retained Coulomb space and normalized.
      *   Requires auxiliary l-shell metadata and the ScaLAPACK Wc path.
      *   Supported for three-dimensional G0W0 and G0W0 band calculations only.
+     *
+     * Standalone G0W0/cRPA/QSGW drivers also accept preset 6. G0W0 differentiates
+     * original H/S/r; QSGW differentiates its complete current native-baseline
+     * Hamiltonian. Both resolve to numerical option 3 for analytic head and wing.
+     * This requires replace_w_head and use_scalapack_gw_wc, and use_pyatb=false.
+     * API callers supply velocity or numerical H/S/r blocks and select 3/4;
+     * they must not pass driver preset 6 into a numerical options struct.
      *
      * @par Default
      * 0
@@ -708,6 +716,52 @@ void librpa_set_output_dir(LibrpaOptions *opts, const char *output_dir);
  * @param[in]     restart_from_dir Path to directory containing restart files. Empty uses output_dir.
  */
 void librpa_set_restart_from_dir(LibrpaOptions *opts, const char *restart_from_dir);
+
+/** QSGW runtime controls. Energies are Hartree unless a field says eV.
+ * String and numeric values are copied when the task is created.
+ */
+typedef struct
+{
+    int min_iterations, max_iterations, unoccupied_keep, cut_mode;
+    /** Convergence requires min_iterations and a maximum eigenvalue step below
+     * convergence_tolerance_ev; the reported Hamiltonian residual is not part
+     * of the stopping gate. */
+    double mixing_beta, cut_shift_ha, convergence_tolerance_ev;
+    const char *mixer, *velocity_mode, *restart_file, *checkpoint_file;
+    int output_matrices, output_qp, export_hamiltonian;
+    int state_low, state_high, interband_velocity;
+    /** Request expansion of IBZ SCF states to the full grid during preparation.
+     * Default 0. IBZ input is also expanded when export_hamiltonian or
+     * update_hartree is enabled, or when analytic head/wing uses
+     * velocity_mode="current_hr"; setting this field to 0 does not suppress
+     * those cases. Expansion requires EXX/GW/RPA
+     * symmetry, complete k stars and valid symmetry operations, including
+     * explicit magnetic spin operations for SOC. K weights are normalized
+     * star multiplicities; the source mean-field occupations must carry the
+     * same k weights. See librpa_set_wg_ekb_efermi for its input convention. */
+    int expand_ibz;
+    /** Rebuild the Hartree density difference at each update. Default on.
+     * Requires dedicated bare q=0 metric and full-precision RI inputs. */
+    int update_hartree;
+} LibrpaQsgwControls;
+
+/** Defaults: min/max=1/10, unoccupied_keep=10, uncut, mixer=none,
+ * beta=0.2 (used only for single-k linear mixing), shift=2 eV,
+ * convergence=1e-4 eV, reference velocity, QP/HR outputs on, matrices off,
+ * restart=none and checkpoint=qsgw_checkpoint.bin, Hartree updates on.
+ * Indices are zero-based. */
+void librpa_init_qsgw_controls(LibrpaQsgwControls *);
+
+/** Controls for the cRPA companion attached to a QSGW task.
+ * Initialize with librpa_init_qsgw_crpa_controls before assigning fields.
+ * Values and tracking_definition are copied by librpa_set_qsgw_crpa. */
+    typedef struct
+    {
+        int interval, track_orbitals, output_analysis;
+        const char* tracking_definition;
+    } LibrpaQsgwCrpaControls;
+
+    void librpa_init_qsgw_crpa_controls(LibrpaQsgwCrpaControls* controls);
 
 #ifdef __cplusplus
 }

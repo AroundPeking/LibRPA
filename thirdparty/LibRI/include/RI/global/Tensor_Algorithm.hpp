@@ -10,7 +10,7 @@
 
 #include <string>
 #include <stdexcept>
-#define LAPACK_INFO_CHECK(x) if(const int info=(x))	throw std::runtime_error("info="+std::to_string(info)+".\n"+std::string(__FILE__)+" line "+std::to_string(__LINE__));
+#define LAPACK_INFO_CHECK_RI(x) if(const int info=(x))	throw std::runtime_error("info="+std::to_string(info)+".\n"+std::string(__FILE__)+" line "+std::to_string(__LINE__));
 
 namespace RI
 {
@@ -53,8 +53,8 @@ namespace Tensor_Algorithm
 		assert(m.shape[0]==m.shape[1]);
 		const char uplo = paras.at("uplo").c_str()[0];
 
-		LAPACK_INFO_CHECK(Lapack_Interface::potrf(uplo, m));
-		LAPACK_INFO_CHECK(Lapack_Interface::potri(uplo, m));
+		LAPACK_INFO_CHECK_RI(Lapack_Interface::potrf(uplo, m));
+		LAPACK_INFO_CHECK_RI(Lapack_Interface::potri(uplo, m));
 		copy_matrix_triangle(uplo, m);
 		return m;
 	}
@@ -74,7 +74,7 @@ namespace Tensor_Algorithm
 		const char uplo = paras.at("uplo").c_str()[0];
 
 		std::vector<T_real> eigen_values(m.shape[0]);
-		LAPACK_INFO_CHECK(Lapack_Interface::heev('V', uplo, m, eigen_values));
+		LAPACK_INFO_CHECK_RI(Lapack_Interface::heev('V', uplo, m, eigen_values));
 
 		T_real threshold = 0;
 		if(paras.find("absolute_eigen_value_threshold")!=paras.end())
@@ -130,4 +130,4 @@ namespace Tensor_Algorithm
 
 }
 
-#undef LAPACK_INFO_CHECK
+#undef LAPACK_INFO_CHECK_RI

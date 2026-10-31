@@ -6,7 +6,6 @@
 #pragma once
 
 #include "Lapack-Fortran.h"
-#include "Blas_Interface.h"
 
 #include <vector>
 #include <string>
@@ -17,7 +16,7 @@
 #include <mkl_trans.h>
 #endif
 
-#define LAPACK_INFO_CHECK(x) if(const int info=(x))	throw std::runtime_error("info="+std::to_string(info)+".\n"+std::string(__FILE__)+" line "+std::to_string(__LINE__));
+#define LAPACK_INFO_CHECK_RI(x) if(const int info=(x))	throw std::runtime_error("info="+std::to_string(info)+".\n"+std::string(__FILE__)+" line "+std::to_string(__LINE__));
 
 namespace RI
 {
@@ -131,7 +130,7 @@ namespace Lapack_Interface
 	{
 		T work_tmp=100;
 		constexpr int minus_one = -1;
-		LAPACK_INFO_CHECK(syev(jobz, uplo, n, A, lda, W, &work_tmp, minus_one));		// get best lwork
+		LAPACK_INFO_CHECK_RI(syev(jobz, uplo, n, A, lda, W, &work_tmp, minus_one));		// get best lwork
 
 		const int lwork = work_tmp;
 		std::vector<T> WORK(std::max(1,lwork));
@@ -146,7 +145,7 @@ namespace Lapack_Interface
 
 		std::complex<T> work_tmp;
 		constexpr int minus_one = -1;
-		LAPACK_INFO_CHECK(heev(jobz, uplo, n, A, lda, W, &work_tmp, minus_one, RWORK.data()));		// get best lwork
+		LAPACK_INFO_CHECK_RI(heev(jobz, uplo, n, A, lda, W, &work_tmp, minus_one, RWORK.data()));		// get best lwork
 
 		const int lwork = std::real(work_tmp);
 		std::vector<std::complex<T>> WORK(std::max(1,lwork));
@@ -156,4 +155,4 @@ namespace Lapack_Interface
 
 }
 
-#undef LAPACK_INFO_CHECK
+#undef LAPACK_INFO_CHECK_RI

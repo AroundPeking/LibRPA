@@ -13,7 +13,7 @@
 #include <string>
 #include <stdexcept>
 
-#define MPI_CHECK(x) if((x)!=MPI_SUCCESS)	throw std::runtime_error(std::string(__FILE__)+" line "+std::to_string(__LINE__));
+#define MPI_CHECK_RI(x) if((x)!=MPI_SUCCESS)	throw std::runtime_error(std::string(__FILE__)+" line "+std::to_string(__LINE__));
 
 namespace RI
 {
@@ -52,7 +52,7 @@ namespace Split_Processes
 		}();
 
 		MPI_Wrapper::mpi_comm mc_split;
-		MPI_CHECK( MPI_Comm_split(
+		MPI_CHECK_RI( MPI_Comm_split(
 			mc, static_cast<int>(color_group), static_cast<int>(rank_mine), &mc_split() ) );
 		mc_split.flag_allocate = true;
 
@@ -106,4 +106,4 @@ namespace Split_Processes
 
 }
 
-#undef MPI_CHECK
+#undef MPI_CHECK_RI

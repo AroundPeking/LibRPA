@@ -329,6 +329,7 @@ module librpa_f03
          procedure :: set_ao_basis_aux_shrink => librpa_set_ao_basis_aux_shrink
          procedure :: set_basis_convention => librpa_set_basis_convention
          procedure :: set_symmetry_operations => librpa_set_symmetry_operations
+         procedure :: set_symmetry_spin_operations => librpa_set_symmetry_spin_operations
          procedure :: set_latvec_and_G => librpa_set_latvec_and_G
          procedure :: set_atoms => librpa_set_atoms
          procedure :: set_kgrids_kvec => librpa_set_kgrids_kvec
@@ -348,6 +349,7 @@ module librpa_f03
          procedure :: get_imaginary_frequency_grids => librpa_get_imaginary_frequency_grids
          procedure :: get_rpa_correlation_energy => librpa_get_rpa_correlation_energy
          procedure :: build_exx => librpa_build_exx
+         procedure :: compute_hartree_ao => librpa_compute_hartree_ao
          procedure :: get_exx_pot_kgrid => librpa_get_exx_pot_kgrid
          procedure :: get_exx_pot_band_k => librpa_get_exx_pot_band_k
          procedure :: build_g0w0_sigma => librpa_build_g0w0_sigma
@@ -668,6 +670,19 @@ contains
       call error_on_call("librpa_set_symmetry_operations")
    end subroutine librpa_set_symmetry_operations
 
+   !> @brief Set explicit magnetic operations; spin_u uses eight real/imag entries per operation.
+   subroutine librpa_set_symmetry_spin_operations(this, n_ops, row_conv, rotmats, trans, &
+         antiunitary, spin_u, spin_action_source, grey_group)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      integer, intent(in) :: n_ops, spin_action_source
+      logical, intent(in) :: row_conv, grey_group
+      integer, intent(in) :: rotmats(9, n_ops)
+      real(dp), intent(in), optional :: trans(3, n_ops), spin_u(8, n_ops)
+      integer, intent(in), optional :: antiunitary(n_ops)
+      call error_on_call("librpa_set_symmetry_spin_operations")
+   end subroutine librpa_set_symmetry_spin_operations
+
    !> @brief Set the direct and reciprocal lattice vectors
    !>
    !> Each column is a lattice/reciprocal lattice vector.
@@ -951,6 +966,18 @@ contains
       e = 0.0d0
       call error_on_call("librpa_get_rpa_correlation_energy")
    end function librpa_get_rpa_correlation_energy
+
+   !> Physical spin-summed periodic Hartree AO operator, in Hartree.
+   !> Collective; iks are one-based full-grid indices. The host must supply
+   !> a matched bare q=0 metric with an explicit electrostatic zero mode.
+   subroutine librpa_compute_hartree_ao(this, opts, iks, nao, vh)
+      implicit none
+      class(LibrpaHandler), intent(inout) :: this
+      type(LibrpaOptions), intent(inout) :: opts
+      integer, intent(in) :: iks(:), nao
+      complex(dp), intent(out) :: vh(nao, nao, size(iks))
+      call error_on_call("librpa_compute_hartree_ao")
+   end subroutine librpa_compute_hartree_ao
 
    !> @brief Build exact-exchange matrix in real space.
    !> @param[in,out] this  Handler.

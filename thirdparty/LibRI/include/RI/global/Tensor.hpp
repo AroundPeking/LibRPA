@@ -13,6 +13,7 @@
 #include <vector>
 #include <functional>
 #include <cassert>
+#include <iostream>
 #include <limits>
 
 namespace RI
@@ -33,7 +34,7 @@ Tensor<T>::Tensor (const Shape_Vector &shape_in)
 template<typename T>
 Tensor<T>::Tensor (const Shape_Vector &shape_in, std::shared_ptr<std::valarray<T>> data_in)
 {
-	assert( std::accumulate(shape_in.begin(), shape_in.end(), static_cast<std::size_t>(1), std::multiplies<std::size_t>() ) == data_in->size() );
+	assert( shape_in.get_shape_all() == data_in->size() );
 	this->shape = shape_in;
 	this->data = data_in;
 }
@@ -95,10 +96,18 @@ template<typename T1, typename T2>
 bool same_shape (const Tensor<T1> &t1, const Tensor<T2> &t2)
 {
 	if(t1.shape.size() != t2.shape.size())
+	{
+		std::cerr << "same_shape: ndim mismatch ("
+		          << t1.shape.size() << " vs " << t2.shape.size() << ")" << std::endl;
 		return false;
+	}
 	for(std::size_t ishape=0; ishape<t1.shape.size(); ++ishape)
 		if(t1.shape[ishape] != t2.shape[ishape])
+		{
+			std::cerr << "same_shape: dim[" << ishape << "] mismatch ("
+			          << t1.shape[ishape] << " vs " << t2.shape[ishape] << ")" << std::endl;
 			return false;
+		}
 	return true;
 }
 
@@ -179,6 +188,15 @@ Tensor<T> Tensor<T>::dagger() const
 	for (std::size_t i0 = 0; i0 < this->shape[0]; ++i0)
 		for (std::size_t i1 = 0; i1 < this->shape[1]; ++i1)
 			t(i1, i0) = std::conj((*this)(i0, i1));
+	return t;
+}
+
+template<typename T>
+Tensor<T> Tensor<T>::conjugate() const
+{
+	Tensor<T> t(this->shape);
+	for (std::size_t i = 0; i < this->data->size(); ++i)
+        (*t.data)[i] = Global_Func::get_conj((*this->data)[i]);
 	return t;
 }
 

@@ -17,7 +17,7 @@
 #include <string>
 #include <stdexcept>
 
-#define MPI_CHECK(x) if((x)!=MPI_SUCCESS)	throw std::runtime_error(std::string(__FILE__)+" line "+std::to_string(__LINE__));
+#define MPI_CHECK_RI(x) if((x)!=MPI_SUCCESS)	throw std::runtime_error(std::string(__FILE__)+" line "+std::to_string(__LINE__));
 
 namespace RI
 {
@@ -103,7 +103,7 @@ template<typename TA, typename TC, typename Tdata>
 std::map<TA,Tdata> Exx_Post_2D<TA,TC,Tdata>::reduce_force(
 	const std::map<TA,Tdata> &F_local) const
 {
-	MPI_CHECK( MPI_Barrier(this->mpi_comm) );
+	MPI_CHECK_RI( MPI_Barrier(this->mpi_comm) );
 	// add MPI_Barrier() to cover up an upresolved error.
 	// Error message:
 	// 		terminate called after throwing an instance of 'cereal::Exception'
@@ -123,4 +123,4 @@ std::map<TA,Tdata> Exx_Post_2D<TA,TC,Tdata>::reduce_force(
 
 }
 
-#undef MPI_CHECK
+#undef MPI_CHECK_RI

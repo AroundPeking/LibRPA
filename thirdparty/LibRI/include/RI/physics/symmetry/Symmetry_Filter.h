@@ -11,7 +11,7 @@
 #include <map>
 #include <set>
 
-#define NO_SEC_RETURN_TRUE if(this->irreducible_sector_.empty()) return true;
+#define NO_SEC_RETURN_TRUE_RI if(this->irreducible_sector_.empty()) return true;
 
 namespace RI
 {
@@ -28,7 +28,7 @@ namespace RI
 			:period(period_in), irreducible_sector_(irsec) {}
 		bool in_irreducible_sector(const TA& Aa, const TAC& Ab) const
 		{
-			NO_SEC_RETURN_TRUE;
+			NO_SEC_RETURN_TRUE_RI;
 			using namespace Array_Operator;
 			const Tab& ap = { Aa, Ab.first };
 			const auto ptr = this->irreducible_sector_.find(ap);
@@ -39,7 +39,7 @@ namespace RI
 		}
 		bool in_irreducible_sector(const TAC& Aa, const TAC& Ab) const
 		{
-			NO_SEC_RETURN_TRUE;
+			NO_SEC_RETURN_TRUE_RI;
 			using namespace Array_Operator;
 			const TC dR = (Ab.second - Aa.second) % this->period;
 			const std::pair<TA, TA> ap = { Aa.first, Ab.first };
@@ -51,7 +51,7 @@ namespace RI
 		}
 		bool is_Aa_in_irreducible_sector(const TA& Aa) const
 		{
-			NO_SEC_RETURN_TRUE;
+			NO_SEC_RETURN_TRUE_RI;
 			for (const auto& apRs : this->irreducible_sector_)
 				if (apRs.first.first == Aa)
 					return true;
@@ -59,7 +59,7 @@ namespace RI
 		}
 		bool is_Ab_in_irreducible_sector(const TA& Ab) const
 		{
-			NO_SEC_RETURN_TRUE;
+			NO_SEC_RETURN_TRUE_RI;
 			for (const auto& apRs : this->irreducible_sector_)
 				if (apRs.first.second == Ab)
 					return true;
@@ -81,4 +81,4 @@ namespace RI
 
 }
 
-#undef NO_SEC_RETURN_TRUE
+#undef NO_SEC_RETURN_TRUE_RI

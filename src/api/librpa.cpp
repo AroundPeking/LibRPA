@@ -11,9 +11,72 @@
 
 // Internal headers
 #include "../utils/error.h"
+#include "../mpi/collective_stage.h"
+#include "instance_manager.h"
 
 namespace librpa
 {
+
+QsgwTask Handler::create_qsgw_task(const Options& opts, const LibrpaQsgwControls& controls) const
+{
+    return QsgwTask(::librpa_create_qsgw_task(h_, &opts, &controls), ::librpa_delete_qsgw_task);
+}
+
+CrpaContinuedResult continue_crpa(const LibrpaCrpaResult* result,
+                                  const std::vector<std::complex<double>>& queries,
+                                  int n_parameters, double tolerance_ha)
+{
+    return CrpaContinuedResult(
+        ::librpa_continue_crpa(result, queries.size(),
+                               reinterpret_cast<const double*>(queries.data()), n_parameters,
+                               tolerance_ha),
+        ::librpa_delete_crpa_continued_result);
+}
+
+OrbitalResult Handler::analyze_orbitals(int nk, int nao, const std::vector<double>& overlap,
+                                        double tolerance) const
+{
+    const bool valid_size =
+        nk > 0 && nao > 0 && overlap.size() == 2 * static_cast<std::size_t>(nk) * nao * nao;
+    return OrbitalResult(
+        ::librpa_analyze_orbitals(h_, nk, nao, valid_size ? overlap.data() : nullptr, tolerance),
+        ::librpa_delete_orbital_result);
+}
+
+CrpaResult Handler::build_g0w0_sigma_crpa(const Options& opts, const LibrpaCrpaInput& input)
+{
+    return CrpaResult(::librpa_build_g0w0_sigma_crpa(h_, &opts, &input),
+                      ::librpa_delete_crpa_result);
+}
+
+CrpaResult Handler::compute_crpa_window(const Options& opts, const LibrpaCrpaInput& input) const
+{
+    return CrpaResult(::librpa_compute_crpa_window(h_, &opts, &input), ::librpa_delete_crpa_result);
+}
+
+CrpaResult Handler::compute_crpa_u_window(const Options& opts, const LibrpaCrpaInput& input) const
+{
+    return CrpaResult(::librpa_compute_crpa_u_window(h_, &opts, &input),
+                      ::librpa_delete_crpa_result);
+}
+
+CrpaResult Handler::prepare_crpa_model(const Options& opts, const LibrpaCrpaInput& input) const
+{
+    return CrpaResult(::librpa_prepare_crpa_model(h_, &opts, &input), librpa_delete_crpa_result);
+}
+
+std::array<std::complex<double>, 3> crpa_tensor_averages(
+    int n_orbitals, const std::vector<std::complex<double>>& tensor)
+{
+    if (n_orbitals <= 0 || tensor.size() != static_cast<std::size_t>(n_orbitals) * n_orbitals *
+                                                n_orbitals * n_orbitals)
+        throw LIBRPA_INVALID_ARGUMENT("incomplete cRPA tensor for orbital averages");
+    std::array<std::complex<double>, 3> result;
+    ::librpa_crpa_tensor_averages(n_orbitals, reinterpret_cast<const double*>(tensor.data()),
+                                  reinterpret_cast<double*>(result.data()));
+    return result;
+}
+
 
 /* Global environment functions */
 const char* get_build_info(void) { return ::librpa_get_build_info(); }
@@ -415,6 +478,18 @@ void Handler::reset_band_data()
     ::librpa_reset_band_data(this->h_);
 }
 
+void Handler::prepare_native_velocity(const Options& opts,
+                                      const LibrpaNativeVelocityInput* root_input,
+                                      bool prepare_optical)
+{
+    ::librpa_prepare_native_velocity(h_, &opts, root_input, prepare_optical ? 1 : 0);
+}
+
+OpticalResult Handler::get_optical_result() const
+{
+    return OpticalResult(::librpa_get_optical_result(h_), ::librpa_delete_optical_result);
+}
+
 /* Compute (build/get) functions */
 void Handler::get_imaginary_frequency_grids(const Options& opts, std::vector<double> &omegas, std::vector<double> &weights)
 {
@@ -434,6 +509,31 @@ LIBRPA_CPP_H_METHOD_DEF_WRAP_RET_WOPT(
 void Handler::build_exx(const Options &opts)
 {
     ::librpa_build_exx(this->h_, &opts);
+}
+
+std::vector<std::complex<double>> Handler::compute_hartree_ao(
+    const Options& opts, const std::vector<int>& iks_this, const int n_aos)
+{
+    const auto dataset = librpa_int::api::get_dataset_instance(h_);
+    std::vector<double> real, imag;
+    std::vector<std::complex<double>> result;
+    librpa_int::collective_all_stage(dataset->comm_h, "Hartree C++ output storage", [&]() {
+        if (n_aos <= 0 || n_aos != static_cast<int>(dataset->basis_wfc.nb_total) ||
+            iks_this.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            throw std::invalid_argument("Invalid Hartree AO dimensions or k-point count");
+        const auto n = static_cast<std::size_t>(n_aos);
+        if (n > std::numeric_limits<std::size_t>::max() / n ||
+            (!iks_this.empty() && n * n > std::numeric_limits<std::size_t>::max() / iks_this.size()))
+            throw std::invalid_argument("Hartree AO output size overflows");
+        const std::size_t size = iks_this.size() * n * n;
+        real.resize(size);
+        imag.resize(size);
+        result.resize(size);
+    });
+    ::librpa_compute_hartree_ao(h_, &opts, static_cast<int>(iks_this.size()), iks_this.data(),
+                               n_aos, real.data(), imag.data());
+    for (std::size_t i = 0; i < result.size(); ++i) result[i] = {real[i], imag[i]};
+    return result;
 }
 
 std::vector<double> Handler::get_exx_pot_kgrid(const Options& opts, const int n_spins,

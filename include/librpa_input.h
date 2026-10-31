@@ -10,8 +10,49 @@
 
 // C APIs
 #ifdef __cplusplus
+#define LIBRPA_INPUT_DEFAULT(value) = value
 extern "C" {
+#else
+#define LIBRPA_INPUT_DEFAULT(value)
 #endif
+
+    /** One dense real-space block, with interleaved complex values.
+     * translation is an integer lattice translation; row_major is zero or one.
+     * The caller owns values_ri and retains it until the collective call returns.
+     */
+    typedef struct
+    {
+        int translation[3];
+        const double* values_ri;
+        int row_major;
+    } LibrpaLocalizedBlock;
+
+    typedef struct
+    {
+        int dimension;
+        int n_blocks;
+        const LibrpaLocalizedBlock* blocks;
+    } LibrpaLocalizedOperator;
+
+    /** Original-H/S/r velocity in the loaded complete SCF eigenframe.
+     * Operators are supplied on handler rank zero only. Other ranks pass NULL.
+     * H is in Hartree, S dimensionless, and position/lattice lengths in Bohr.
+     * AO-spinor rows are AO-major, component-minor. Fourier phase is +i k.R.
+     * S and its derivative use Hermitian upper-triangle completion; position
+     * completion is r_ij=conj(raw_r_ji+i*dS_ji) for i>=j. These are numerical
+     * conventions, independent of a producer filename or input-file format.
+     * No SCF energies, occupations or coefficients are changed.
+     */
+    typedef struct
+    {
+        int n_spins;
+        const LibrpaLocalizedOperator* hamiltonian;
+        LibrpaLocalizedOperator overlap;
+        LibrpaLocalizedOperator position[3];
+        /** Required positive values only for strict-2D optical preparation. */
+        double inplane_area_bohr2;
+        double auxiliary_monopole_norm_squared;
+    } LibrpaNativeVelocityInput;
 
 /**
  * @brief Set meanfield wavefunction dimension.
@@ -22,7 +63,7 @@ extern "C" {
  * @param[in] nbasis   Number of atomic basis functions.
  * @param[in] nspinor  Number of spin components per wavefunction
  */
-void librpa_set_scf_dimension(LibrpaHandler* h, int nspins, int nkpts, int nstates, int nbasis, int nspinor = 1);
+void librpa_set_scf_dimension(LibrpaHandler* h, int nspins, int nkpts, int nstates, int nbasis, int nspinor LIBRPA_INPUT_DEFAULT(1));
 
 /**
  * @brief Set occupation numbers, eigenvalues, and Fermi level of meanfield input.
@@ -33,6 +74,11 @@ void librpa_set_scf_dimension(LibrpaHandler* h, int nspins, int nkpts, int nstat
  * @param[in] wg       Occupation numbers (size: nspins * nkpts * nstates).
  * @param[in] ekb      Eigenvalues (size: same as wg).
  * @param[in] efermi   Fermi level.
+ *
+ * The setter divides wg by nkpts. For an IBZ source with nkpts=N_IBZ,
+ * N_full full-grid points and star size m_i, supply
+ * wg_i = N_IBZ * (m_i / N_full) * f_i, where f_i is the occupation in the
+ * usual spin convention. The stored occupation then carries weight m_i/N_full.
  */
 void librpa_set_wg_ekb_efermi(LibrpaHandler* h, int nspins, int nkpts, int nstates,
                               const double* wg, const double* ekb, double efermi);
@@ -99,7 +145,7 @@ void librpa_set_wfc_spinor_packed(LibrpaHandler* h, int ik, int nstates_local,
  * @param[in] l_shells  Optional concatenated angular momenta, grouped by atom.
  */
 void librpa_set_ao_basis_wfc(LibrpaHandler* h, int natoms, const size_t* nbs_wfc,
-                             const int* nshells = nullptr, const int* l_shells = nullptr);
+                             const int* nshells LIBRPA_INPUT_DEFAULT(nullptr), const int* l_shells LIBRPA_INPUT_DEFAULT(nullptr));
 
 /**
  * @brief Set auxiliary atomic orbital basis size.
@@ -110,7 +156,7 @@ void librpa_set_ao_basis_wfc(LibrpaHandler* h, int natoms, const size_t* nbs_wfc
  * @param[in] l_shells  Optional concatenated angular momenta, grouped by atom.
  */
 void librpa_set_ao_basis_aux(LibrpaHandler* h, int natoms, const size_t* nbs_aux,
-                             const int* nshells = nullptr, const int* l_shells = nullptr);
+                             const int* nshells LIBRPA_INPUT_DEFAULT(nullptr), const int* l_shells LIBRPA_INPUT_DEFAULT(nullptr));
 
 /**
  * @brief Set shrink auxiliary atomic orbital basis size.
@@ -122,8 +168,8 @@ void librpa_set_ao_basis_aux(LibrpaHandler* h, int natoms, const size_t* nbs_aux
  */
 void librpa_set_ao_basis_aux_shrink(LibrpaHandler* h, int natoms,
                                     const size_t* nbs_aux_shrink,
-                                    const int* nshells = nullptr,
-                                    const int* l_shells = nullptr);
+                                    const int* nshells LIBRPA_INPUT_DEFAULT(nullptr),
+                                    const int* l_shells LIBRPA_INPUT_DEFAULT(nullptr));
 
 /**
  * @brief Set basis convention metadata used by symmetry-based reductions.
@@ -260,7 +306,7 @@ void librpa_set_irreducible_kgrids_kvec(LibrpaHandler* h, int nk1, int nk2, int 
  */
 void librpa_set_lri_coeff(LibrpaHandler* h, LibrpaParallelRouting routing, int I, int J,
                           int nbasis_i, int nbasis_j, int naux_mu, const int R[3],
-                          const double* Cs_in, int shrink_aux = 0);
+                          const double* Cs_in, int shrink_aux LIBRPA_INPUT_DEFAULT(0));
 
 /**
  * @brief Set bare Coulomb matrix elements (atom-pair format).
@@ -519,6 +565,116 @@ void librpa_set_wfc_band_spinor_packed(LibrpaHandler* h, int ik_band, int nstate
  */
 void librpa_reset_band_data(LibrpaHandler* h);
 
+/** QSGW Vxc and native-operator input. Complex values are interleaved
+ * [real,imag]; square matrix storage follows row_major (zero: column major,
+ * one: row major). Spin and k-point indices are zero based; energies are Hartree.
+ * Buffers are supplied on handler rank zero and copied by librpa_set_qsgw_input.
+ */
+typedef struct
+{
+    int spin, kpoint, dimension, row_major;
+    const double* values_ri;
+} LibrpaQsgwMatrix;
+/** One directed, unwrapped physical LRI coefficient block. Atom indices are
+ * zero-based; translation is a true lattice translation, never BvK-folded.
+ * Real values are packed as ((i*n_aos_j+j)*n_aux_i+mu), matching the ordinary
+ * LRI setter. Include both directed fitting endpoints without duplicate keys. */
+typedef struct
+{
+    int atom_i, atom_j, translation[3];
+    int n_aos_i, n_aos_j, n_aux_i;
+    const double* values;
+} LibrpaQsgwLriBlock;
+typedef struct
+{
+    int n_vxc, n_vxc_band;
+    const LibrpaQsgwMatrix *vxc, *vxc_band;
+    int vxc_in_ao_basis;
+    const LibrpaNativeVelocityInput* native_operators;
+    double inplane_area_bohr2, auxiliary_monopole_norm_squared;
+    /** Optional dedicated bare q=0 auxiliary Coulomb metric, in Hartree.
+     * Full row-major interleaved complex matrix, copied from root. Supplying
+     * it asserts the 3D bare kernel with G=0 set to zero, matched to the
+     * selected full/shrunk auxiliary basis. Never substitutes for GW V(q). */
+    int hartree_n_aux;
+    const double* hartree_coulomb_q0_ri;
+    /** Dedicated unwrapped coefficients in the same auxiliary basis as the
+     * Hartree metric. Copied from root; independent of folded GW input. */
+    int n_hartree_lri_blocks;
+    const LibrpaQsgwLriBlock* hartree_lri_blocks;
+} LibrpaQsgwInput;
+
+/** Collective. Vxc and native operators are supplied on root; ignored elsewhere. */
+void librpa_set_qsgw_input(LibrpaQsgwTask*, const LibrpaQsgwInput* root_input);
+
+    /** Numerical cRPA input. Strings and arrays remain owned by the caller.
+     * Initialize with librpa_init_crpa_input before assigning fields. All input
+     * values and array contents must be replicated identically on every rank of
+     * the handler communicator and remain valid until the collective call returns.
+     * Energy windows use inclusive absolute-Hartree lower/upper pairs.
+     * B selects the KS space used to project atomic trials. Provide exactly one
+     * B window array or explicit band list. With use_orbital_weights OFF, also
+     * provide an independent A selector for both branches of Pd. With it ON,
+     * provide no A selector: the output frame defines endpoint probabilities.
+     * Species labels follow the zero-based type indices passed to librpa_set_atoms.
+     * Scalar output uses each spin's parent frame; SOC uses one full spinor frame.
+     */
+    typedef struct
+    {
+        int n_species;
+        const char* const* species_labels;
+        const char* correlated_species;
+        const char* ligand_species;
+        const char* parent_orbitals;
+        const char* output_orbitals;
+        int n_response_edges;
+        const double* response_windows_ha;
+        int n_orbital_edges;
+        const double* orbital_windows_ha;
+        /** Zero-based indices, shared by all spin/k points. Each list replaces
+         * its respective energy window; set the unused count to zero. */
+        int n_response_bands;
+        const int* response_bands;
+        int n_orbital_bands;
+        const int* orbital_bands;
+        int n_kpoints;
+        int n_aos;
+        /** Spatial overlap [k][AO row][AO column][real/imag], full k grid.
+         * SOC lifts this internally to I_spinor tensor S; n_aos stays spatial. */
+        const double* overlap_k_ri;
+        double gram_abs;
+        double gram_rel;
+        double gram_cond_max;
+        double s_abs;
+        double s_rel;
+        double s_cond_max;
+        double residual_tol;
+        double t_roundtrip_tol;
+        /** Off by default: retain C/S/Phi in the owned result for arbitrary AO reprojection.
+         * P/H/density and the state energies/occupations are always retained. */
+        LibrpaSwitch retain_raw_model;
+        /** OFF: binary A windows/lists. ON: probabilities from the actual output
+         * frame, w_p=sum_a |Phi_a^dagger S C_p|^2/(C_p^dagger S C_p).
+         * Pd weights each original transition by w_p*w_q. No A window/list
+         * may be supplied; B and the output orbitals define the projector. */
+        LibrpaSwitch use_orbital_weights;
+        /** Optional previous metric-orthonormal parent Phi, packed as
+         * [spin][k][component-major AO][parent column][real/imag]. A positive
+         * n_previous_parent enables transport through the declared current B.
+         * The caller owns the reference; the original KS states are unchanged.
+         * A zero count retains the original atomic-trial construction. */
+        int n_previous_parent;
+        const double* previous_parent_phi_ri;
+        /** Minimum retained probability of every previous parent direction.
+         * Default 0.99. This is an additional subspace-retention gate, not a
+         * replacement or relaxation of the Gram/metric rank checks. */
+        double tracking_min_capture;
+    } LibrpaCrpaInput;
+
+    void librpa_init_crpa_input(LibrpaCrpaInput* input);
+
 #ifdef __cplusplus
 }
 #endif
+
+#undef LIBRPA_INPUT_DEFAULT

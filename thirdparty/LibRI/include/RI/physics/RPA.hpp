@@ -16,13 +16,18 @@ namespace RI
 
 template<typename TA, typename Tcell, std::size_t Ndim, typename Tdata>
 void RPA<TA,Tcell,Ndim,Tdata>::set_parallel(
-	const MPI_Comm &mpi_comm,
-	const std::map<TA,Tatom_pos> &atoms_pos,
-	const std::array<Tatom_pos,Ndim> &latvec,
-	const std::array<Tcell,Ndim> &period)
+	const MPI_Comm &mpi_comm_in,
+	const std::map<TA,Tatom_pos> &atoms_pos_in,
+	const std::array<Tatom_pos,Ndim> &latvec_in,
+	const std::array<Tcell,Ndim> &period_in)
 {
+	this->mpi_comm = mpi_comm_in;
+	this->atoms_pos = atoms_pos_in;
+	this->latvec = latvec_in;
+	this->period = period_in;
+
 	this->lri.set_parallel(
-		mpi_comm, atoms_pos, latvec, period,
+		this->mpi_comm, this->atoms_pos, this->latvec, this->period,
 		{Label::ab_ab::a1b1_a2b2, Label::ab_ab::a1b2_a2b1});
 	this->flag_finish.stru = true;
 }
@@ -34,7 +39,7 @@ void RPA<TA,Tcell,Ndim,Tdata>::set_symmetry(
 {
 	if(flag_symmetry)
 		this->lri.filter_atom = std::make_shared<Filter_Atom_Symmetry<TA,TC,Tdata>>(
-			this->lri.period, irreducible_sector);
+			this->period, irreducible_sector);
 	else
 		this->lri.filter_atom = std::make_shared<Filter_Atom<TA,TAC>>();
 }

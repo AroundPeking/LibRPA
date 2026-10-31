@@ -18,7 +18,7 @@ LibRI 为只包含头文件的 C++ 库，用以计算 RI 形式下的高阶方�
 
 以下为 LibRI 所需：
 
-- C++编译器，需支持 C++14 标准，且需支持 OpenMP 线程并行。
+- C++编译器，需支持 C++11 标准，且需支持 OpenMP 线程并行。
 - MPI 库，用于进程间数据通讯。
 - BLAS 与 LAPACK 库，用于加速张量运算。
   > 若 BLAS 与 LAPACK 库使用 Math Kernel Library (MKL)，则建议在 include 任意 LibRI 头文件前定义宏 `__MKL_RI`。LibRI 中部分函数将在编译时自动替换为 MKL 中的函数。

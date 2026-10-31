@@ -658,6 +658,42 @@ void read_Cs_binary_v1_tasks(ReaderContext &ctx, const std::vector<CsBinaryV1Rea
 
 } // namespace
 
+std::vector<HartreeLriBlock> read_hartree_lri_blocks(ReaderContext &ctx,
+                                                     const std::string &dir_path,
+                                                     const std::string &prefix,
+                                                     const bool use_shrink_basis)
+{
+    if (prefix.empty())
+        throw std::invalid_argument("A dedicated unwrapped Hartree LRI prefix is required");
+    const auto files = librpa_int::discover_files_with_prefix(dir_path, prefix);
+    if (files.empty())
+        throw std::runtime_error("No unwrapped Hartree LRI files found with prefix " + prefix);
+    const auto &auxiliary = use_shrink_basis ? ctx.state.nbs_aux_shrink : ctx.state.nbs_aux;
+    const auto tasks = make_Cs_binary_v1_read_tasks(files, 0.0, ctx.state.nbs_wfc, auxiliary);
+    std::vector<HartreeLriBlock> result;
+    result.reserve(tasks.size());
+    for (const auto &task : tasks)
+    {
+        HartreeLriBlock block;
+        block.atom_i = task.block.ia1 - 1;
+        block.atom_j = task.block.ia2 - 1;
+        block.translation = {task.block.R[0], task.block.R[1], task.block.R[2]};
+        block.n_aos_i = task.n_i;
+        block.n_aos_j = task.n_j;
+        block.n_aux_i = task.n_mu;
+        block.values.resize(checked_streamoff_to_size(task.nbytes, task.file_path) /
+                            sizeof(double));
+        ifstream input(task.file_path, std::ios::binary);
+        input.seekg(task.block.offset);
+        input.read(reinterpret_cast<char *>(block.values.data()), task.nbytes);
+        if (!input.good())
+            throw std::runtime_error("Failed to read unwrapped Hartree LRI payload in " +
+                                     task.file_path);
+        result.push_back(std::move(block));
+    }
+    return result;
+}
+
 int detect_Cs_reader_version(ReaderContext &ctx, const string &dir_path, const string keyword)
 {
     const auto files = discover_Cs_files_for_keyword(ctx, dir_path, keyword);

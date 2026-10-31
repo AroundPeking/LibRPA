@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <string>
 
-#define MPI_CHECK(x) if((x)!=MPI_SUCCESS)	throw std::runtime_error(std::string(__FILE__)+" line "+std::to_string(__LINE__));
+#define MPI_CHECK_RI(x) if((x)!=MPI_SUCCESS)	throw std::runtime_error(std::string(__FILE__)+" line "+std::to_string(__LINE__));
 
 namespace RI
 {
@@ -53,7 +53,7 @@ namespace MPI_Wrapper
 		{
 			if(this->flag_allocate)
 			{
-				MPI_CHECK( MPI_Comm_free( &this->comm ) );
+				MPI_CHECK_RI( MPI_Comm_free( &this->comm ) );
 				this->flag_allocate = false;
 			}
 		}
@@ -62,4 +62,4 @@ namespace MPI_Wrapper
 
 }
 
-#undef MPI_CHECK
+#undef MPI_CHECK_RI

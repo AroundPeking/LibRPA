@@ -119,16 +119,17 @@ SpinKMatrixMap build_reference_hamiltonian(
     return result;
 }
 
-SpinKMatrixMap assemble_effective_hamiltonian(
-    const SpinKMatrixMap& reference_hamiltonian,
-    const SpinKMatrixMap& dft_vxc,
-    const SpinKMatrixMap& exchange,
-    const SpinKMatrixMap& correlation)
+SpinKMatrixMap assemble_effective_hamiltonian(const SpinKMatrixMap& reference_hamiltonian,
+                                              const SpinKMatrixMap& dft_vxc,
+                                              const SpinKMatrixMap& exchange,
+                                              const SpinKMatrixMap& correlation,
+                                              const SpinKMatrixMap* delta_hartree)
 {
     validate_map(reference_hamiltonian, nullptr, "reference");
     validate_map(dft_vxc, &reference_hamiltonian, "DFT Vxc");
     validate_map(exchange, &reference_hamiltonian, "exchange");
     validate_map(correlation, &reference_hamiltonian, "correlation");
+    if (delta_hartree) validate_map(*delta_hartree, &reference_hamiltonian, "Delta Hartree");
     SpinKMatrixMap result;
     for (const auto& [spin, by_kpoint] : reference_hamiltonian)
     {
@@ -146,6 +147,8 @@ SpinKMatrixMap assemble_effective_hamiltonian(
                     assembled(row, column) =
                         reference(row, column) - vxc(row, column) +
                         exx(row, column) + vc(row, column);
+                    if (delta_hartree)
+                        assembled(row, column) += delta_hartree->at(spin).at(kpoint)(row, column);
                 }
             }
             for (int row = 0; row < assembled.nr(); ++row)
@@ -165,6 +168,32 @@ SpinKMatrixMap assemble_effective_hamiltonian(
             result[spin][kpoint] = std::move(assembled);
         }
     }
+    return result;
+}
+
+SpinKMatrixMap build_qp_static_subtraction(const SpinKMatrixMap& entering_hamiltonian,
+                                           const SpinKMatrixMap& reference_hamiltonian,
+                                           const SpinKMatrixMap& dft_vxc,
+                                           const SpinKMatrixMap* delta_hartree)
+{
+    validate_map(reference_hamiltonian, nullptr, "reference");
+    validate_map(entering_hamiltonian, &reference_hamiltonian, "entering");
+    validate_map(dft_vxc, &reference_hamiltonian, "DFT Vxc");
+    if (delta_hartree) validate_map(*delta_hartree, &reference_hamiltonian, "Delta Hartree");
+    SpinKMatrixMap result;
+    for (const auto& [spin, by_k] : reference_hamiltonian)
+        for (const auto& [k, reference] : by_k)
+        {
+            Matz value(reference.nr(), reference.nc(), reference.major());
+            for (int i = 0; i != value.nr(); ++i)
+                for (int j = 0; j != value.nc(); ++j)
+                {
+                    value(i, j) = entering_hamiltonian.at(spin).at(k)(i, j) - reference(i, j) +
+                                  dft_vxc.at(spin).at(k)(i, j);
+                    if (delta_hartree) value(i, j) -= delta_hartree->at(spin).at(k)(i, j);
+                }
+            result[spin][k] = std::move(value);
+        }
     return result;
 }
 

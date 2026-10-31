@@ -1,4 +1,5 @@
 // API headers
+#include "librpa_compute.h"
 #include "librpa_enums.h"
 #include "librpa_input.h"
 
@@ -679,6 +680,7 @@ void librpa_set_symmetry_spin_operations(
                               std::complex<double>(u[2], u[3]),
                               std::complex<double>(u[4], u[5]),
                               std::complex<double>(u[6], u[7])};
+            spin_op.spin_u_provided = true;
         }
         spin_ops.push_back(spin_op);
     }
@@ -1593,4 +1595,18 @@ void librpa_reset_band_data(LibrpaHandler* h)
     pds->reset_band_eigvecs_kpara_state();
 
     profiler.stop(tname);
+}
+
+void librpa_get_meanfield_dimensions(const LibrpaHandler* h, int band_path, int* nspins, int* nkpts,
+                                     int* nstates, int* naos, int* nspinor)
+{
+    const auto dataset = librpa_int::api::get_dataset_instance(h);
+    const auto& mf = band_path ? dataset->mf_band : dataset->mf;
+    if (!nspins || !nkpts || !nstates || !naos || !nspinor)
+        throw LIBRPA_INVALID_ARGUMENT("missing mean-field dimension output");
+    *nspins = mf.get_n_spins();
+    *nkpts = mf.get_n_kpoints();
+    *nstates = mf.get_n_states();
+    *naos = mf.get_n_aos();
+    *nspinor = mf.get_n_spinor();
 }

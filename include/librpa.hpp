@@ -17,15 +17,35 @@
 #include "librpa_enums.h"
 #include "librpa_options.h"
 #include "librpa_handler.h"
+#include "librpa_compute.h"
 
+#include <array>
 #include <vector>
 #include <complex>
+#include <memory>
 
 /**
  * @brief Main namespace for LibRPA C++ API.
  */
 namespace librpa
 {
+
+using QsgwTask = std::unique_ptr<LibrpaQsgwTask, decltype(&librpa_delete_qsgw_task)>;
+using OpticalResult = std::unique_ptr<LibrpaOpticalResult, decltype(&librpa_delete_optical_result)>;
+using OrbitalResult = std::unique_ptr<LibrpaOrbitalResult, decltype(&librpa_delete_orbital_result)>;
+using CrpaResult = std::unique_ptr<LibrpaCrpaResult, decltype(&librpa_delete_crpa_result)>;
+using CrpaContinuedResult =
+    std::unique_ptr<LibrpaCrpaContinuedResult, decltype(&librpa_delete_crpa_continued_result)>;
+/** Noncollective native continuation. Energies are Hartree; default diagnostic tolerance is 0.01
+ * eV. */
+CrpaContinuedResult continue_crpa(const LibrpaCrpaResult *result,
+                                  const std::vector<std::complex<double>> &queries,
+                                  int n_parameters = -1,
+                                  double tolerance_ha = 0.0003674932217565499);
+
+/** Mean direct, inter-orbital direct and exchange tensor elements, in Hartree. */
+std::array<std::complex<double>, 3> crpa_tensor_averages(
+    int n_orbitals, const std::vector<std::complex<double>> &tensor);
 
 /* Enums */
 /**
@@ -213,6 +233,13 @@ public:
      */
     const LibrpaHandler *get_c_handler() const { return h_; }
 
+    /** Collective scalar/spinor orbital analysis from existing states and spatial S(k).
+     * Returns an owning result; no H solve, file I/O or change to eigenstate/response data.
+     */
+    OrbitalResult analyze_orbitals(int n_kpoints, int n_aos,
+                                   const std::vector<double> &overlap_k_ri,
+                                   double residual_tol) const;
+
     /**
      * @brief Initialize handler with given MPI communicator.
      * @param[in] comm MPI communicator.
@@ -230,6 +257,12 @@ public:
      * @note Rely on free() to explicitly release resources.
      */
     ~Handler();
+
+    /** Create an owning QSGW task; numerical state and checkpoints belong to the library.
+     * controls.update_hartree defaults on. When enabled, supply dedicated raw
+     * LRI blocks and the bare q=0 metric through LibrpaQsgwInput, leaving GW
+     * input unchanged. */
+    QsgwTask create_qsgw_task(const Options &opts, const LibrpaQsgwControls &controls) const;
 
     /* Input (set) functions */
 
@@ -573,6 +606,12 @@ public:
     void set_velocity_matrix_packed(int n_spins, int n_kpts, int n_states,
                                     const std::complex<double> *velocity);
 
+    //! Collective original-H/S/r velocity in the loaded SCF frame; input on rank zero.
+    void prepare_native_velocity(const Options &opts, const LibrpaNativeVelocityInput *root_input,
+                                 bool prepare_optical = true);
+    //! Noncollective owning snapshot of this rank's numerical optical results.
+    OpticalResult get_optical_result() const;
+
     /**
      * @brief Set k-points for band-structure calculations.
      * @param[in] n_kpts_band Number of band k-points.
@@ -669,6 +708,13 @@ public:
      * */
     void build_exx(const Options &opts);
 
+    /** @brief Physical spin-summed Hartree AO matrices on selected full-grid k points.
+     * Collective; see librpa_compute_hartree_ao for metric/zero-mode requirements.
+     * Returns Hartree-unit complex values, row-major [requested k][AO row][AO column].
+     */
+    std::vector<std::complex<double>> compute_hartree_ao(
+        const Options& opts, const std::vector<int>& iks_this, int n_aos);
+
     /** @brief Get exact-exchange potential for k-grid states.
      *
      * @param[in] opts         Runtime options.
@@ -701,6 +747,17 @@ public:
      * @param[in] opts  Runtime options.
      * */
     void build_g0w0_sigma(const Options &opts);
+
+    /** Build GW Sigma and U from one full-response build of the current state. */
+    CrpaResult build_g0w0_sigma_crpa(const Options &opts, const LibrpaCrpaInput &input);
+
+    /** Compute current-state bare/U/W; the returned snapshot owns its storage. */
+    CrpaResult compute_crpa_window(const Options &opts, const LibrpaCrpaInput &input) const;
+
+    /** Compute current-state bare/U without full W or Sigma. */
+    CrpaResult compute_crpa_u_window(const Options &opts, const LibrpaCrpaInput &input) const;
+    //! Current frames/weights/model without response, W, or Sigma.
+    CrpaResult prepare_crpa_model(const Options &opts, const LibrpaCrpaInput &input) const;
 
     /** @brief Get G0W0 correlation self-energy for k-grid states.
      *

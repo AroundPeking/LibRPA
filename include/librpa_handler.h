@@ -28,6 +28,25 @@ typedef struct
     const int instance_id_;
 } LibrpaHandler;
 
+/** Opaque QSGW execution state; create and delete it through librpa_compute.h. */
+typedef struct LibrpaQsgwTask LibrpaQsgwTask;
+
+/** Indexed cRPA and orbital result handles; numerical views and accessors are
+ * declared in librpa_compute.h. Standalone factory results own snapshots that
+ * survive handler changes or destruction. Release each owned result on its
+ * rank with librpa_delete_crpa_result or librpa_delete_orbital_result.
+ * Accessor arrays and strings are borrowed, read-only, and valid until the
+ * owning result is deleted. The handles passed to LibrpaCrpaOutputSink are
+ * borrowed instead: do not delete them or retain them or their views after
+ * that callback returns. */
+typedef struct LibrpaCrpaResult LibrpaCrpaResult;
+typedef struct LibrpaOrbitalResult LibrpaOrbitalResult;
+
+/** Independently owned continuation result, valid after its source cRPA result
+ * is deleted. Release with librpa_delete_crpa_continued_result. Arrays returned
+ * by its accessors remain borrowed and valid only until this result is deleted. */
+typedef struct LibrpaCrpaContinuedResult LibrpaCrpaContinuedResult;
+
 /**
  * @brief Create a new LibRPA handler instance.
  *

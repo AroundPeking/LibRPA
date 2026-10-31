@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <complex>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,17 @@
 #include "reader_context.h"
 namespace librpa::reader
 {
+
+struct HartreeCoulombQ0
+{
+    int dimension = 0;
+    std::vector<std::complex<double>> values;  // full row-major matrix, Hartree
+};
+
+// Root-local input operation; does not insert or replace the handler's GW V(q).
+HartreeCoulombQ0 read_hartree_coulomb_q0(ReaderContext &ctx, const std::string &dir_path,
+                                         const std::string &prefix, int reader_version,
+                                         bool use_shrink_basis);
 
 bool check_coulomb_file_binary(const std::string &file_path);
 

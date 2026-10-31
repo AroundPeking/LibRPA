@@ -72,7 +72,7 @@ overhead while keeping essential results and the timing report visible.
 |-- src               : Source code for the library target
 |   |-- api           : Public API implementation and handler/dataset glue
 |   |-- core          : Physics objects and algorithms: basis, RPA, EXX, GW, symmetry
-|   |   `-- qsgw      : Fixed-basis QSGW numerical operations
+|   |   `-- qsgw      : Fixed-basis QSGW task, checkpoints and numerical operations
 |   |-- elpa          : ELPA eigensolver integration
 |   |-- gpu           : Optional CUDA/HIP device and linear-algebra adapters
 |   |-- interface     : Thin interfaces to external codes, e.g. BLAS, LAPACK, and ScaLAPACK 
@@ -90,8 +90,15 @@ The driver path is `driver/main.cpp` with tasks implemented under `driver/tasks`
 and input preparation in `driver/read_data.cpp`. Shared input readers live in
 `driver/reader` and receive their handler, options, and parsing state explicitly.
 The `librpa_file_reader` target contains only these readers and links to `rpa_lib`;
-it is available with `LIBRPA_ENABLE_DRIVER=OFF`. The driver may use its private
+it is available with `LIBRPA_ENABLE_DRIVER=OFF`. It is always a static library
+with position-independent code and is not installed. The driver may use its private
 headers, and a file reader API is exposed through `include/file_reader.hpp`.
+
+`include/file_reader.hpp` is an experimental interface for LibBSE built from a
+LibRPA source tree. It returns `librpa_int::Dataset` and includes headers under
+`src/`, so it is an exception to the rules on public headers and on including
+`src/core` below. It is not installed and is not part of the stable public API.
+Do not add new users of it; new external programs should use the public API.
 
 ## A few C++ guidelines
 
