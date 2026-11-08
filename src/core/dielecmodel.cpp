@@ -5948,9 +5948,23 @@ void diele_func::rewrite_metallic_static_2d_wc(
     if (static_intraband_screening_wavevector_squared_ <= 0.0 ||
         static_intraband_chi0v_wing_.size() != as_size(nbody))
         throw std::logic_error("metallic static 2D intraband coefficients are unavailable");
+    // cal_head() stores the intraband head coefficient in plane-wave units,
+    // whereas the static wing and regular body below have already been
+    // projected to the Coulomb eigenbasis (lambda units).  The strict-2D
+    // Coulomb normalization maps the head coefficient with s^2, just as it
+    // maps Wc_{00}; use the lambda-unit coefficient in every Schur quantity.
+    const double pw_to_auxiliary_scale = get_strict_2d_pw_to_auxiliary_scale();
+    const double static_intraband_screening_wavevector_squared_lambda =
+        static_intraband_screening_wavevector_squared_ * pw_to_auxiliary_scale *
+        pw_to_auxiliary_scale;
 
     auto desc_body = get_body_inv(epsilon_block, desc_nabf_nabf_opt);
     construct_L(ifreq, desc_body);
+    // The finite-q strict-2D diagnostic uses the same regular Gamma Schur
+    // limit as the complete-Wc replacement.  Keep the static-frequency
+    // regular block alongside the non-static blocks populated by
+    // cal_strict_2d_wc(), so ifreq=0 has a valid reference as well.
+    strict_2d_lind_by_freq.at(as_size(ifreq)) = Lind.copy();
 
     std::vector<std::complex<double>> body_inv_static_global(as_size(nbody), 0.0);
     std::vector<std::complex<double>> static_adjoint_body_inv_global(as_size(nbody), 0.0);
@@ -5973,14 +5987,37 @@ void diele_func::rewrite_metallic_static_2d_wc(
     MPI_Allreduce(MPI_IN_PLACE, static_adjoint_body_inv_global.data(), nbody,
                   MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
 
-    std::complex<double> schur_qminus1 = static_intraband_screening_wavevector_squared_;
+    std::complex<double> schur_qminus1 =
+        static_intraband_screening_wavevector_squared_lambda;
     for (int i = 0; i != nbody; ++i)
         schur_qminus1 -= std::conj(static_intraband_chi0v_wing_.at(as_size(i))) *
                          body_inv_static_global.at(as_size(i));
     const double schur_scale = std::max(1.0, std::abs(schur_qminus1));
     if (schur_qminus1.real() <= 0.0 ||
         std::abs(schur_qminus1.imag()) > 1.0e-8 * schur_scale)
+    {
+        if (comm_h.is_root())
+        {
+            double wing_norm_squared = 0.0;
+            double projected_norm_squared = 0.0;
+            for (const auto &value : static_intraband_chi0v_wing_)
+                wing_norm_squared += std::norm(value);
+            for (const auto &value : body_inv_static_global)
+                projected_norm_squared += std::norm(value);
+            global::lib_printf(
+                "Metallic static 2D GW Schur diagnostic: ifreq=%d nbody=%d "
+                "kappa1_lambda=%.16e kappa1_pw=%.16e local_field=(%.16e,%.16e) "
+                "schur_qminus1=(%.16e,%.16e) wing_norm=%.16e "
+                "body_inv_wing_norm=%.16e\n",
+                ifreq, nbody, static_intraband_screening_wavevector_squared_lambda,
+                static_intraband_screening_wavevector_squared_,
+                (static_intraband_screening_wavevector_squared_lambda - schur_qminus1).real(),
+                (static_intraband_screening_wavevector_squared_lambda - schur_qminus1).imag(),
+                schur_qminus1.real(), schur_qminus1.imag(), std::sqrt(wing_norm_squared),
+                std::sqrt(projected_norm_squared));
+        }
         throw std::runtime_error("metallic static 2D Schur 1/q coefficient is not positive real");
+    }
 
     std::array<std::complex<double>, 3> schur_q0{};
     for (int alpha = 0; alpha != 3; ++alpha)
@@ -6005,7 +6042,6 @@ void diele_func::rewrite_metallic_static_2d_wc(
     const auto inverse_weights = compute_metallic_static_2d_inverse_weights(
         regular_schur, schur_qminus1, 1.0, schur_q0, qx_leb, qy_leb, qw_leb, physical_qmax,
         gamma_area);
-    const double pw_to_auxiliary_scale = get_strict_2d_pw_to_auxiliary_scale();
     const double sqrt_two_pi = std::sqrt(TWO_PI);
 
     auto regular_body_sqrt = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
@@ -6523,8 +6559,12 @@ std::complex<double> diele_func::compute_rpa_trace_log_average(
             }
         }
 
+        const double pw_to_auxiliary_scale = get_strict_2d_pw_to_auxiliary_scale();
+        const double static_intraband_screening_wavevector_squared_lambda =
+            static_intraband_screening_wavevector_squared_ * pw_to_auxiliary_scale *
+            pw_to_auxiliary_scale;
         const std::complex<double> schur_qminus1 =
-            static_intraband_screening_wavevector_squared_ - static_local_field;
+            static_intraband_screening_wavevector_squared_lambda - static_local_field;
         const double schur_scale = std::max(1.0, std::abs(schur_qminus1));
         if (schur_qminus1.real() <= 0.0 ||
             std::abs(schur_qminus1.imag()) > 1.0e-8 * schur_scale)
@@ -6533,9 +6573,10 @@ std::complex<double> diele_func::compute_rpa_trace_log_average(
             {
                 global::lib_printf(
                     "Metallic static 2D RPA Schur failure: ifreq=%d body_start=%d nbody=%d "
-                    "kappa1=%.12e local_field=(%.12e,%.12e) "
+                    "kappa1_lambda=%.12e kappa1_pw=%.12e local_field=(%.12e,%.12e) "
                     "schur_qminus1=(%.12e,%.12e) wing_norm2=%.12e\\n",
-                    ifreq, body_start, nbody, static_intraband_screening_wavevector_squared_,
+                    ifreq, body_start, nbody, static_intraband_screening_wavevector_squared_lambda,
+                    static_intraband_screening_wavevector_squared_,
                     static_local_field.real(), static_local_field.imag(), schur_qminus1.real(),
                     schur_qminus1.imag(), static_wing_norm_squared);
             }
@@ -6562,13 +6603,15 @@ std::complex<double> diele_func::compute_rpa_trace_log_average(
                        strict_2d_physical_q);
         const auto result = compute_metallic_static_2d_rpa_trace_log_average(
             get_rpa_chi0v_head(ifreq), regular_schur, trace_body, logdet_body,
-            static_intraband_screening_wavevector_squared_, schur_qminus1, 1.0, schur_q0,
+            static_intraband_screening_wavevector_squared_lambda, schur_qminus1, 1.0, schur_q0,
             qx_leb, qy_leb, qw_leb, physical_q_gamma,
             strict_2d_physical_gamma_cell_area(vol_gamma));
         if (debug && comm_h.is_root())
             global::lib_printf(
-                "Metallic static 2D RPA Gamma avg: kappa1=%.12e schur_qminus1=(%.12e,%.12e) "
+                "Metallic static 2D RPA Gamma avg: kappa1_lambda=%.12e kappa1_pw=%.12e "
+                "schur_qminus1=(%.12e,%.12e) "
                 "result=(%.12e,%.12e)\n",
+                static_intraband_screening_wavevector_squared_lambda,
                 static_intraband_screening_wavevector_squared_, schur_qminus1.real(),
                 schur_qminus1.imag(), result.real(), result.imag());
         this->Lind.clear();

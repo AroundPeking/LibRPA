@@ -3495,6 +3495,17 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                 desc_1x1.set_ddla_desc(blacs_h.ddla_handle);
 #endif
         }
+        // The finite-temperature metallic 2D Gamma branch uses the static
+        // intraband wing in the same Coulomb eigenbasis as the complete-Wc
+        // rewrite below.  The GW path does not otherwise need the contracted
+        // head/wing object, so perform the mu->lambda projection explicitly
+        // before releasing sqrt(V).  Without this, the static branch reaches
+        // rewrite_metallic_static_2d_wc() with an empty coefficient vector.
+        if (is_gamma_point(q) && df_headwing != nullptr && has_metallic_static_frequency &&
+            df_headwing->use_2d_dielectric)
+        {
+            df_headwing->wing_mu_to_lambda(sqrtveig_blacs, desc_nabf_nabf_opt, n_nonsingular);
+        }
         // The scaled Coulomb eigenvectors are no longer needed in the frequency
         // loop: the ABF-space path uses coul_block (sqrt(V)) directly.
         sqrtveig_blacs.clear();
@@ -4047,8 +4058,27 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                         "strict 2D finite-q diagnostic encountered invalid q");
                 const double qhat_x = q.x / q_internal;
                 const double qhat_y = q.y / q_internal;
-                const auto reference =
-                    df_headwing->get_strict_2d_finite_q_reference(ifreq, q.x, q.y);
+                // The existing finite-q reference is the insulating head
+                // limit.  At finite temperature the static metallic mode has
+                // a 1/q head and static wings, so applying that reference
+                // would report a spurious mismatch.  Keep the raw finite-q
+                // diagnostics, but leave the insulating-reference columns
+                // as NaN until a metal-specific reference is implemented.
+                const bool metallic_static_2d_reference =
+                    df_headwing->is_metallic_static_2d_frequency(ifreq);
+                Strict2dFiniteQReference reference{};
+                if (metallic_static_2d_reference)
+                {
+                    const double nan = std::numeric_limits<double>::quiet_NaN();
+                    reference.epsilon_minus_identity_over_q = {nan, nan};
+                    reference.schur_a = {nan, nan};
+                    reference.wc_head_limit = {nan, nan};
+                }
+                else
+                {
+                    reference = df_headwing->get_strict_2d_finite_q_reference(
+                        ifreq, q.x, q.y);
+                }
                 const auto wc_head = wc_metrics.head;
                 const double q_weight = chi0.q_weight(q);
                 const auto p_over_q = finite_q_p_head / q_physical;
