@@ -1952,6 +1952,94 @@ matrix_m<std::complex<double>> strict_2d_wc_blocks_at_q(
     return result;
 }
 
+matrix_m<std::complex<double>> metallic_static_2d_wc_blocks_at_q(
+    const matrix_m<std::complex<double>> &body_inv,
+    const matrix_m<std::complex<double>> &static_intraband_wing,
+    const matrix_m<std::complex<double>> &bw_cart,
+    const matrix_m<std::complex<double>> &wb_cart,
+    const matrix_m<std::complex<double>> &regular_schur,
+    const std::complex<double> kappa1_lambda, const double qhat_x, const double qhat_y,
+    const double q_physical)
+{
+    const int nbody = body_inv.nr();
+    if (nbody < 1 || body_inv.nc() != nbody || static_intraband_wing.nr() != nbody ||
+        static_intraband_wing.nc() != 1 || bw_cart.nr() != nbody || bw_cart.nc() != 3 ||
+        wb_cart.nr() != 3 || wb_cart.nc() != nbody || regular_schur.nr() != 3 ||
+        regular_schur.nc() != 3)
+        throw std::logic_error("metallic static 2D Wc block dimensions are inconsistent");
+    if (!(q_physical > 0.0) || !std::isfinite(q_physical) ||
+        std::abs(qhat_x * qhat_x + qhat_y * qhat_y - 1.0) > 1.0e-10)
+        throw std::logic_error("metallic static 2D Wc requires a unit in-plane q direction");
+    if (!std::isfinite(kappa1_lambda.real()) || !std::isfinite(kappa1_lambda.imag()))
+        throw std::logic_error("metallic static 2D Wc requires a finite screening coefficient");
+
+    matrix_m<std::complex<double>> body_inv_static(nbody, 1, MAJOR::COL);
+    matrix_m<std::complex<double>> static_adjoint_body_inv(1, nbody, MAJOR::COL);
+    for (int i = 0; i != nbody; ++i)
+    {
+        std::complex<double> left = 0.0;
+        for (int j = 0; j != nbody; ++j)
+            left += body_inv(i, j) * static_intraband_wing(j, 0);
+        body_inv_static(i, 0) = left;
+
+        std::complex<double> right = 0.0;
+        for (int j = 0; j != nbody; ++j)
+            right += std::conj(static_intraband_wing(j, 0)) * body_inv(j, i);
+        static_adjoint_body_inv(0, i) = right;
+    }
+
+    std::complex<double> schur_qminus1 = kappa1_lambda;
+    for (int i = 0; i != nbody; ++i)
+        schur_qminus1 -= std::conj(static_intraband_wing(i, 0)) * body_inv_static(i, 0);
+
+    const std::array<double, 3> qhat{qhat_x, qhat_y, 0.0};
+    std::complex<double> schur_q0_direction = 1.0;
+    for (int alpha = 0; alpha != 3; ++alpha)
+    {
+        std::complex<double> left = 0.0;
+        std::complex<double> right = 0.0;
+        for (int i = 0; i != nbody; ++i)
+        {
+            left += std::conj(static_intraband_wing(i, 0)) * bw_cart(i, alpha);
+            right += wb_cart(alpha, i) * static_intraband_wing(i, 0);
+        }
+        schur_q0_direction -= qhat[as_size(alpha)] * (left + right);
+    }
+
+    std::complex<double> regular_direction = 0.0;
+    for (int alpha = 0; alpha != 3; ++alpha)
+        for (int beta = 0; beta != 3; ++beta)
+            regular_direction += qhat[as_size(alpha)] * regular_schur(alpha, beta) *
+                                 qhat[as_size(beta)];
+    const auto denominator = schur_qminus1 + schur_q0_direction * q_physical +
+                             regular_direction * q_physical * q_physical;
+    if (std::abs(denominator) <= std::numeric_limits<double>::min())
+        throw std::runtime_error("metallic static 2D Wc Schur denominator is singular");
+
+    std::vector<std::complex<double>> u(as_size(nbody));
+    std::vector<std::complex<double>> v(as_size(nbody));
+    for (int i = 0; i != nbody; ++i)
+    {
+        u[as_size(i)] = body_inv_static(i, 0) +
+                        q_physical * (bw_cart(i, 0) * qhat_x + bw_cart(i, 1) * qhat_y);
+        v[as_size(i)] = static_adjoint_body_inv(0, i) +
+                        q_physical * (wb_cart(0, i) * qhat_x + wb_cart(1, i) * qhat_y);
+    }
+
+    matrix_m<std::complex<double>> result(nbody + 1, nbody + 1, MAJOR::COL);
+    result(0, 0) = TWO_PI * (1.0 / denominator - 1.0 / q_physical);
+    const auto wing_prefactor = -std::sqrt(TWO_PI) / denominator;
+    for (int i = 0; i != nbody; ++i)
+    {
+        result(i + 1, 0) = wing_prefactor * u[as_size(i)];
+        result(0, i + 1) = wing_prefactor * v[as_size(i)];
+        for (int j = 0; j != nbody; ++j)
+            result(i + 1, j + 1) = body_inv(i, j) - (i == j ? 1.0 : 0.0) +
+                                    u[as_size(i)] * v[as_size(j)] / denominator;
+    }
+    return result;
+}
+
 matrix_m<std::complex<double>> strict_2d_average_wc_coulomb_basis(
     const matrix_m<std::complex<double>> &body_inv, const matrix_m<std::complex<double>> &bw_cart,
     const matrix_m<std::complex<double>> &wb_cart, const matrix_m<std::complex<double>> &lind,
@@ -2252,6 +2340,11 @@ void diele_func::init_wing(double coulomb_eigen_threshold, const atpair_k_cplx_m
     this->Lind.resize(3, 3, MAJOR::COL);
     this->strict_2d_lind_by_freq.clear();
     this->strict_2d_lind_by_freq.resize(n_omega);
+    this->strict_2d_metallic_static_ifreq_ = -1;
+    this->strict_2d_metallic_static_body_inv_.clear();
+    this->strict_2d_metallic_static_bw_.clear();
+    this->strict_2d_metallic_static_wb_.clear();
+    this->strict_2d_metallic_static_regular_coulomb_basis_.clear();
     for (int iomega = 0; iomega != n_omega; iomega++)
     {
         wing_mu[iomega].resize(n_abf, 3, MAJOR::COL);
@@ -5917,16 +6010,31 @@ void diele_func::rewrite_strict_2d_wc(matrix_m<std::complex<double>> &chi0_block
     this->body_inv.clear();
 }
 
-bool diele_func::is_metallic_static_3d_frequency(const int ifreq) const
+bool diele_func::is_metallic_static_frequency(const int ifreq) const
 {
-    return !use_2d_dielectric && meanfield_df.get_fermi_dirac_reference().enabled && ifreq >= 0 &&
+    return meanfield_df.get_fermi_dirac_reference().enabled && ifreq >= 0 &&
            static_cast<std::size_t>(ifreq) < omega.size() && omega.at(as_size(ifreq)) == 0.0;
 }
 
 bool diele_func::is_metallic_static_2d_frequency(const int ifreq) const
 {
-    return use_2d_dielectric && meanfield_df.get_fermi_dirac_reference().enabled && ifreq >= 0 &&
-           static_cast<std::size_t>(ifreq) < omega.size() && omega.at(as_size(ifreq)) == 0.0;
+    return use_2d_dielectric && is_metallic_static_frequency(ifreq);
+}
+
+void diele_func::rewrite_metallic_static_wc(
+    matrix_m<std::complex<double>> &epsilon_block, const int ifreq,
+    ArrayDesc &desc_nabf_nabf_opt,
+    const matrix_m<std::complex<double>> &projected_coulomb_sqrt)
+{
+    if (!is_metallic_static_frequency(ifreq))
+        throw std::logic_error(
+            "metallic complete-Wc replacement requires a finite-temperature zero frequency");
+    if (use_2d_dielectric)
+        rewrite_metallic_static_2d_wc(epsilon_block, ifreq, desc_nabf_nabf_opt,
+                                      projected_coulomb_sqrt);
+    else
+        rewrite_metallic_static_3d_wc(epsilon_block, ifreq, desc_nabf_nabf_opt,
+                                      projected_coulomb_sqrt);
 }
 
 void diele_func::rewrite_metallic_static_2d_wc(
@@ -5965,6 +6073,11 @@ void diele_func::rewrite_metallic_static_2d_wc(
     // regular block alongside the non-static blocks populated by
     // cal_strict_2d_wc(), so ifreq=0 has a valid reference as well.
     strict_2d_lind_by_freq.at(as_size(ifreq)) = Lind.copy();
+    strict_2d_metallic_static_ifreq_ = ifreq;
+    strict_2d_metallic_static_body_inv_ = body_inv.copy();
+    strict_2d_metallic_static_bw_ = bw.copy();
+    strict_2d_metallic_static_wb_ = wb.copy();
+    strict_2d_metallic_static_regular_coulomb_basis_ = regular_coulomb_basis.copy();
 
     std::vector<std::complex<double>> body_inv_static_global(as_size(nbody), 0.0);
     std::vector<std::complex<double>> static_adjoint_body_inv_global(as_size(nbody), 0.0);
@@ -6138,11 +6251,186 @@ void diele_func::rewrite_metallic_static_2d_wc(
     this->body_inv.clear();
 }
 
+void diele_func::rewrite_metallic_static_2d_wc_at_q(
+    matrix_m<std::complex<double>> &wc_coulomb_basis, const int ifreq,
+    ArrayDesc &desc_nabf_nabf_opt, const double qhat_x, const double qhat_y,
+    const double q_physical) const
+{
+    if (!is_metallic_static_2d_frequency(ifreq))
+        throw std::logic_error(
+            "metallic static finite-q Wc reference requires a 2D zero-frequency mode");
+    if (ifreq != strict_2d_metallic_static_ifreq_ ||
+        strict_2d_metallic_static_body_inv_.size() == 0 ||
+        strict_2d_metallic_static_bw_.size() == 0 ||
+        strict_2d_metallic_static_wb_.size() == 0 ||
+        strict_2d_metallic_static_regular_coulomb_basis_.size() == 0 ||
+        static_cast<std::size_t>(ifreq) >= strict_2d_lind_by_freq.size() ||
+        strict_2d_lind_by_freq[as_size(ifreq)].size() == 0)
+        throw std::logic_error(
+            "metallic static finite-q Wc reference was not populated by the Gamma route");
+    if (n_nonsingular < 2 || static_cast<std::size_t>(desc_nabf_nabf_opt.m()) < n_nonsingular ||
+        static_cast<std::size_t>(desc_nabf_nabf_opt.n()) < n_nonsingular)
+        throw std::logic_error("metallic static finite-q Wc Coulomb subspace is inconsistent");
+    if (!(q_physical > 0.0) || !std::isfinite(q_physical) ||
+        std::abs(qhat_x * qhat_x + qhat_y * qhat_y - 1.0) > 1.0e-10)
+        throw std::logic_error("metallic static finite-q Wc received an invalid q vector");
+
+    const int nbody = as_int(n_nonsingular) - 1;
+    ArrayDesc desc_body(blacs_h);
+    desc_body.init_square_blk(nbody, nbody, 0, 0);
+    const auto &body_inv = strict_2d_metallic_static_body_inv_;
+    const auto &bw = strict_2d_metallic_static_bw_;
+    const auto &wb = strict_2d_metallic_static_wb_;
+    if (body_inv.nr() != desc_body.m_loc() || body_inv.nc() != desc_body.n_loc() ||
+        bw.nr() != nbody || bw.nc() != 3 || wb.nr() != 3 || wb.nc() != nbody)
+        throw std::logic_error("metallic static finite-q Wc cache has an invalid shape");
+
+    std::vector<std::complex<double>> body_inv_static_global(as_size(nbody), 0.0);
+    std::vector<std::complex<double>> static_adjoint_body_inv_global(as_size(nbody), 0.0);
+    for (int iloc = 0; iloc != desc_body.m_loc(); ++iloc)
+    {
+        const int i = desc_body.indx_l2g_r(iloc);
+        for (int jloc = 0; jloc != desc_body.n_loc(); ++jloc)
+        {
+            const int j = desc_body.indx_l2g_c(jloc);
+            if (i >= 0 && i < nbody)
+                body_inv_static_global.at(as_size(i)) +=
+                    body_inv(iloc, jloc) * static_intraband_chi0v_wing_.at(as_size(j));
+            if (j >= 0 && j < nbody)
+                static_adjoint_body_inv_global.at(as_size(j)) +=
+                    std::conj(static_intraband_chi0v_wing_.at(as_size(i))) * body_inv(iloc, jloc);
+        }
+    }
+    MPI_Allreduce(MPI_IN_PLACE, body_inv_static_global.data(), nbody, MPI_CXX_DOUBLE_COMPLEX,
+                  MPI_SUM, comm_h.comm);
+    MPI_Allreduce(MPI_IN_PLACE, static_adjoint_body_inv_global.data(), nbody,
+                  MPI_CXX_DOUBLE_COMPLEX, MPI_SUM, comm_h.comm);
+
+    const double pw_to_auxiliary_scale = get_strict_2d_pw_to_auxiliary_scale();
+    const double kappa_lambda = static_intraband_screening_wavevector_squared_ *
+                                pw_to_auxiliary_scale * pw_to_auxiliary_scale;
+    std::complex<double> schur_qminus1 = kappa_lambda;
+    for (int i = 0; i != nbody; ++i)
+        schur_qminus1 -= std::conj(static_intraband_chi0v_wing_.at(as_size(i))) *
+                         body_inv_static_global.at(as_size(i));
+
+    std::array<std::complex<double>, 3> schur_q0{};
+    for (int alpha = 0; alpha != 3; ++alpha)
+    {
+        std::complex<double> left = 0.0;
+        std::complex<double> right = 0.0;
+        for (int i = 0; i != nbody; ++i)
+        {
+            left += std::conj(static_intraband_chi0v_wing_.at(as_size(i))) * bw(i, alpha);
+            right += wb(alpha, i) * static_intraband_chi0v_wing_.at(as_size(i));
+        }
+        schur_q0[as_size(alpha)] = -(left + right);
+    }
+
+    auto regular_schur = strict_2d_lind_by_freq.at(as_size(ifreq)).copy();
+    regular_schur(0, 0) -= 1.0;
+    regular_schur(1, 1) -= 1.0;
+    const auto regular_schur_direction =
+        qhat_x * (qhat_x * regular_schur(0, 0) + qhat_y * regular_schur(0, 1)) +
+        qhat_y * (qhat_x * regular_schur(1, 0) + qhat_y * regular_schur(1, 1));
+    const auto schur_q0_direction = 1.0 + qhat_x * schur_q0[0] + qhat_y * schur_q0[1];
+    const auto denominator = schur_qminus1 + schur_q0_direction * q_physical +
+                             regular_schur_direction * q_physical * q_physical;
+    if (std::abs(denominator) <= std::numeric_limits<double>::min())
+        throw std::runtime_error("metallic static finite-q Wc Schur denominator is singular");
+
+    auto regular_body_sqrt = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    const auto &regular_coulomb_basis = strict_2d_metallic_static_regular_coulomb_basis_;
+    if (regular_coulomb_basis.nr() != desc_nabf_nabf_opt.m_loc() ||
+        regular_coulomb_basis.nc() != desc_nabf_nabf_opt.n_loc())
+        throw std::logic_error("metallic static finite-q Wc regular basis has an invalid shape");
+    ScalapackConnector::pgemr2d_f(
+        nbody, nbody, regular_coulomb_basis.ptr(), 2, 2, desc_nabf_nabf_opt.desc,
+        regular_body_sqrt.ptr(), 1, 1, desc_body.desc, blacs_h.ictxt);
+
+    const auto body_head_factor = std::sqrt(TWO_PI);
+    auto body_response = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    for (int ilo = 0; ilo != desc_body.m_loc(); ++ilo)
+    {
+        const int i = desc_body.indx_l2g_r(ilo);
+        const auto u_i = body_inv_static_global.at(as_size(i)) +
+                         q_physical * (bw(i, 0) * qhat_x + bw(i, 1) * qhat_y);
+        for (int jlo = 0; jlo != desc_body.n_loc(); ++jlo)
+        {
+            const int j = desc_body.indx_l2g_c(jlo);
+            const auto v_j = static_adjoint_body_inv_global.at(as_size(j)) +
+                             q_physical * (wb(0, j) * qhat_x + wb(1, j) * qhat_y);
+            body_response(ilo, jlo) = body_inv(ilo, jlo) - (i == j ? 1.0 : 0.0) +
+                                      u_i * v_j / denominator;
+        }
+    }
+
+    wc_coulomb_basis.zero_out();
+    auto body_tmp = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    auto wc_body = init_local_mat<complex<double>>(desc_body, MAJOR::COL);
+    ScalapackConnector::pgemm_f('N', 'N', nbody, nbody, nbody, C_ONE, regular_body_sqrt.ptr(),
+                                1, 1, desc_body.desc, body_response.ptr(), 1, 1, desc_body.desc,
+                                C_ZERO, body_tmp.ptr(), 1, 1, desc_body.desc);
+    ScalapackConnector::pgemm_f('N', 'N', nbody, nbody, nbody, C_ONE, body_tmp.ptr(), 1, 1,
+                                desc_body.desc, regular_body_sqrt.ptr(), 1, 1, desc_body.desc,
+                                C_ZERO, wc_body.ptr(), 1, 1, desc_body.desc);
+    ScalapackConnector::pgemr2d_f(nbody, nbody, wc_body.ptr(), 1, 1, desc_body.desc,
+                                  wc_coulomb_basis.ptr(), 2, 2, desc_nabf_nabf_opt.desc,
+                                  blacs_h.ictxt);
+
+    ArrayDesc desc_body_head(blacs_h);
+    desc_body_head.init(nbody, 1, desc_body.mb(), 1, 0, 0);
+    ArrayDesc desc_head_body(blacs_h);
+    desc_head_body.init(1, nbody, 1, desc_body.nb(), 0, 0);
+    auto body_head = init_local_mat<complex<double>>(desc_body_head, MAJOR::COL);
+    auto head_body = init_local_mat<complex<double>>(desc_head_body, MAJOR::COL);
+    for (int i = 0; i != nbody; ++i)
+    {
+        const auto u_i = body_inv_static_global.at(as_size(i)) +
+                         q_physical * (bw(i, 0) * qhat_x + bw(i, 1) * qhat_y);
+        const auto v_i = static_adjoint_body_inv_global.at(as_size(i)) +
+                         q_physical * (wb(0, i) * qhat_x + wb(1, i) * qhat_y);
+        const int ilo = desc_body_head.indx_g2l_r(i);
+        const int jlo = desc_body_head.indx_g2l_c(0);
+        if (ilo >= 0 && jlo >= 0)
+            body_head(ilo, jlo) = -body_head_factor * u_i / denominator;
+        const int irow = desc_head_body.indx_g2l_r(0);
+        const int jcol = desc_head_body.indx_g2l_c(i);
+        if (irow >= 0 && jcol >= 0)
+            head_body(irow, jcol) = -body_head_factor * v_i / denominator;
+    }
+    auto wc_body_head = init_local_mat<complex<double>>(desc_body_head, MAJOR::COL);
+    auto wc_head_body = init_local_mat<complex<double>>(desc_head_body, MAJOR::COL);
+    ScalapackConnector::pgemm_f('N', 'N', nbody, 1, nbody, C_ONE, regular_body_sqrt.ptr(), 1, 1,
+                                desc_body.desc, body_head.ptr(), 1, 1, desc_body_head.desc,
+                                C_ZERO, wc_body_head.ptr(), 1, 1, desc_body_head.desc);
+    ScalapackConnector::pgemm_f('N', 'N', 1, nbody, nbody, C_ONE, head_body.ptr(), 1, 1,
+                                desc_head_body.desc, regular_body_sqrt.ptr(), 1, 1, desc_body.desc,
+                                C_ZERO, wc_head_body.ptr(), 1, 1, desc_head_body.desc);
+    for (std::size_t i = 0; i != wc_body_head.size(); ++i)
+        wc_body_head.ptr()[i] *= pw_to_auxiliary_scale;
+    for (std::size_t i = 0; i != wc_head_body.size(); ++i)
+        wc_head_body.ptr()[i] *= pw_to_auxiliary_scale;
+    ScalapackConnector::pgemr2d_f(nbody, 1, wc_body_head.ptr(), 1, 1, desc_body_head.desc,
+                                  wc_coulomb_basis.ptr(), 2, 1, desc_nabf_nabf_opt.desc,
+                                  blacs_h.ictxt);
+    ScalapackConnector::pgemr2d_f(1, nbody, wc_head_body.ptr(), 1, 1, desc_head_body.desc,
+                                  wc_coulomb_basis.ptr(), 1, 2, desc_nabf_nabf_opt.desc,
+                                  blacs_h.ictxt);
+
+    const int ilo_head = desc_nabf_nabf_opt.indx_g2l_r(0);
+    const int jlo_head = desc_nabf_nabf_opt.indx_g2l_c(0);
+    if (ilo_head >= 0 && jlo_head >= 0)
+        wc_coulomb_basis(ilo_head, jlo_head) =
+            pw_to_auxiliary_scale * pw_to_auxiliary_scale * TWO_PI *
+            (1.0 / denominator - 1.0 / q_physical);
+}
+
 void diele_func::rewrite_metallic_static_3d_wc(
     matrix_m<std::complex<double>> &epsilon_block, const int ifreq, ArrayDesc &desc_nabf_nabf_opt,
     const matrix_m<std::complex<double>> &projected_coulomb_sqrt)
 {
-    if (!is_metallic_static_3d_frequency(ifreq))
+    if (use_2d_dielectric || !is_metallic_static_frequency(ifreq))
         throw std::logic_error(
             "metallic static complete-Wc replacement requires a 3D finite-temperature zero "
             "frequency");

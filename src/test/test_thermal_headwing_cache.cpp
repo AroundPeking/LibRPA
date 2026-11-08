@@ -130,7 +130,7 @@ HeadSnapshot build_head(Dataset &ds, const librpa::Options &options)
     const auto &fd = ds.p_headwing->get_meanfield_df().get_fermi_dirac_reference();
     snapshot.fd_enabled = fd.enabled;
     snapshot.kbt = fd.kbt_ha;
-    snapshot.metallic_static = ds.p_headwing->is_metallic_static_3d_frequency(0);
+    snapshot.metallic_static = ds.p_headwing->is_metallic_static_frequency(0);
     bool all_finite = true;
     for (int ifreq = 0; ifreq < N_FREQ; ++ifreq)
     {

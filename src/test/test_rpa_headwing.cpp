@@ -22,6 +22,7 @@
 #include "../core/qpoint_view.h"
 #include "../gpu/la_connector.h"
 #include "../core/meanfield_mpi.h"
+#include "../math/matrix_m.h"
 #include "../io/global_io.h"
 #include "../math/lebedev_laikov.h"
 #include "../math/utils_matrix_m_mpi.h"
@@ -1287,22 +1288,14 @@ void test_strict_2d_gw_routes_gamma_through_complete_wc_average()
                   "missing head/wing data must keep the standard route");
 }
 
-void test_metallic_static_3d_gw_routes_only_static_gamma_through_complete_wc_average()
+void test_metallic_static_gw_routes_only_static_gamma_through_complete_wc_average()
 {
-    assert(librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 3, false, true, true,
-                                                                      true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(false, 3, false, true, true,
-                                                                       true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 2, false, true, true,
-                                                                       true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 3, true, true, true,
-                                                                       true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 3, false, false, true,
-                                                                       true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 3, false, true, false,
-                                                                       true));
-    assert(!librpa_int::use_metallic_static_3d_complete_wc_gamma_route(true, 3, false, true, true,
-                                                                       false));
+    assert(librpa_int::use_metallic_static_complete_wc_gamma_route(true, 3, true, true, true));
+    assert(!librpa_int::use_metallic_static_complete_wc_gamma_route(false, 3, true, true, true));
+    assert(!librpa_int::use_metallic_static_complete_wc_gamma_route(true, 2, true, true, true));
+    assert(!librpa_int::use_metallic_static_complete_wc_gamma_route(true, 3, false, true, true));
+    assert(!librpa_int::use_metallic_static_complete_wc_gamma_route(true, 3, true, false, true));
+    assert(!librpa_int::use_metallic_static_complete_wc_gamma_route(true, 3, true, true, false));
 }
 
 void test_strict_2d_gw_fails_closed_for_incomplete_runtime_configuration()
@@ -1356,7 +1349,7 @@ void test_strict_2d_diagnostic_schema_and_qpoint_order_are_stable()
 {
     const auto count_columns = [](const std::string &header)
     { return 1 + static_cast<int>(std::count(header.begin(), header.end(), ',')); };
-    if (count_columns(librpa_int::strict_2d_finite_q_diagnostics_header()) != 37 ||
+    if (count_columns(librpa_int::strict_2d_finite_q_diagnostics_header()) != 42 ||
         count_columns(librpa_int::strict_2d_gamma_wc_diagnostics_header()) != 19)
     {
         std::cerr << "strict 2D diagnostic CSV schema changed unexpectedly" << std::endl;
@@ -1740,6 +1733,102 @@ void test_strict_2d_wc_blocks_match_dense_finite_q_inverse()
     assert_complex_close(actual(0, 1), head_sqrt * (inv01 * cut_body_sqrt), 1e-13);
     assert_complex_close(actual(1, 0), cut_body_sqrt * inv10 * head_sqrt, 1e-13);
     assert_complex_close(actual(1, 1), cut_body_sqrt * cut_body_sqrt * (inv11 - 1.0), 1e-13);
+}
+
+void test_metallic_static_2d_wc_blocks_match_dense_finite_q_inverse()
+{
+    using complex = std::complex<double>;
+    constexpr int nbody = 2;
+    constexpr double q = 0.19;
+    constexpr double qhat_x = 0.6;
+    constexpr double qhat_y = 0.8;
+    const complex kappa{1.85, 0.0};
+
+    matrix_m<complex> body_inv(nbody, nbody, MAJOR::COL);
+    body_inv(0, 0) = {0.72, 0.0};
+    body_inv(0, 1) = {0.08, 0.02};
+    body_inv(1, 0) = std::conj(body_inv(0, 1));
+    body_inv(1, 1) = {0.91, 0.0};
+
+    matrix_m<complex> static_wing(nbody, 1, MAJOR::COL);
+    static_wing(0, 0) = {0.21, 0.04};
+    static_wing(1, 0) = {-0.13, 0.02};
+
+    matrix_m<complex> dynamic_wing(nbody, 3, MAJOR::COL);
+    dynamic_wing.zero_out();
+    dynamic_wing(0, 0) = {0.16, -0.03};
+    dynamic_wing(0, 1) = {-0.07, 0.05};
+    dynamic_wing(1, 0) = {0.11, 0.02};
+    dynamic_wing(1, 1) = {0.04, -0.06};
+
+    matrix_m<complex> bw(nbody, 3, MAJOR::COL);
+    matrix_m<complex> wb(3, nbody, MAJOR::COL);
+    for (int i = 0; i != nbody; ++i)
+        for (int alpha = 0; alpha != 3; ++alpha)
+        {
+            bw(i, alpha) = 0.0;
+            for (int j = 0; j != nbody; ++j)
+                bw(i, alpha) += body_inv(i, j) * dynamic_wing(j, alpha);
+            wb(alpha, i) = 0.0;
+            for (int j = 0; j != nbody; ++j)
+                wb(alpha, i) += std::conj(dynamic_wing(j, alpha)) * body_inv(j, i);
+        }
+
+    matrix_m<complex> regular_schur(3, 3, MAJOR::COL);
+    regular_schur.zero_out();
+    regular_schur(0, 0) = {0.16, 0.0};
+    regular_schur(0, 1) = {0.02, -0.01};
+    regular_schur(1, 0) = std::conj(regular_schur(0, 1));
+    regular_schur(1, 1) = {0.11, 0.0};
+
+    const auto actual = librpa_int::metallic_static_2d_wc_blocks_at_q(
+        body_inv, static_wing, bw, wb, regular_schur, kappa, qhat_x, qhat_y, q);
+
+    matrix_m<complex> body(nbody, nbody, MAJOR::COL);
+    librpa_int::inverse(body_inv, body);
+
+    std::array<complex, nbody> dynamic_direction{};
+    for (int i = 0; i != nbody; ++i)
+        dynamic_direction[static_cast<std::size_t>(i)] =
+            dynamic_wing(i, 0) * qhat_x + dynamic_wing(i, 1) * qhat_y;
+    complex regular_direction = 0.0;
+    for (int alpha = 0; alpha != 2; ++alpha)
+        for (int beta = 0; beta != 2; ++beta)
+        {
+            const double direction_alpha = alpha == 0 ? qhat_x : qhat_y;
+            const double direction_beta = beta == 0 ? qhat_x : qhat_y;
+            regular_direction += direction_alpha * regular_schur(alpha, beta) * direction_beta;
+        }
+    complex dynamic_head_regular = regular_direction;
+    for (int i = 0; i != nbody; ++i)
+        for (int j = 0; j != nbody; ++j)
+            dynamic_head_regular += std::conj(dynamic_direction[static_cast<std::size_t>(i)]) *
+                                    body_inv(i, j) * dynamic_direction[static_cast<std::size_t>(j)];
+
+    matrix_m<complex> dielectric(nbody + 1, nbody + 1, MAJOR::COL);
+    dielectric.zero_out();
+    const double sqrt_q = std::sqrt(q);
+    dielectric(0, 0) = 1.0 + kappa / q + q * dynamic_head_regular;
+    for (int i = 0; i != nbody; ++i)
+    {
+        dielectric(i + 1, 0) = static_wing(i, 0) / sqrt_q +
+                               sqrt_q * dynamic_direction[static_cast<std::size_t>(i)];
+        dielectric(0, i + 1) = std::conj(static_wing(i, 0)) / sqrt_q +
+                               sqrt_q * std::conj(dynamic_direction[static_cast<std::size_t>(i)]);
+        for (int j = 0; j != nbody; ++j) dielectric(i + 1, j + 1) = body(i, j);
+    }
+
+    matrix_m<complex> dielectric_inv(nbody + 1, nbody + 1, MAJOR::COL);
+    librpa_int::inverse(dielectric, dielectric_inv);
+    for (int i = 0; i != nbody + 1; ++i)
+        for (int j = 0; j != nbody + 1; ++j)
+        {
+            const double left_leg = i == 0 ? std::sqrt(librpa_int::TWO_PI / q) : 1.0;
+            const double right_leg = j == 0 ? std::sqrt(librpa_int::TWO_PI / q) : 1.0;
+            const complex expected = left_leg * right_leg *
+                                     (dielectric_inv(i, j) - (i == j ? 1.0 : 0.0));
+            assert_complex_close(actual(i, j), expected, 2e-12);
+        }
 }
 
 void test_strict_2d_wc_cell_average_matches_anisotropic_radial_quadrature()
@@ -3106,8 +3195,8 @@ void test_finite_temperature_static_metallic_gw_gamma_path(const BlacsCtxtHandle
         if (iloc >= 0 && jloc >= 0) identity_sqrt_coulomb(iloc, jloc) = 1.0;
     }
     df.wing_mu_to_lambda(identity_sqrt_coulomb, desc_coulomb, 2);
-    assert(df.is_metallic_static_3d_frequency(0));
-    assert(!df.is_metallic_static_3d_frequency(1));
+    assert(df.is_metallic_static_frequency(0));
+    assert(!df.is_metallic_static_frequency(1));
 
     auto quadrature = librpa_int::lebedev_laikov::grid(5810);
     std::vector<double> angular_weights(quadrature.weights.size());
@@ -3149,7 +3238,7 @@ void test_finite_temperature_static_metallic_gw_gamma_path(const BlacsCtxtHandle
     auto epsilon = init_local_mat<std::complex<double>>(desc_coulomb, MAJOR::COL);
     if (head_row >= 0 && head_col >= 0) epsilon(head_row, head_col) = 1.0;
     if (body_row >= 0 && body_col >= 0) epsilon(body_row, body_col) = 1.2;
-    df.rewrite_metallic_static_3d_wc(epsilon, 0, desc_coulomb, projected_coulomb_sqrt);
+    df.rewrite_metallic_static_wc(epsilon, 0, desc_coulomb, projected_coulomb_sqrt);
 
     const auto expected_head =
         2.0 * librpa_int::TWO_PI * (inverse_weights.inverse_q2 - inverse_weights.bare_qminus2);
@@ -3204,7 +3293,7 @@ void test_finite_temperature_static_metallic_gw_gamma_path(const BlacsCtxtHandle
     auto mixed_epsilon = init_local_mat<std::complex<double>>(desc_coulomb, MAJOR::COL);
     if (head_row >= 0 && head_col >= 0) mixed_epsilon(head_row, head_col) = 1.0;
     if (body_row >= 0 && body_col >= 0) mixed_epsilon(body_row, body_col) = 1.2;
-    df.rewrite_metallic_static_3d_wc(mixed_epsilon, 0, desc_coulomb, mixed_coulomb_sqrt);
+    df.rewrite_metallic_static_wc(mixed_epsilon, 0, desc_coulomb, mixed_coulomb_sqrt);
     for (int i = 0; i != 2; ++i)
     {
         const int iloc = desc_coulomb.indx_g2l_r(i);
@@ -5128,7 +5217,8 @@ int main(int argc, char *argv[])
         {
             test_metallic_static_3d_converts_internal_reciprocal_units();
             test_metallic_static_3d_inverse_weights_recover_head_only_wc();
-            test_metallic_static_3d_gw_routes_only_static_gamma_through_complete_wc_average();
+            test_metallic_static_gw_routes_only_static_gamma_through_complete_wc_average();
+            test_metallic_static_2d_wc_blocks_match_dense_finite_q_inverse();
             test_complete_gamma_basis_bridge_with_mixed_charge_channel(blacs_h);
         test_finite_temperature_static_metallic_gw_gamma_path(blacs_h);
             goto tests_complete;
@@ -5166,7 +5256,7 @@ int main(int argc, char *argv[])
         test_strict_2d_screening_denominator_must_stay_on_physical_branch();
         test_strict_2d_gw_uses_full_coulomb_at_all_q();
         test_strict_2d_gw_routes_gamma_through_complete_wc_average();
-        test_metallic_static_3d_gw_routes_only_static_gamma_through_complete_wc_average();
+        test_metallic_static_gw_routes_only_static_gamma_through_complete_wc_average();
         test_strict_2d_gw_fails_closed_for_incomplete_runtime_configuration();
         test_strict_2d_diagnostic_schema_and_qpoint_order_are_stable();
         test_strict_2d_qshell_uses_minimum_image_q();
@@ -5183,6 +5273,7 @@ int main(int argc, char *argv[])
         test_strict_2d_pw_wc_transforms_to_auxiliary_coulomb_basis();
         test_strict_2d_regular_coulomb_legs_are_projected_to_the_gamma_basis();
         test_strict_2d_wc_blocks_match_dense_finite_q_inverse();
+        test_metallic_static_2d_wc_blocks_match_dense_finite_q_inverse();
         test_strict_2d_wc_cell_average_matches_anisotropic_radial_quadrature();
         test_strict_2d_wc_cell_average_matches_cartesian_voronoi_subgrid();
         test_strict_2d_wc_blocks_have_finite_small_q_limits();

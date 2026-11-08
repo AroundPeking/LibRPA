@@ -220,7 +220,9 @@ std::string strict_2d_finite_q_diagnostics_header()
            "analytic_wc_limit_real,analytic_wc_limit_imag,q_wc_head_real,"
            "q_wc_head_imag,weighted_wc_head_real,weighted_wc_head_imag,"
            "weighted_wc_head_body_fro,weighted_wc_body_head_fro,"
-           "weighted_wc_body_body_fro";
+           "weighted_wc_body_body_fro,metal_analytic_wc_head_real,"
+           "metal_analytic_wc_head_imag,metal_analytic_wc_head_body_fro,"
+           "metal_analytic_wc_body_head_fro,metal_analytic_wc_body_body_fro";
 }
 
 std::string strict_2d_raw_gamma_chi0_diagnostics_header()
@@ -284,25 +286,13 @@ bool use_strict_2d_complete_wc_gamma_route(const bool replace_w_head, const int 
            gamma_point && headwing_data_available;
 }
 
-bool use_metallic_static_3d_complete_wc_gamma_route(const bool replace_w_head,
-                                                    const int option_dielect_func,
-                                                    const bool use_2d_dielectric,
-                                                    const bool gamma_point,
-                                                    const bool headwing_data_available,
-                                                    const bool finite_temperature_static)
+bool use_metallic_static_complete_wc_gamma_route(const bool replace_w_head,
+                                                const int option_dielect_func,
+                                                const bool gamma_point,
+                                                const bool headwing_data_available,
+                                                const bool finite_temperature_static)
 {
-    return replace_w_head && option_dielect_func == 3 && !use_2d_dielectric && gamma_point &&
-           headwing_data_available && finite_temperature_static;
-}
-
-bool use_metallic_static_2d_complete_wc_gamma_route(const bool replace_w_head,
-                                                    const int option_dielect_func,
-                                                    const bool use_2d_dielectric,
-                                                    const bool gamma_point,
-                                                    const bool headwing_data_available,
-                                                    const bool finite_temperature_static)
-{
-    return replace_w_head && option_dielect_func == 3 && use_2d_dielectric && gamma_point &&
+    return replace_w_head && option_dielect_func == 3 && gamma_point &&
            headwing_data_available && finite_temperature_static;
 }
 
@@ -3410,22 +3400,20 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
             for (const auto &frequency : chi0.tfg.get_freq_nodes())
             {
                 const int frequency_index = chi0.tfg.get_freq_index(frequency);
-                if (df_headwing->is_metallic_static_3d_frequency(frequency_index) ||
-                    df_headwing->is_metallic_static_2d_frequency(frequency_index))
+                if (df_headwing->is_metallic_static_frequency(frequency_index))
                 {
                     has_metallic_static_frequency = true;
                     break;
                 }
             }
         }
-        const bool prepare_metallic_static_3d_complete_wc =
-            use_metallic_static_3d_complete_wc_gamma_route(
-                replace_w_head, option_dielect_func,
-                false, is_gamma_point(q),
+        const bool prepare_metallic_static_complete_wc =
+            use_metallic_static_complete_wc_gamma_route(
+                replace_w_head, option_dielect_func, is_gamma_point(q),
                 !epsmac_LF_imagfreq.empty() && df_headwing != nullptr,
                 has_metallic_static_frequency);
         matrix_m<std::complex<double>> gamma_projected_coulomb_sqrt;
-        if (prepare_metallic_static_3d_complete_wc ||
+        if (prepare_metallic_static_complete_wc ||
             (strict_2d_requested && is_gamma_point(q)))
         {
             gamma_projected_coulomb_sqrt =
@@ -3500,7 +3488,7 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         // rewrite below.  The GW path does not otherwise need the contracted
         // head/wing object, so perform the mu->lambda projection explicitly
         // before releasing sqrt(V).  Without this, the static branch reaches
-        // rewrite_metallic_static_2d_wc() with an empty coefficient vector.
+        // rewrite_metallic_static_wc() with an empty coefficient vector.
         if (is_gamma_point(q) && df_headwing != nullptr && has_metallic_static_frequency &&
             df_headwing->use_2d_dielectric)
         {
@@ -3587,18 +3575,11 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
         for (const auto &freq : chi0.tfg.get_freq_nodes())
         {
             const auto ifreq = chi0.tfg.get_freq_index(freq);
-            const bool metallic_static_3d_complete_wc_gamma =
-                use_metallic_static_3d_complete_wc_gamma_route(
-                    replace_w_head, option_dielect_func,
-                    false, is_gamma_point(q),
+            const bool metallic_static_complete_wc_gamma =
+                use_metallic_static_complete_wc_gamma_route(
+                    replace_w_head, option_dielect_func, is_gamma_point(q),
                     !epsmac_LF_imagfreq.empty() && df_headwing != nullptr,
-                    df_headwing != nullptr && df_headwing->is_metallic_static_3d_frequency(ifreq));
-            const bool metallic_static_2d_complete_wc_gamma =
-                use_metallic_static_2d_complete_wc_gamma_route(
-                    replace_w_head, option_dielect_func,
-                    df_headwing != nullptr && df_headwing->use_2d_dielectric, is_gamma_point(q),
-                    !epsmac_LF_imagfreq.empty() && df_headwing != nullptr,
-                    df_headwing != nullptr && df_headwing->is_metallic_static_2d_frequency(ifreq));
+                    df_headwing != nullptr && df_headwing->is_metallic_static_frequency(ifreq));
             std::complex<double> finite_q_p_head = std::numeric_limits<double>::quiet_NaN();
             Strict2dBlockMetrics finite_q_p_metrics;
             global::profiler.start("epsilon_wc_work_q_omega");
@@ -3752,7 +3733,7 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                          << endl;
                 if (df_headwing == nullptr)
                     throw LIBRPA_RUNTIME_ERROR("Head/wing dielectric function is not initialized");
-                if (strict_2d_complete_wc_gamma || metallic_static_3d_complete_wc_gamma)
+                if (strict_2d_complete_wc_gamma || metallic_static_complete_wc_gamma)
                 {
                     // The mainline dielectric matrix is in the ABF basis, whereas the
                     // complete-cell integrator separates channels in the fixed Coulomb basis.
@@ -3760,16 +3741,12 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                     project_blacs_matrix_in_basis(
                         chi0_block, coul_eigen_block, desc_nabf_nabf_opt,
                         as_int(n_nonsingular), coul_chi0_block, gamma_epsilon);
-                    if (metallic_static_2d_complete_wc_gamma)
-                        df_headwing->rewrite_metallic_static_2d_wc(
+                    if (metallic_static_complete_wc_gamma)
+                        df_headwing->rewrite_metallic_static_wc(
                             gamma_epsilon, ifreq, desc_nabf_nabf_opt, gamma_projected_coulomb_sqrt);
                     else if (strict_2d_complete_wc_gamma)
                         df_headwing->rewrite_strict_2d_wc(
                             gamma_epsilon, ifreq, desc_nabf_nabf_opt, gamma_projected_coulomb_sqrt);
-                    else
-                        df_headwing->rewrite_metallic_static_3d_wc(
-                            gamma_epsilon, ifreq, desc_nabf_nabf_opt,
-                            gamma_projected_coulomb_sqrt);
                     restore_blacs_matrix_from_basis(
                         gamma_epsilon, coul_eigen_block, desc_nabf_nabf_opt,
                         as_int(n_nonsingular), coul_chi0_block, chi0_block);
@@ -3927,8 +3904,7 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                                     desc_nabf_nabf_opt, "", 1e-10);
 
             global::profiler.start("epsilon_to_wc");
-            if (strict_2d_complete_wc_gamma || metallic_static_3d_complete_wc_gamma ||
-                metallic_static_2d_complete_wc_gamma)
+            if (strict_2d_complete_wc_gamma || metallic_static_complete_wc_gamma)
             {
                 if (ifreq == 0 && comm_h.is_root())
                     std::cout
@@ -4058,12 +4034,11 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                         "strict 2D finite-q diagnostic encountered invalid q");
                 const double qhat_x = q.x / q_internal;
                 const double qhat_y = q.y / q_internal;
-                // The existing finite-q reference is the insulating head
-                // limit.  At finite temperature the static metallic mode has
-                // a 1/q head and static wings, so applying that reference
-                // would report a spurious mismatch.  Keep the raw finite-q
-                // diagnostics, but leave the insulating-reference columns
-                // as NaN until a metal-specific reference is implemented.
+                Strict2dBlockMetrics metal_analytic_wc_metrics;
+                bool metal_analytic_wc_available = false;
+                // The insulating finite-q reference is invalid for a
+                // metallic static mode; retain raw diagnostics and compare
+                // Wc against the metal-specific block reference below.
                 const bool metallic_static_2d_reference =
                     df_headwing->is_metallic_static_2d_frequency(ifreq);
                 Strict2dFiniteQReference reference{};
@@ -4079,10 +4054,34 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                     reference = df_headwing->get_strict_2d_finite_q_reference(
                         ifreq, q.x, q.y);
                 }
+                if (metallic_static_2d_reference)
+                {
+                    diagnostic_projection.zero_out();
+                    df_headwing->rewrite_metallic_static_2d_wc_at_q(
+                        diagnostic_projection, ifreq, desc_nabf_nabf_opt, qhat_x, qhat_y,
+                        q_physical);
+                    metal_analytic_wc_metrics = collect_strict_2d_block_metrics(
+                        diagnostic_projection, desc_nabf_nabf_opt, gamma_n_nonsingular, comm_h);
+                    metal_analytic_wc_available = true;
+                }
                 const auto wc_head = wc_metrics.head;
                 const double q_weight = chi0.q_weight(q);
                 const auto p_over_q = finite_q_p_head / q_physical;
                 const auto analytic_p_over_q = -reference.epsilon_minus_identity_over_q;
+                const double nan = std::numeric_limits<double>::quiet_NaN();
+                const auto metal_analytic_head =
+                    metal_analytic_wc_available
+                        ? metal_analytic_wc_metrics.head
+                        : std::complex<double>{nan, nan};
+                const double metal_analytic_head_body = metal_analytic_wc_available
+                                                            ? metal_analytic_wc_metrics.head_body_frobenius
+                                                            : nan;
+                const double metal_analytic_body_head = metal_analytic_wc_available
+                                                            ? metal_analytic_wc_metrics.body_head_frobenius
+                                                            : nan;
+                const double metal_analytic_body_body = metal_analytic_wc_available
+                                                            ? metal_analytic_wc_metrics.body_body_frobenius
+                                                            : nan;
                 if (comm_h.is_root())
                     finite_q_diagnostics
                         << iq << ',' << qf.x << ',' << qf.y << ',' << qf.z << ',' << q_physical
@@ -4106,7 +4105,10 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                         << q_weight * wc_head.imag() << ','
                         << q_weight * wc_metrics.head_body_frobenius << ','
                         << q_weight * wc_metrics.body_head_frobenius << ','
-                        << q_weight * wc_metrics.body_body_frobenius << '\n';
+                        << q_weight * wc_metrics.body_body_frobenius << ','
+                        << metal_analytic_head.real() << ',' << metal_analytic_head.imag() << ','
+                        << metal_analytic_head_body << ',' << metal_analytic_body_head << ','
+                        << metal_analytic_body_body << '\n';
             }
             // convert back to initial distribution
             ScalapackConnector::pgemr2d_f(n_abf, n_abf, chi0_block.ptr(), 1, 1, desc_nabf_nabf_opt.desc,
