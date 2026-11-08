@@ -55,6 +55,23 @@ using std::vector;
 namespace librpa_int
 {
 
+// Prototype-only coupling-constant control for finite-temperature AC-RPA.
+// The normal production path leaves this at lambda=1.
+double rpa_lambda_from_environment()
+{
+    const char *raw = std::getenv("LIBRPA_RPA_LAMBDA");
+    if (raw == nullptr || raw[0] == '\0') return 1.0;
+
+    char *end = nullptr;
+    const double value = std::strtod(raw, &end);
+    if (end == raw || *end != '\0' || !std::isfinite(value) || value < 0.0 || value > 1.0)
+    {
+        throw LIBRPA_RUNTIME_ERROR(
+            "LIBRPA_RPA_LAMBDA must be a finite number in the interval [0, 1]");
+    }
+    return value;
+}
+
 Strict2dQshellRegion classify_strict_2d_qshell(const double q_norm, const double first_q_norm)
 {
     if (!(first_q_norm > 0.0) || !std::isfinite(first_q_norm))
@@ -2272,6 +2289,9 @@ CorrEnergy compute_RPA_correlation(LibrpaParallelRouting routing, const Chi0 &ch
     CorrEnergy corr;
     const auto &comm_h = chi0.comm_h;
     if (comm_h.myid == 0) lib_printf("Calculating EcRPA without BLACS/ScaLAPACK\n");
+    const double rpa_lambda = rpa_lambda_from_environment();
+    if (comm_h.myid == 0 && rpa_lambda != 1.0)
+        lib_printf("Prototype RPA coupling scale lambda = %.16g\n", rpa_lambda);
     // lib_printf("Begin cal cRPA , pid:  %d\n", comm_h.myid);
     const auto &mf = chi0.mf;
 
@@ -2361,6 +2381,12 @@ CorrEnergy compute_RPA_correlation(LibrpaParallelRouting routing, const Chi0 &ch
                 pi_freq_q.at(freq).at(q) = std::move(pi_munu_tmp);
             }
         }
+    }
+    if (rpa_lambda != 1.0)
+    {
+        for (auto &freq_q : pi_freq_q)
+            for (auto &q_pi : freq_q.second)
+                q_pi.second *= complex<double>(rpa_lambda, 0.0);
     }
     // lib_printf("Finish Pi communicate %4d, size %zu\n", comm_h.myid, pi_freq_q_Mu_Nu.size());
     comm_h.barrier();
