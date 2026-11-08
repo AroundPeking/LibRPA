@@ -1,10 +1,12 @@
 # Sparse Finite-Temperature GW Operators
 
 The initial public finite-temperature GW route uses independent external
-operators from `fn_thermal_gw_grid`. It supports full-k, scalar-spin
-3D CPU calculations with LibRI and ScaLAPACK, with optional EXX, response/q-star
+operators from `fn_thermal_gw_grid`. It supports scalar-spin 3D CPU
+calculations with LibRI and ScaLAPACK. The SCF input may use either the full
+BvK k grid or a symmetry-reduced IBZ/k-star representation, with optional EXX, response/q-star
 and real-space Sigma symmetry. It is under synthetic and
 regression validation; this is not material or arbitrary-boundary acceptance.
+For IBZ input, the EXX, RPA and GW symmetry switches must all be enabled.
 
 ## Internal Spacetime Data Flow
 
@@ -41,8 +43,9 @@ these samples, not the bosonic response grid. `Sigc_fermionic_grid.dat` records
 beta, mu and positive integer labels with their frequencies. Legacy Sigma
 restart and continuation-grid resampling remain explicitly unsupported.
 
-This initial CPU reference requires scalar spin, replicated full-k SCF data,
-uncompressed matching LRI data and a global W descriptor.
+This initial CPU reference requires scalar spin, replicated SCF data, either a
+complete full-k grid or validated IBZ/k-star metadata, uncompressed matching
+LRI data and a global W descriptor.
 Physical metadata must be identical across ranks. It validates local inputs
 collectively, including empty matrix owners; B batches skip zero local columns
 without skipping collectives. Its bounded temporary buffers do not bound the
@@ -56,9 +59,10 @@ Do not interpret an operator test as a Na quasiparticle or bandwidth result.
 
 ## Real-Space Sigma Symmetry
 
-`use_symmetry_gw = t` enables only the existing output-only LibRI sector filter
-and AO rotation recovery in the thermal builder. It does not reduce the supplied
-k/q grids, rebuild G from k stars, regenerate frequencies, or interpolate C.
+`use_symmetry_gw = t` enables the existing LibRI sector filter and AO rotation
+recovery in the thermal builder. For an IBZ SCF input it also restores the full
+k-star Green function before the CGGC/CWCG contraction. It does not regenerate
+frequencies or interpolate C.
 The independent EXX and response switches can also be enabled as described below.
 
 The input Hamiltonian, FD reference, C and W must obey the supplied spatial
@@ -98,7 +102,9 @@ and time reversal in the **original spherical-shell basis**, not in an arbitrary
 compressed basis. After full-q recovery, negative bosonic samples are constructed
 by the complete matrix adjoint. No q-star multiplicity is applied to restored
 matrix elements; the unchanged q-to-R transform supplies `1/Nq` exactly once.
-Input SCF eigenvectors still cover the full uniform grid in this first route.
+Input SCF eigenvectors may be stored on the IBZ when the symmetry context carries
+the complete k-star mapping; the thermal Green builder restores the full BvK
+sum with the finite-temperature Fermi weights before the real-space contraction.
 
 `use_symmetry_exx = t` reuses the existing exchange implementation. Its density
 matrix uses the supplied FD occupations; neither a new exchange formula nor a

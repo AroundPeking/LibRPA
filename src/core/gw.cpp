@@ -899,17 +899,15 @@ void G0W0::set_thermal_sigc(ThermalSigcRspace result)
             validate_fermi_dirac_chemical_potential(fd, result.chemical_potential_ha);
             validate_fermi_dirac_chemical_potential(fd, mf.get_efermi());
             if (mf.get_n_spinor() != 1) throw std::invalid_argument("requires scalar spin");
-            if (pbc.kfrac_list.size() != static_cast<std::size_t>(mf.get_n_kpoints()) ||
-                pbc.kfrac_list_full.size() != static_cast<std::size_t>(pbc.get_n_cells_bvk()))
-                throw std::invalid_argument("self-energy import requires complete BvK mesh metadata");
-            const bool reduced_scf_k_grid =
-                pbc.klist != pbc.klist_full || pbc.kfrac_list != pbc.kfrac_list_full;
-            if (reduced_scf_k_grid &&
-                (!use_symmetry_context || !symmetry_context.available ||
-                 symmetry_context.kstar_grid_mapping.size() != pbc.kfrac_list.size() ||
-                 symmetry_context.count_kstar_members() != pbc.get_n_cells_bvk()))
+            // Spatially reduced contractions have already restored full AO/R
+            // blocks; the import and its ordinary distributed sum are unchanged.
+            if (use_symmetry_context && pbc.klist.size() < pbc.klist_full.size() &&
+                (!symmetry_context.available ||
+                 symmetry_context.kstars.size() != static_cast<std::size_t>(mf.get_n_kpoints()) ||
+                 symmetry_context.count_kstar_members() !=
+                     static_cast<std::size_t>(pbc.get_n_cells_bvk())))
                 throw std::invalid_argument(
-                    "IBZ self-energy import requires a complete symmetry k-star map");
+                    "self-energy symmetry import requires complete SCF k-star metadata");
             if (mf.get_n_spins() <= 0 || atbasis_wfc.n_atoms == 0 ||
                 atbasis_wfc.nb_total != mf.get_n_aos())
                 throw std::invalid_argument("invalid AO/spin dimensions");
@@ -1780,24 +1778,32 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
             validate_fermi_dirac_chemical_potential(fd, mf.get_efermi());
             if (mf.get_n_spinor() != 1 || is_eigvec_k_distributed_)
                 throw std::invalid_argument("reference requires scalar spin and replicated SCF");
-            if (pbc.kfrac_list.size() != static_cast<std::size_t>(mf.get_n_kpoints()) ||
-                pbc.kfrac_list_full.size() != static_cast<std::size_t>(pbc.get_n_cells_bvk()))
-                throw std::invalid_argument("reference requires complete BvK mesh metadata");
-            const bool reduced_scf_k_grid =
-                pbc.klist != pbc.klist_full || pbc.kfrac_list != pbc.kfrac_list_full;
-            if (reduced_scf_k_grid)
+            const auto n_bvk_kpoints = static_cast<std::size_t>(pbc.get_n_cells_bvk());
+            if (pbc.klist.empty() ||
+                pbc.klist.size() != static_cast<std::size_t>(mf.get_n_kpoints()) ||
+                pbc.kfrac_list.size() != static_cast<std::size_t>(mf.get_n_kpoints()))
+                throw std::invalid_argument("reference requires consistent SCF k-point data");
+            if (pbc.klist_full.size() != n_bvk_kpoints ||
+                pbc.kfrac_list_full.size() != n_bvk_kpoints)
+                throw std::invalid_argument(
+                    "reference requires complete SCF k-star metadata");
+            if (pbc.klist.size() < pbc.klist_full.size())
             {
-                const auto atom_nw = atbasis_wfc.get_atom_nb_map();
-                const auto wfc_layouts = atbasis_wfc.has_l_shells()
-                                             ? atbasis_wfc.build_species_basis_layouts(
-                                                   symmetry_context.atom_to_type)
-                                             : std::vector<SpeciesBasisLayout>{};
-                if (!use_symmetry_context ||
-                    symmetry_context.count_kstar_members() != pbc.get_n_cells_bvk() ||
-                    !can_restore_symmetry_kstar_meanfield(symmetry_context, wfc_layouts, mf,
-                                                          pbc.kfrac_list, atom_nw))
+                if (!use_symmetry_context || !symmetry_context.available ||
+                    symmetry_context.kstars.size() !=
+                        static_cast<std::size_t>(mf.get_n_kpoints()) ||
+                    symmetry_context.count_kstar_members() != n_bvk_kpoints)
                     throw std::invalid_argument(
-                        "IBZ thermal GW requires symmetry-restorable SCF states");
+                        "a symmetry-reduced SCF k grid requires complete k-star symmetry metadata");
+                const auto atom_nw = atbasis_wfc.get_atom_nb_map();
+                const auto wfc_layouts =
+                    atbasis_wfc.has_l_shells()
+                        ? atbasis_wfc.build_species_basis_layouts(symmetry_context.atom_to_type)
+                        : std::vector<SpeciesBasisLayout>{};
+                if (!can_restore_symmetry_kstar_meanfield(
+                        symmetry_context, wfc_layouts, mf, pbc.kfrac_list, atom_nw))
+                    throw std::invalid_argument(
+                        "the thermal Green builder cannot restore this SCF k-star representation");
             }
             if (!ad_wc.initialized() || !ad_wc.is_row_consec() || !ad_wc.is_col_consec())
                 throw std::invalid_argument("Wc requires an initialized consecutive descriptor");
@@ -1915,10 +1921,10 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
     if (comm_h.is_root())
         global::lib_printf(
             "Thermal Sigma real-space symmetry: %s, requested blocks=%zu full blocks=%zu; "
-            "full k/q grids retained\n",
+            "k-star G reconstruction requested: %s; full q metadata retained\n",
             use_rspace_symmetry ? "on" : "off",
             use_rspace_symmetry ? symmetry_context.count_irreducible_blocks() : n_full_blocks,
-            n_full_blocks);
+            n_full_blocks, use_symmetry_context ? "on" : "off");
     if (use_tetra_unfolded_grid && comm_h.is_root())
         global::lib_printf(
             "Finite-temperature tetrahedron Sigma: expanded real-space period = (%d,%d,%d), "
@@ -1982,8 +1988,8 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
                     [&]
                     {
                         build_gf_libri_kserial(mf, atbasis_wfc, spin, 0, 0, pbc, symmetry_context,
-                                               use_symmetry_context, pbc.kfrac_list, {tau}, ijrs,
-                                               gs);
+                                               this->use_symmetry_context, pbc.kfrac_list, {tau},
+                                               ijrs, gs);
                     });
                 gw_libri.set_Gs(gs.at(tau), libri_threshold_G);
                 const double g_ready_time = MPI_Wtime();

@@ -995,7 +995,8 @@ without clearing the FD reference using `clear_external_thermal_time_grid`.
 by default, for `task=rpa`, `task=g0w0` or `task=g0w0_band` with
 `tfgrids_type=fd_matsubara`. For RPA it only stores independent GW operators.
 For GW it is required by the initial 3D CPU route: scalar spin, replicated
-full-k SCF, optional EXX/response/Sigma symmetry, LibRI contractions and ScaLAPACK
+SCF data on either the full BvK grid or a validated symmetry-reduced IBZ/k-star
+grid, optional EXX/response/Sigma symmetry, LibRI contractions and ScaLAPACK
 Wc. `fn_thermal_tau_grid` may provide the response grid independently; both
 files are allowed for GW. Loading either file does not itself run a calculation.
 The GW consumer unfolds compressed Wc to the full auxiliary basis, restores

@@ -704,18 +704,19 @@ void librpa_build_g0w0_sigma(LibrpaHandler* h, const LibrpaOptions *p_opts)
             if (pds->mf.get_n_spinor() != 1 || opts.use_kpara_scf_eigvec == LIBRPA_SWITCH_ON)
                 unsupported(
                     "the reference route requires scalar spin and replicated SCF");
-            const bool complete_scf_k_grid =
-                !pds->pbc.klist.empty() && pds->pbc.klist == pds->pbc.klist_full &&
-                pds->pbc.kfrac_list == pds->pbc.kfrac_list_full &&
-                pds->mf.get_n_kpoints() == pds->pbc.get_n_cells_bvk();
+            const auto n_bvk_kpoints = static_cast<std::size_t>(pds->pbc.get_n_cells_bvk());
             if (pds->pbc.klist.empty() ||
                 pds->pbc.klist.size() != static_cast<std::size_t>(pds->mf.get_n_kpoints()) ||
-                pds->pbc.kfrac_list.size() != static_cast<std::size_t>(pds->mf.get_n_kpoints()) ||
-                pds->pbc.klist_full.size() !=
-                    static_cast<std::size_t>(pds->pbc.get_n_cells_bvk()))
-                unsupported("SCF k-point data do not describe the complete BvK mesh");
-            if (!complete_scf_k_grid && opts.use_symmetry_gw != LIBRPA_SWITCH_ON)
-                unsupported("an IBZ SCF k grid requires use_symmetry_gw");
+                pds->pbc.kfrac_list.size() != static_cast<std::size_t>(pds->mf.get_n_kpoints()))
+                unsupported("SCF k-point data are missing or inconsistent");
+            if (pds->pbc.klist_full.size() != n_bvk_kpoints ||
+                pds->pbc.kfrac_list_full.size() != n_bvk_kpoints)
+                unsupported("SCF k-star metadata must cover the complete BvK grid");
+            if (pds->pbc.klist.size() < pds->pbc.klist_full.size() &&
+                (opts.use_symmetry_exx != LIBRPA_SWITCH_ON ||
+                 opts.use_symmetry_rpa != LIBRPA_SWITCH_ON ||
+                 opts.use_symmetry_gw != LIBRPA_SWITCH_ON))
+                unsupported("a symmetry-reduced SCF k grid requires EXX, RPA, and GW symmetry");
             if (pds->atoms.size() == 0 || pds->atoms.size() != pds->basis_wfc.n_atoms ||
                 pds->basis_aux.n_atoms != pds->basis_wfc.n_atoms ||
                 pds->basis_wfc.nb_total != pds->mf.get_n_aos())

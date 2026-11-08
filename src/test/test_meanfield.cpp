@@ -520,6 +520,89 @@ void test_symmetry_context_full_grid_kstar_route_matches_direct_full_k()
     }
 }
 
+void test_symmetry_context_ibz_thermal_green_reconstruction_matches_full_k()
+{
+    using namespace librpa_int;
+
+    SymmetryContext ctx;
+    ctx.set_available();
+    const std::vector<SpeciesBasisLayout> wfc_layouts{{"X", {0}}};
+    ctx.atom_to_type[0] = 0;
+    ctx.input_coord_frac[0] = {0.0, 0.0, 0.0};
+
+    SymmetryOperation identity_operation;
+    identity_operation.rotation.Identity();
+    identity_operation.translation = {0.0, 0.0, 0.0};
+    ctx.rspace_operations.push_back(identity_operation);
+    ctx.rsh_rotations.emplace_back();
+    ctx.rsh_rotations.back()[0] = ComplexMatrix(1, 1);
+    ctx.rsh_rotations.back()[0](0, 0) = {1.0, 0.0};
+
+    SymmetryKAtomRotation atom_rotation;
+    atom_rotation.atom_from = 0;
+    atom_rotation.atom_to = 0;
+    atom_rotation.atom_type = 0;
+    atom_rotation.lmax = 0;
+    atom_rotation.bloch_rsh_rotations[0] = ComplexMatrix(1, 1);
+    atom_rotation.bloch_rsh_rotations[0](0, 0) = {1.0, 0.0};
+
+    SymmetryKStar star;
+    star.star_index = 0;
+    star.k_ibz = {0.0, 0.0, 0.0};
+    star.members.resize(2);
+    star.members[0].spatial_isym = 0;
+    star.members[0].k_bz = {0.0, 0.0, 0.0};
+    star.members[0].atom_rotations.push_back(atom_rotation);
+    star.members[1].spatial_isym = 0;
+    star.members[1].k_bz = {0.5, 0.0, 0.0};
+    star.members[1].atom_rotations.push_back(atom_rotation);
+    ctx.kstars.push_back(star);
+
+    MeanField mf_ibz(1, 1, 2, 1);
+    MeanField mf_full(1, 2, 2, 1);
+    for (int ik = 0; ik != mf_full.get_n_kpoints(); ++ik)
+    {
+        for (int ib = 0; ib != mf_full.get_n_bands(); ++ib)
+        {
+            const double energy = ib == 0 ? -0.2 : 0.3;
+            mf_full.get_eigenvals()[0](ik, ib) = energy;
+            mf_ibz.get_eigenvals()[0](0, ib) = energy;
+        }
+        mf_full.get_eigenvectors()[0][0][ik].create(2, 1);
+        mf_full.get_eigenvectors()[0][0][ik](0, 0) = {1.0, 0.0};
+        mf_full.get_eigenvectors()[0][0][ik](1, 0) = {0.0, 0.0};
+    }
+    mf_ibz.get_eigenvectors()[0][0][0].create(2, 1);
+    mf_ibz.get_eigenvectors()[0][0][0](0, 0) = {1.0, 0.0};
+    mf_ibz.get_eigenvectors()[0][0][0](1, 0) = {0.0, 0.0};
+    const auto fd = make_fermi_dirac_reference(0.08, 0.0, 2.0, 1.0e-12);
+    mf_ibz.set_fermi_dirac_reference(fd);
+    mf_full.set_fermi_dirac_reference(fd);
+
+    const std::vector<Vector3_Order<double>> kfrac_ibz{{0.0, 0.0, 0.0}};
+    const std::vector<Vector3_Order<double>> kfrac_full{
+        {0.0, 0.0, 0.0}, {0.5, 0.0, 0.0}};
+    const std::vector<Vector3_Order<int>> Rs{{0, 0, 0}, {1, 0, 0}};
+    const std::vector<double> taus{-4.0, 4.0};
+    const std::map<atom_t, size_t> atom_nw{{0, 1}};
+    const auto direct =
+        mf_full.get_gf_cplx_imagtimes_Rs(0, 0, 0, kfrac_full, taus, Rs);
+    const auto restored = get_symmetry_restored_gf_cplx_imagtimes_Rs(
+        ctx, wfc_layouts, mf_ibz, 0, 0, 0, kfrac_ibz, taus, Rs, atom_nw);
+    for (const auto tau : taus)
+    {
+        for (const auto &R : Rs)
+        {
+            if (!fequal(direct.at(tau).at(R)(0, 0),
+                        restored.at(tau).at(R)(0, 0), {1e-12, 0.0}))
+            {
+                throw std::runtime_error(
+                    "IBZ thermal k-star Green function differs from direct full-k");
+            }
+        }
+    }
+}
+
 void test_symmetry_context_kstar_restored_dmat_uses_target_kpoint_gauge()
 {
     using namespace librpa_int;
@@ -606,6 +689,7 @@ int main(int argc, char *argv[])
     test_symmetry_context_kstar_restored_dmat_uses_full_star_phases();
     test_symmetry_context_kstar_restore_skips_full_grid();
     test_symmetry_context_full_grid_kstar_route_matches_direct_full_k();
+    test_symmetry_context_ibz_thermal_green_reconstruction_matches_full_k();
     test_symmetry_context_kstar_restored_dmat_uses_target_kpoint_gauge();
     return 0;
 }
