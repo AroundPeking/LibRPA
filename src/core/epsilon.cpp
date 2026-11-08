@@ -4036,9 +4036,10 @@ std::map<double, std::map<Vector3_Order<double>, Matz>> compute_Wc_freq_q_blacs(
                 const double qhat_y = q.y / q_internal;
                 Strict2dBlockMetrics metal_analytic_wc_metrics;
                 bool metal_analytic_wc_available = false;
-                // The insulating finite-q reference is invalid for a
-                // metallic static mode; retain raw diagnostics and compare
-                // Wc against the metal-specific block reference below.
+                // The old finite-q reference is the insulating head limit.
+                // The static metallic mode has a 1/q head and static wings;
+                // keep the insulating columns as NaN and compare Wc against
+                // the metal-specific block reference below.
                 const bool metallic_static_2d_reference =
                     df_headwing->is_metallic_static_2d_frequency(ifreq);
                 Strict2dFiniteQReference reference{};
