@@ -1403,7 +1403,7 @@ void read_headwing_input(const string &dir_path, bool need_wing,
     {
         librpa_int::initialize_symmetry_context(*pds, true);
     }
-    // Thermal q/GG symmetry retains a full SCF mesh; do not expand its stars again.
+    // Keep full-BZ PyATB head/wing data separate from the active SCF IBZ list.
     const bool headwing_uses_reduced_kmesh = scf_nk < pds->pbc.get_n_cells_bvk();
     if (headwing_uses_reduced_kmesh && path_exists(pyatb_velocity.c_str()) &&
         pds->symmetry_context.available && !pds->symmetry_context.kstars.empty())
@@ -1443,8 +1443,15 @@ void read_headwing_input(const string &dir_path, bool need_wing,
     const bool use_strict_2d = driver::get_bool(driver::opts.use_2d_dielectric);
     if (use_strict_2d)
     {
+        const auto metadata_path = resolve_strict_2d_coulomb_head_metadata_path(
+            librpa_int::join_path(dir_path, "librpa_2d_coulomb_head.dat"),
+            librpa_int::join_path(dir_path, "librpa_2d_coulomb_head.txt"));
+        if (metadata_path.size() >= 4 && metadata_path.compare(metadata_path.size() - 4, 4, ".txt") == 0)
+            librpa_int::global::lib_printf_root(
+                "Strict 2D Coulomb metadata compatibility: reading legacy filename %s.\n",
+                metadata_path.c_str());
         const auto metadata = read_strict_2d_coulomb_head_metadata(
-            librpa_int::join_path(dir_path, "librpa_2d_coulomb_head.dat"));
+            metadata_path);
         const auto normalization = librpa_int::strict_2d_coulomb_head_normalization(
             pds->pbc, metadata.auxiliary_monopole_norm_squared);
         const double area_scale = std::max(normalization.inplane_area_bohr2,
@@ -1977,7 +1984,7 @@ bool read_thermal_occupation_reference(const std::string &file_path)
 
     const auto metadata = read_thermal_occupation_metadata(file_path);
     const auto pds = api::get_dataset_instance(driver::h);
-    const auto &mf = pds->mf;
+    auto &mf = pds->mf;
     const auto &kweights = pds->pbc.weight_k;
 
     if (!pds->is_scf_eigocc_set)
@@ -2014,8 +2021,10 @@ bool read_thermal_occupation_reference(const std::string &file_path)
     }
 
     constexpr double occupation_tolerance = 1.0e-12;
+    const double band_out_chemical_potential = mf.get_efermi();
     const double maximum_error = validate_thermal_occupations(
-        metadata, mf.get_efermi(), samples, occupation_tolerance);
+        metadata, band_out_chemical_potential, samples, occupation_tolerance);
+    mf.get_efermi() = metadata.chemical_potential_ha;
     driver::h.set_fermi_dirac_reference(
         metadata.kbt_ha, metadata.chemical_potential_ha,
         metadata.max_occupation_per_band, occupation_tolerance);
@@ -2024,8 +2033,43 @@ bool read_thermal_occupation_reference(const std::string &file_path)
     global::lib_printf_root("| kBT                         (Ha): %18.10e\n", metadata.kbt_ha);
     global::lib_printf_root("| chemical potential          (Ha): %18.10e\n",
                             metadata.chemical_potential_ha);
+    global::lib_printf_root("| band_out mu roundoff          (Ha): %18.10e\n",
+                            std::abs(band_out_chemical_potential - metadata.chemical_potential_ha));
     global::lib_printf_root("| maximum occupation mismatch     : %18.10e\n", maximum_error);
     return true;
+}
+
+void apply_scf_occupation_kpoint_weights()
+{
+    const auto pds = librpa_int::api::get_dataset_instance(driver::h);
+    if (!pds->is_scf_eigocc_set) return;
+
+    const int full_kpoint_count = pds->pbc.get_n_cells_bvk();
+    if (full_kpoint_count <= 0 ||
+        pds->pbc.kfrac_list_full.size() != static_cast<std::size_t>(full_kpoint_count))
+        throw LIBRPA_RUNTIME_ERROR(
+            "Cannot apply band_out weights before the full BvK mesh is available");
+    if (pds->mf.get_n_kpoints() != static_cast<int>(pds->pbc.kfrac_list.size()))
+        throw LIBRPA_RUNTIME_ERROR(
+            "band_out occupations do not match the loaded SCF k-point list");
+
+    // band_out uses its listed k-point count (IBZ size here), not the full BZ size.
+    auto &unweighted_occupations = pds->mf.get_unweighted_weight();
+    for (int ik = 0; ik != pds->mf.get_n_kpoints(); ++ik)
+    {
+        const double kpoint_weight = pds->pbc.weight_k[static_cast<std::size_t>(ik)];
+        for (int ispin = 0; ispin != pds->mf.get_n_spins(); ++ispin)
+        {
+            for (int iband = 0; iband != pds->mf.get_n_states(); ++iband)
+            {
+                unweighted_occupations[ispin](ik, iband) =
+                    librpa_int::recover_band_out_occupation(
+                        unweighted_occupations[ispin](ik, iband), kpoint_weight,
+                        pds->mf.get_n_kpoints());
+            }
+        }
+    }
+    pds->mf.apply_kpoint_weights(pds->pbc.weight_k);
 }
 
 void read_basis_wfc_aux(const std::string &input_dir,

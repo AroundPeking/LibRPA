@@ -771,6 +771,7 @@ void MeanField::resize(int ns, int nk, int nb, int nao, int nspinor, int st_ib, 
     {
         eskb.clear();
         wg.clear();
+        wg_unweighted.clear();
         wfc.clear();
     }
 
@@ -786,12 +787,14 @@ void MeanField::resize(int ns, int nk, int nb, int nao, int nspinor, int st_ib, 
 
     eskb.resize(n_spins);
     wg.resize(n_spins);
+    wg_unweighted.resize(n_spins);
     wfc.clear();
 
     for (int is = 0; is < n_spins; is++)
     {
         eskb[is].create(n_kpoints, n_states);
         wg[is].create(n_kpoints, n_states);
+        wg_unweighted[is].create(n_kpoints, n_states);
     }
 }
 
@@ -825,6 +828,7 @@ MeanField::MeanField(int ns, int nk, int nb, int nao, int nspinor)
       i_state_start(0),
       eskb(),
       wg(),
+      wg_unweighted(),
       wfc(),
       efermi(0),
       fermi_dirac_reference()
@@ -844,6 +848,7 @@ MeanField::MeanField(int ns, int nk, int nb, int nao, int nspinor, int st_ib, in
       i_state_start(st_ib),
       eskb(),
       wg(),
+      wg_unweighted(),
       wfc(),
       efermi(0),
       fermi_dirac_reference()
@@ -881,6 +886,21 @@ void MeanField::set_fermi_dirac_reference(const FermiDiracReference& reference)
 void MeanField::clear_fermi_dirac_reference()
 {
     fermi_dirac_reference = FermiDiracReference{};
+}
+
+void MeanField::apply_kpoint_weights(const std::vector<double>& kpoint_weights)
+{
+    if (kpoint_weights.size() != static_cast<std::size_t>(n_kpoints))
+        throw std::invalid_argument("k-point weight count does not match mean-field occupations");
+    for (int ik = 0; ik != n_kpoints; ++ik)
+    {
+        const double weight = kpoint_weights[static_cast<std::size_t>(ik)];
+        if (!std::isfinite(weight) || weight < 0.0)
+            throw std::invalid_argument("k-point weights must be finite and nonnegative");
+        for (int ispin = 0; ispin != n_spins; ++ispin)
+            for (int ib = 0; ib != n_states; ++ib)
+                wg[ispin](ik, ib) = wg_unweighted[ispin](ik, ib) * weight;
+    }
 }
 
 double MeanField::green_spectral_amplitude(const int ispin,

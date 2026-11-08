@@ -229,7 +229,10 @@ public:
     /** @brief Set mean-field wavefunction dimensions (numbers of spins, k-points, states, basis and spin components). */
     void set_scf_dimension(int nspins, int nkpts, int nstates, int nbasis, int nspinor = 1);
 
-    /** @brief Set occupation numbers, eigenvalues, and Fermi level. */
+    /** @brief Set per-state band_out occupations, eigenvalues, and Fermi level.
+     *  Normalized k-point weights are applied from the loaded mesh, or uniformly
+     *  until a k grid is loaded later.
+     */
     void set_wg_ekb_efermi(int nspins, int nkpts, int nstates, const double *wg, const double *ekb,
                            double efermi);
 

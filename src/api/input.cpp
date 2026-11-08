@@ -225,15 +225,24 @@ void librpa_set_wg_ekb_efermi(LibrpaHandler* h, int nspins, int nkpts, int nstat
 
     meanfield.get_efermi() = efermi;
     auto& eskb = meanfield.get_eigenvals();
-    auto& swg = meanfield.get_weight();
+    auto& raw_wg = meanfield.get_unweighted_weight();
+    const int bvk_kpoint_count = pds->pbc.get_n_cells_bvk();
+    const bool have_bvk_grid =
+        bvk_kpoint_count > 0 &&
+        pds->pbc.kfrac_list.size() == static_cast<std::size_t>(nkpts) &&
+        pds->pbc.weight_k.size() == static_cast<std::size_t>(nkpts) &&
+        pds->pbc.kfrac_list_full.size() == static_cast<std::size_t>(bvk_kpoint_count);
     int length_kb = nkpts * nstates;
     for (int is = 0; is != nspins; is++)
     {
         memcpy(eskb[is].c, ekb + length_kb * is, length_kb * sizeof(double));
-        memcpy(swg[is].c, wg + length_kb * is, length_kb * sizeof(double));
-        // Normalize occupations by the number of k points.
-        swg[is] *= (1.0 / nkpts);
+        memcpy(raw_wg[is].c, wg + length_kb * is, length_kb * sizeof(double));
     }
+    if (have_bvk_grid)
+        meanfield.apply_kpoint_weights(pds->pbc.weight_k);
+    else
+        meanfield.apply_kpoint_weights(
+            std::vector<double>(static_cast<std::size_t>(nkpts), 1.0 / nkpts));
     pds->is_scf_eigocc_set = true;
     if (pds->external_thermal_gw_grid) pds->invalidate_compute_objects();
 
@@ -925,6 +934,8 @@ void librpa_set_kgrids_kvec(LibrpaHandler* h, int nk1, int nk2, int nk3, int nkp
     }
 
     pbc.set_kgrids_kvec(nk1, nk2, nk3, v_kvecs, v_kweights);
+    if (pds->is_scf_eigocc_set)
+        pds->mf.apply_kpoint_weights(pbc.weight_k);
     pds->invalidate_compute_objects();
 
     pds->comm_h.barrier();

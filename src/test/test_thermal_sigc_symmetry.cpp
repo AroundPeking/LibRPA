@@ -55,6 +55,7 @@ void check(MAJOR major, bool distributed_c, bool identity_only = false, int nban
     const BasisConvention convention{-1, 0, LIBRPA_ANGULAR_ORDER_NATURAL, LIBRPA_RSH_COEFF_1_M,
                                      LIBRPA_RSH_COEFF_1_M};
     symmetry.build_rsh_rotations(convention, 1);
+    symmetry.build_kstar_member_rotations(1);
     symmetry.set_available();
     require_all(symmetry.count_irreducible_blocks() == (identity_only ? 12 : 6),
                 "fixture does not have the expected real-space reduction");

@@ -81,6 +81,21 @@ double stable_log1pexp(const double value)
     return std::log1p(std::exp(value));
 }
 
+double recover_band_out_occupation(const double stored_occupation,
+                                   const double normalized_kpoint_weight,
+                                   const int band_out_kpoint_count)
+{
+    if (!std::isfinite(stored_occupation) || stored_occupation < 0.0)
+        throw std::invalid_argument(
+            "stored band_out occupation must be finite and nonnegative");
+    if (!std::isfinite(normalized_kpoint_weight) || normalized_kpoint_weight <= 0.0)
+        throw std::invalid_argument("normalized k-point weight must be positive and finite");
+    if (band_out_kpoint_count <= 0)
+        throw std::invalid_argument("band_out k-point count must be positive");
+    return stored_occupation /
+           (static_cast<double>(band_out_kpoint_count) * normalized_kpoint_weight);
+}
+
 double fermi_dirac_occupation(const double energy_minus_mu, const double kbt_ha)
 {
     require_positive_temperature(kbt_ha);
@@ -243,7 +258,9 @@ double validate_thermal_occupations(const ThermalOccupationMetadata &metadata,
     const double mu_scale =
         std::max({1.0, std::abs(metadata.chemical_potential_ha),
                   std::abs(meanfield_chemical_potential_ha)});
-    const double mu_tolerance = 64.0 * std::numeric_limits<double>::epsilon() * mu_scale;
+    // band_out stores mu at lower precision than the thermal occupation metadata.
+    const double mu_tolerance = std::max(
+        64.0 * std::numeric_limits<double>::epsilon() * mu_scale, 1.0e-12 * mu_scale);
     if (std::abs(metadata.chemical_potential_ha - meanfield_chemical_potential_ha)
         > mu_tolerance)
         throw std::invalid_argument("thermal and mean-field chemical potentials differ");

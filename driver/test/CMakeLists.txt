@@ -5,6 +5,14 @@ add_executable(
 )
 add_test(NAME test_input_parser COMMAND $<TARGET_FILE:test_input_parser>)
 
+add_executable(test_reader_2d_coulomb_head
+  test_reader_2d_coulomb_head.cpp
+  ../reader_2d_coulomb_head.cpp)
+if(LIBRPA_STD_FILESYSTEM_STDCXXFS)
+  target_link_libraries(test_reader_2d_coulomb_head PRIVATE stdc++fs)
+endif()
+add_test(NAME test_reader_2d_coulomb_head COMMAND $<TARGET_FILE:test_reader_2d_coulomb_head>)
+
 add_executable(
   test_reader_sternheimer_qpoints
   test_reader_sternheimer_qpoints.cpp

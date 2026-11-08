@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <filesystem>
 #include <sstream>
 #include <stdexcept>
 
@@ -84,4 +85,22 @@ Strict2dCoulombHeadMetadata read_strict_2d_coulomb_head_metadata(const std::stri
     if (!input.good())
         throw std::runtime_error("Failed to open strict 2D Coulomb metadata " + file_path);
     return read_strict_2d_coulomb_head_metadata(input, file_path);
+}
+
+std::string resolve_strict_2d_coulomb_head_metadata_path(const std::string &current_path,
+                                                         const std::string &legacy_path)
+{
+    std::error_code error;
+    if (std::filesystem::exists(current_path, error)) return current_path;
+    if (error)
+        throw std::runtime_error("Failed to inspect strict 2D Coulomb metadata " + current_path +
+                                 ": " + error.message());
+
+    if (std::filesystem::exists(legacy_path, error)) return legacy_path;
+    if (error)
+        throw std::runtime_error("Failed to inspect strict 2D Coulomb metadata " + legacy_path +
+                                 ": " + error.message());
+
+    throw std::runtime_error("Missing strict 2D Coulomb metadata; expected " + current_path +
+                             " or legacy " + legacy_path);
 }

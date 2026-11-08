@@ -899,12 +899,17 @@ void G0W0::set_thermal_sigc(ThermalSigcRspace result)
             validate_fermi_dirac_chemical_potential(fd, result.chemical_potential_ha);
             validate_fermi_dirac_chemical_potential(fd, mf.get_efermi());
             if (mf.get_n_spinor() != 1) throw std::invalid_argument("requires scalar spin");
-            // Spatially reduced contractions have already restored full AO/R
-            // blocks; the import and its ordinary distributed sum are unchanged.
-            if (use_symmetry_context &&
-                (pbc.klist != pbc.klist_full || mf.get_n_kpoints() != pbc.get_n_cells_bvk()))
+            if (pbc.kfrac_list.size() != static_cast<std::size_t>(mf.get_n_kpoints()) ||
+                pbc.kfrac_list_full.size() != static_cast<std::size_t>(pbc.get_n_cells_bvk()))
+                throw std::invalid_argument("self-energy import requires complete BvK mesh metadata");
+            const bool reduced_scf_k_grid =
+                pbc.klist != pbc.klist_full || pbc.kfrac_list != pbc.kfrac_list_full;
+            if (reduced_scf_k_grid &&
+                (!use_symmetry_context || !symmetry_context.available ||
+                 symmetry_context.kstar_grid_mapping.size() != pbc.kfrac_list.size() ||
+                 symmetry_context.count_kstar_members() != pbc.get_n_cells_bvk()))
                 throw std::invalid_argument(
-                    "self-energy symmetry import requires a full SCF k grid");
+                    "IBZ self-energy import requires a complete symmetry k-star map");
             if (mf.get_n_spins() <= 0 || atbasis_wfc.n_atoms == 0 ||
                 atbasis_wfc.nb_total != mf.get_n_aos())
                 throw std::invalid_argument("invalid AO/spin dimensions");
@@ -1775,10 +1780,25 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
             validate_fermi_dirac_chemical_potential(fd, mf.get_efermi());
             if (mf.get_n_spinor() != 1 || is_eigvec_k_distributed_)
                 throw std::invalid_argument("reference requires scalar spin and replicated SCF");
-            if (pbc.klist != pbc.klist_full || pbc.kfrac_list != pbc.kfrac_list_full ||
-                mf.get_n_kpoints() != pbc.get_n_cells_bvk() ||
-                pbc.kfrac_list.size() != static_cast<std::size_t>(mf.get_n_kpoints()))
-                throw std::invalid_argument("reference requires the full SCF k grid");
+            if (pbc.kfrac_list.size() != static_cast<std::size_t>(mf.get_n_kpoints()) ||
+                pbc.kfrac_list_full.size() != static_cast<std::size_t>(pbc.get_n_cells_bvk()))
+                throw std::invalid_argument("reference requires complete BvK mesh metadata");
+            const bool reduced_scf_k_grid =
+                pbc.klist != pbc.klist_full || pbc.kfrac_list != pbc.kfrac_list_full;
+            if (reduced_scf_k_grid)
+            {
+                const auto atom_nw = atbasis_wfc.get_atom_nb_map();
+                const auto wfc_layouts = atbasis_wfc.has_l_shells()
+                                             ? atbasis_wfc.build_species_basis_layouts(
+                                                   symmetry_context.atom_to_type)
+                                             : std::vector<SpeciesBasisLayout>{};
+                if (!use_symmetry_context ||
+                    symmetry_context.count_kstar_members() != pbc.get_n_cells_bvk() ||
+                    !can_restore_symmetry_kstar_meanfield(symmetry_context, wfc_layouts, mf,
+                                                          pbc.kfrac_list, atom_nw))
+                    throw std::invalid_argument(
+                        "IBZ thermal GW requires symmetry-restorable SCF states");
+            }
             if (!ad_wc.initialized() || !ad_wc.is_row_consec() || !ad_wc.is_col_consec())
                 throw std::invalid_argument("Wc requires an initialized consecutive descriptor");
             int relation = MPI_UNEQUAL;
@@ -1962,7 +1982,8 @@ ThermalSigcRspace G0W0::build_thermal_spacetime(
                     [&]
                     {
                         build_gf_libri_kserial(mf, atbasis_wfc, spin, 0, 0, pbc, symmetry_context,
-                                               false, pbc.kfrac_list, {tau}, ijrs, gs);
+                                               use_symmetry_context, pbc.kfrac_list, {tau}, ijrs,
+                                               gs);
                     });
                 gw_libri.set_Gs(gs.at(tau), libri_threshold_G);
                 const double g_ready_time = MPI_Wtime();

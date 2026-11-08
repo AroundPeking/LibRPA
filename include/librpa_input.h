@@ -30,7 +30,8 @@ void librpa_set_scf_dimension(LibrpaHandler* h, int nspins, int nkpts, int nstat
  * @param[in] nspins   Number of spin channels.
  * @param[in] nkpts    Number of k-points.
  * @param[in] nstates  Number of electronic states.
- * @param[in] wg       Occupation numbers (size: nspins * nkpts * nstates).
+ * @param[in] wg       Per-state occupation numbers as stored in band_out
+ *                     (size: nspins * nkpts * nstates).
  * @param[in] ekb      Eigenvalues (size: same as wg).
  * @param[in] efermi   Fermi level.
  */

@@ -17,6 +17,8 @@ void require_near(const double actual, const double expected, const double toler
         throw std::runtime_error("values differ beyond tolerance");
 }
 
+std::string valid_metadata_text();
+
 void test_stable_fermi_dirac_functions()
 {
     const double kbt = 0.0025;
@@ -27,6 +29,38 @@ void test_stable_fermi_dirac_functions()
     assert(std::isfinite(stable_log1pexp(1000.0)));
     require_near(stable_log1pexp(1000.0), 1000.0, 1.0e-13);
     require_near(stable_log1pexp(-1000.0), 0.0, 1.0e-300);
+}
+
+void test_band_out_occupation_recovery_for_full_and_ibz_grids()
+{
+    constexpr int band_out_kpoint_count = 19;
+    constexpr int full_grid_count = 144;
+    constexpr double max_occupation = 2.0;
+    const double fermi_values[]{0.75, 0.25};
+    const double weights[]{1.0 / full_grid_count, 2.0 / full_grid_count};
+    const double energies[]{0.125 - 0.0025 * std::log(3.0),
+                            0.125 + 0.0025 * std::log(3.0)};
+    std::vector<ThermalOccupationSample> samples;
+    for (int ik = 0; ik != 2; ++ik)
+    {
+        const double stored = max_occupation * fermi_values[ik]
+                              * band_out_kpoint_count * weights[ik];
+        const double occupation = recover_band_out_occupation(
+            stored, weights[ik], band_out_kpoint_count);
+        require_near(occupation, max_occupation * fermi_values[ik], 1.0e-15);
+        samples.push_back({energies[ik], occupation * weights[ik], weights[ik]});
+    }
+
+    std::istringstream input(valid_metadata_text());
+    const auto metadata = parse_thermal_occupation_metadata(input);
+    const double max_error = validate_thermal_occupations(metadata, 0.125, samples, 1.0e-13);
+    assert(max_error < 1.0e-14);
+
+    const double full_grid_weight = 1.0 / full_grid_count;
+    const double full_grid_stored = max_occupation * fermi_values[0];
+    require_near(recover_band_out_occupation(full_grid_stored, full_grid_weight,
+                                              full_grid_count),
+                 full_grid_stored, 1.0e-15);
 }
 
 void test_stable_thermal_green_amplitudes()
@@ -122,6 +156,31 @@ void test_occupation_validation_uses_kpoint_and_spin_normalization()
     assert(rejected);
 }
 
+void test_occupation_validation_accepts_band_header_roundoff()
+{
+    std::istringstream input(valid_metadata_text());
+    const auto metadata = parse_thermal_occupation_metadata(input);
+    const double log_three = std::log(3.0);
+    const std::vector<ThermalOccupationSample> samples{
+        {0.125 - metadata.kbt_ha * log_three, 0.2 * 2.0 * 0.75, 0.2},
+        {0.125 + metadata.kbt_ha * log_three, 0.8 * 2.0 * 0.25, 0.8},
+    };
+    const double maximum_error =
+        validate_thermal_occupations(metadata, 0.125 + 7.3e-14, samples, 1.0e-13);
+    assert(maximum_error < 1.0e-14);
+
+    bool rejected = false;
+    try
+    {
+        (void)validate_thermal_occupations(metadata, 0.125 + 2.0e-12, samples, 1.0e-13);
+    }
+    catch (const std::invalid_argument&)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+}
+
 void test_normalized_fermi_dirac_band_weight()
 {
     const double kbt = 0.0025;
@@ -169,9 +228,11 @@ void test_invalid_temperature_is_rejected()
 int main()
 {
     test_stable_fermi_dirac_functions();
+    test_band_out_occupation_recovery_for_full_and_ibz_grids();
     test_stable_thermal_green_amplitudes();
     test_metadata_parser();
     test_occupation_validation_uses_kpoint_and_spin_normalization();
+    test_occupation_validation_accepts_band_header_roundoff();
     test_normalized_fermi_dirac_band_weight();
     test_invalid_temperature_is_rejected();
     return 0;

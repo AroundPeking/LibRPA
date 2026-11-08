@@ -215,9 +215,9 @@ int main()
 
     // *** Input parsing ***
     h.set_scf_dimension(nspins, nkpts, nstates, nbasis);
-    h.set_wg_ekb_efermi(nspins, nkpts, nstates, wg, ekb, efermi);
     h.set_latvec_and_G(lat_mat, G_mat);
     h.set_kgrids_kvec(nk1, nk2, nk3, nkpts, kvecs, kweights);
+    h.set_wg_ekb_efermi(nspins, nkpts, nstates, wg, ekb, efermi);
     h.set_kq_mapping(map_q_ks);
     h.set_ao_basis_wfc(nbs_wfc);
     h.set_ao_basis_aux(nbs_aux);

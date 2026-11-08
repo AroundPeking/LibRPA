@@ -13,7 +13,8 @@ namespace
 using namespace librpa_int;
 using Z = std::complex<double>;
 
-std::vector<Z> run(int symmetry_flags, int nk)
+std::vector<Z> run(int symmetry_flags, int nk, bool ibz_input = false,
+                   bool centered_model = false)
 {
     librpa::Handler h(MPI_COMM_WORLD);
     const auto ds = api::get_dataset_instance(h);
@@ -21,48 +22,100 @@ std::vector<Z> run(int symmetry_flags, int nk)
     const double pi = std::acos(-1.0);
     const double reciprocal[]{2 * pi / 4, 0, 0, 0, 2 * pi / 5, 0, 0, 0, 2 * pi / 6};
     h.set_latvec_and_G(lattice, reciprocal);
-    h.set_atoms({0, 0}, {1, 0, 0, 3, 0, 0});
-    h.set_ao_basis_wfc({1, 1}, {{0}, {0}});
-    h.set_ao_basis_aux({1, 1}, {{0}, {0}});
+    if (centered_model)
+    {
+        h.set_atoms({0}, {0, 0, 0});
+        h.set_ao_basis_wfc({2}, {{0, 0}});
+        h.set_ao_basis_aux({1}, {{0}});
+    }
+    else
+    {
+        h.set_atoms({0, 0}, {1, 0, 0, 3, 0, 0});
+        h.set_ao_basis_wfc({1, 1}, {{0}, {0}});
+        h.set_ao_basis_aux({1, 1}, {{0}, {0}});
+    }
     h.set_basis_convention(-1, 0, LIBRPA_ANGULAR_ORDER_NATURAL, LIBRPA_RSH_COEFF_1_M,
                            LIBRPA_RSH_COEFF_1_M);
     const int rotations[]{1, 0, 0, 0, 1, 0, 0, 0, 1, -1, 0, 0, 0, -1, 0, 0, 0, -1};
-    const double translations[]{0, 0, 0, 1, 0, 0};
+    const double translations[]{0, 0, 0, centered_model ? 0.0 : 1.0, 0, 0};
     h.set_symmetry_operations(2, 1, rotations, translations);
-    std::vector<double> kpoints, energies, occupations;
+    std::vector<double> full_kpoints, active_kpoints, energies, occupations;
+    std::vector<int> active_full_kpoints;
     constexpr double BETA = 8, MU = 0.1;
     for (int ik = 0; ik < nk; ++ik)
     {
-        kpoints.insert(kpoints.end(), {2 * pi * ik / (4 * nk), 0, 0});
+        full_kpoints.insert(full_kpoints.end(), {2 * pi * ik / (4 * nk), 0, 0});
+    }
+    if (ibz_input)
+    {
+        if (nk != 3) throw std::invalid_argument("IBZ fixture requires a three-point mesh");
+        active_full_kpoints = {0, 1};
+        active_kpoints = {
+            full_kpoints[0], full_kpoints[1], full_kpoints[2],
+            full_kpoints[3], full_kpoints[4], full_kpoints[5]};
+    }
+    else
+    {
+        for (int ik = 0; ik < nk; ++ik) active_full_kpoints.push_back(ik);
+        active_kpoints = full_kpoints;
+    }
+    const int n_active = static_cast<int>(active_full_kpoints.size());
+    for (int ik = 0; ik < n_active; ++ik)
+    {
+        const int full_ik = active_full_kpoints[ik];
         for (double e : {-0.2, 0.4})
         {
-            energies.push_back(e + 0.03 * std::cos(2 * pi * ik / nk));
-            occupations.push_back(2.0 / nk / (1 + std::exp(BETA * (energies.back() - MU))));
+            energies.push_back(e + 0.03 * std::cos(2 * pi * full_ik / nk));
+            occupations.push_back(2.0 / (1 + std::exp(BETA * (energies.back() - MU))));
         }
     }
-    h.set_kgrids_kvec(nk, 1, 1, kpoints);
-    h.set_scf_dimension(1, nk, 2, 2);
-    h.set_wg_ekb_efermi(1, nk, 2, occupations.data(), energies.data(), MU);
+    h.set_scf_dimension(1, n_active, 2, 2);
+    h.set_wg_ekb_efermi(1, n_active, 2, occupations.data(), energies.data(), MU);
+    if (ibz_input)
+        h.set_kgrids_kvec(nk, 1, 1, active_kpoints, {1.0 / nk, 2.0 / nk});
+    else
+        h.set_kgrids_kvec(nk, 1, 1, active_kpoints);
+    const auto& normalized_occupations = ds->mf.get_weight().at(0);
+    const auto& normalized_kpoint_weights = ds->pbc.weight_k;
+    for (int ik = 0; ik < n_active; ++ik)
+        for (int ib = 0; ib < 2; ++ib)
+        {
+            const double expected = 2.0 * normalized_kpoint_weights[static_cast<std::size_t>(ik)] /
+                                    (1 + std::exp(BETA *
+                                                  (energies[static_cast<std::size_t>(2 * ik + ib)] -
+                                                   MU)));
+            if (std::abs(normalized_occupations(ik, ib) -
+                         expected) > 1e-14)
+                throw std::runtime_error("mean-field occupation does not match the k-star weight");
+        }
     h.set_fermi_dirac_reference(1 / BETA, MU, 2, 1e-12);
     const double a = 1 / std::sqrt(2.0);
     const Z orbitals[]{a, a, -a, a};
-    for (int ik = 0; ik < nk; ++ik) h.set_wfc_packed(0, ik, 2, 2, orbitals);
+    const Z centered_orbitals[]{1, 0, 0, 1};
+    for (int ik = 0; ik < n_active; ++ik)
+        h.set_wfc_packed(0, ik, 2, 2, centered_model ? centered_orbitals : orbitals);
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     if (rank == 0)
     {
         const int r[]{0, 0, 0};
-        for (int i = 0; i < 2; ++i)
-            for (int j = 0; j < 2; ++j)
+        const int n_atoms = centered_model ? 1 : 2;
+        for (int i = 0; i < n_atoms; ++i)
+            for (int j = 0; j < n_atoms; ++j)
             {
                 const double c = i == j ? 0.2 : 0.035;
-                h.set_lri_coeff(LIBRPA_ROUTING_LIBRI, i, j, 1, 1, 1, r, &c);
+                const int nbasis_i = centered_model ? 2 : 1;
+                const int nbasis_j = centered_model ? 2 : 1;
+                const std::vector<double> coeff(static_cast<std::size_t>(nbasis_i * nbasis_j), c);
+                h.set_lri_coeff(LIBRPA_ROUTING_LIBRI, i, j, nbasis_i, nbasis_j, 1, r,
+                                coeff.data());
                 if (j < i) continue;
                 const Z full = i == j ? 0.7 : 0.08;
                 const Z cut = i == j ? 0.5 : 0.04;
-                for (int ik = 0; ik < nk; ++ik)
+                for (int ik = 0; ik < n_active; ++ik)
                 {
-                    const double scale = 1 + 0.2 * std::cos(2 * pi * ik / nk);
+                    const int full_ik = active_full_kpoints[ik];
+                    const double scale = 1 + 0.2 * std::cos(2 * pi * full_ik / nk);
                     const Z v = full * scale, vc = cut * scale;
                     h.set_aux_bare_coulomb_k_atom_pair_packed(ik, i, j, 1, 1, &v, 0);
                     h.set_aux_cut_coulomb_k_atom_pair_packed(ik, i, j, 1, 1, &vc, 0);
@@ -112,15 +165,16 @@ std::vector<Z> run(int symmetry_flags, int nk)
     ds->p_g0w0->build_sigc_matrix_KS_kgrid_blacs(ds->blacs_h);
     std::vector<Z> result;
     if (rank == 0)
-        for (int ik = 0; ik < nk; ++ik)
+        for (int ik = 0; ik < n_active; ++ik)
             for (const auto &[frequency, diagonal] : ds->p_g0w0->sigc_diag_is_ik_f_KS.at(0).at(ik))
                 result.insert(result.end(), diagonal.begin(), diagonal.end());
     opts.n_params_anacon = 4;
     opts.option_qpe_solver = 2;
     std::vector<int> iks;
-    for (int ik = 0; ik < nk; ++ik) iks.push_back(ik);
+    for (int ik = 0; ik < n_active; ++ik) iks.push_back(ik);
     const auto exx = h.get_exx_pot_kgrid(opts, 1, iks, 0, 2);
-    const auto qp = h.get_g0w0_qpe_kgrid(opts, 1, iks, 0, 2, std::vector<double>(2 * nk, 0), exx);
+    const auto qp = h.get_g0w0_qpe_kgrid(opts, 1, iks, 0, 2,
+                                         std::vector<double>(2 * n_active, 0), exx);
     if (rank == 0)
     {
         for (double energy : exx) result.push_back(energy);
@@ -171,6 +225,36 @@ int main(int argc, char **argv)
                               << " max_qp_error=" << qp_error << " max_sigma=" << magnitude << '\n';
                 }
             }
+        }
+        const auto full_ibz_reference = run(7, 3, false, false);
+        const auto reduced_ibz = run(7, 3, true, false);
+        double sigma_error = 0.0, exx_error = 0.0, qp_error = 0.0;
+        if (rank == 0)
+        {
+            if (full_ibz_reference.size() != 36 || reduced_ibz.size() != 24)
+                status = 1;
+            else
+                for (int ik : {0, 1})
+                {
+                    for (int i = 0; i < 8; ++i)
+                        sigma_error = std::max(
+                            sigma_error,
+                            std::abs(full_ibz_reference[8 * ik + i] - reduced_ibz[8 * ik + i]));
+                    for (int ib = 0; ib < 2; ++ib)
+                    {
+                        exx_error = std::max(
+                            exx_error,
+                            std::abs(full_ibz_reference[24 + 2 * ik + ib] -
+                                     reduced_ibz[16 + 2 * ik + ib]));
+                        qp_error = std::max(
+                            qp_error,
+                            std::abs(full_ibz_reference[30 + 2 * ik + ib] -
+                                     reduced_ibz[20 + 2 * ik + ib]));
+                    }
+                }
+            if (sigma_error > 2e-10 || exx_error > 2e-10 || qp_error > 1e-8) status = 1;
+            std::cout << "THERMAL_SIGC_IBZ_EQUIVALENCE max_sigma_error=" << sigma_error
+                      << " max_exx_error=" << exx_error << " max_qp_error=" << qp_error << '\n';
         }
     }
     catch (const std::exception &error)

@@ -13,3 +13,5 @@ struct Strict2dCoulombHeadMetadata
 Strict2dCoulombHeadMetadata read_strict_2d_coulomb_head_metadata(std::istream &input,
                                                                  const std::string &source_name);
 Strict2dCoulombHeadMetadata read_strict_2d_coulomb_head_metadata(const std::string &file_path);
+std::string resolve_strict_2d_coulomb_head_metadata_path(const std::string &current_path,
+                                                         const std::string &legacy_path);

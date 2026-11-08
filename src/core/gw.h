@@ -175,7 +175,8 @@ public:
     int get_sigc_frequency_index(double frequency) const;
 
     /** Internal full-q/signed-frequency path; leaves legacy GW state untouched.
-     * Requires scalar spin, replicated full SCF k grid and uncompressed W/C;
+     * Requires scalar spin, replicated full or symmetry-restorable IBZ SCF states,
+     * and uncompressed W/C;
      * the existing output-only real-space symmetry filter is optional. Requires
      * a global BLACS Wc descriptor. The by-value Wc storage is consumed to bound memory;
      * callers should move production data into this function. No head/wing generation,

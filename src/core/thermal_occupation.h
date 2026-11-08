@@ -11,6 +11,12 @@ double stable_log1pexp(double value);
 double fermi_dirac_occupation(double energy_minus_mu, double kbt_ha);
 double fermi_dirac_derivative(double energy_minus_mu, double kbt_ha);
 
+// ABACUS band_out stores the per-state occupation multiplied by the number of
+// listed SCF k-points and that point's normalized BZ weight.
+double recover_band_out_occupation(double stored_occupation,
+                                   double normalized_kpoint_weight,
+                                   int band_out_kpoint_count);
+
 // Returns the positive spectral amplitude. Existing Green-function builders
 // retain responsibility for their own branch sign and k/spin normalization.
 double thermal_green_amplitude(double energy_minus_mu, double tau, double kbt_ha);

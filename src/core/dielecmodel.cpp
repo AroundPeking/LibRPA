@@ -245,6 +245,17 @@ double headwing_transition_weight(const double occupied_weight, const double uno
     return occupation_difference * static_cast<double>(n_spin) / 2.0;
 }
 
+double full_bz_occupation_weight(const double stored_weight, const double ibz_kpoint_weight,
+                                 const int n_kpoints_bz)
+{
+    if (!std::isfinite(stored_weight) || !std::isfinite(ibz_kpoint_weight) ||
+        ibz_kpoint_weight <= 0.0 || n_kpoints_bz <= 0)
+        throw std::invalid_argument("invalid IBZ occupation or k-star normalization");
+    // wg already contains the IBZ star weight. Head/wing then sums each star
+    // member explicitly, so recover f and apply one full-BZ point weight here.
+    return (stored_weight / ibz_kpoint_weight) / static_cast<double>(n_kpoints_bz);
+}
+
 double headwing_spin_prefactor(const int n_spin, const bool spin_orbit_coupled)
 {
     if (spin_orbit_coupled) return 1.0;
@@ -2167,10 +2178,7 @@ void diele_func::cal_head_symmetric()
     // get_symmetry_restored_gf_cplx_imagtimes_Rs convention).
     const auto member_targets = librpa_int::build_symmetry_kstar_member_kfrac_targets(ctx, pbc_);
 
-    // PyATB velocity inputs on an IBZ grid use the active-grid occupation normalization.
-    // Expanding each representative to the full BZ therefore scales every member uniformly.
     const std::size_t n_kpoints_bz = ctx.count_kstar_members();
-    const double bz_weight_scale = static_cast<double>(nk) / static_cast<double>(n_kpoints_bz);
     const double full_bz_kpoint_weight = 1.0 / static_cast<double>(n_kpoints_bz);
     const bool use_kblacs = use_matching_kpoint_blacs(nk, kblacs_ctxt_);
     const auto &fd_reference = meanfield_df.get_fermi_dirac_reference();
@@ -2193,6 +2201,9 @@ void diele_func::cal_head_symmetric()
             const auto &k_ibz = kfrac_band[ik_ibz];
             const auto &star = librpa_int::find_symmetry_kstar_for_ibz_kpoint(ctx, k_ibz);
             if (star.members.empty()) throw std::runtime_error("cal_head_symmetric: empty k-star");
+            if (pbc_.weight_k.size() != static_cast<std::size_t>(nk))
+                throw std::runtime_error("cal_head_symmetric: missing IBZ k-point weights");
+            const double ibz_kpoint_weight = pbc_.weight_k[static_cast<std::size_t>(ik_ibz)];
 
             const auto degenerate_groups =
                 fd_reference.enabled
@@ -2283,10 +2294,12 @@ void diele_func::cal_head_symmetric()
                         if (iocc >= iunocc) continue;
                         if (fd_reference.enabled && degenerate_groups.same(iocc, iunocc))
                             continue;
-                        const double factor =
-                            bz_weight_scale * headwing_transition_weight(wg(ik_ibz, iocc),
-                                                                         wg(ik_ibz, iunocc), n_spin,
-                                                                         use_soc);
+                        const double factor = headwing_transition_weight(
+                            full_bz_occupation_weight(wg(ik_ibz, iocc), ibz_kpoint_weight,
+                                                      static_cast<int>(n_kpoints_bz)),
+                            full_bz_occupation_weight(wg(ik_ibz, iunocc), ibz_kpoint_weight,
+                                                      static_cast<int>(n_kpoints_bz)),
+                            n_spin, use_soc);
                         if (factor <= 1.e-8) continue;
 
                         const double egap =
@@ -2822,8 +2835,6 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
     const int n_kpoints_ibz = nk;
     const int n_spinor = meanfield_df.get_n_spinor();
     const int n_kpoints_bz = static_cast<int>(ctx.count_kstar_members());
-    const double bz_weight_scale_wing =
-        static_cast<double>(n_kpoints_ibz) / static_cast<double>(n_kpoints_bz);
     const double full_bz_kpoint_weight = 1.0 / static_cast<double>(n_kpoints_bz);
     const auto &fd_reference = meanfield_df.get_fermi_dirac_reference();
     const bool source_rank = wing_blacs_h.myprow == 0 && wing_blacs_h.mypcol == 0;
@@ -2838,6 +2849,9 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
         const auto &k_ibz = kfrac_band[ik_ibz];
         const auto &star = librpa_int::find_symmetry_kstar_for_ibz_kpoint(ctx, k_ibz);
         if (star.members.empty()) throw std::runtime_error("cal_wing_symmetric: empty k-star");
+        if (pbc_.weight_k.size() != static_cast<std::size_t>(n_kpoints_ibz))
+            throw std::runtime_error("cal_wing_symmetric: missing IBZ k-point weights");
+        const double ibz_kpoint_weight = pbc_.weight_k[static_cast<std::size_t>(ik_ibz)];
 
         for (std::size_t imember = 0; imember != star.members.size(); ++imember)
         {
@@ -2939,8 +2953,10 @@ void diele_func::cal_wing_symmetric(const Cs_LRI &Cs_data, double coulomb_eigen_
                             const double egap =
                                 eigenvalues[isp](ik_ibz, iunocc) - eigenvalues[isp](ik_ibz, iocc);
                             if (fd_reference.enabled && degenerate_groups.same(iocc, iunocc)) continue;
-                            const double wg_occ = wg(ik_ibz, iocc) * bz_weight_scale_wing;
-                            const double wg_unocc = wg(ik_ibz, iunocc) * bz_weight_scale_wing;
+                            const double wg_occ = full_bz_occupation_weight(
+                                wg(ik_ibz, iocc), ibz_kpoint_weight, n_kpoints_bz);
+                            const double wg_unocc = full_bz_occupation_weight(
+                                wg(ik_ibz, iunocc), ibz_kpoint_weight, n_kpoints_bz);
                             double factor1 = 0.0;
                             double factor2 = 0.0;
                             if (fd_reference.enabled)

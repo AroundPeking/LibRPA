@@ -69,6 +69,7 @@ void read_bz_sampling_from_stru(const std::string &file_path);
 
 //! Enable finite-temperature occupations when a valid producer sidecar exists.
 bool read_thermal_occupation_reference(const std::string &file_path);
+void apply_scf_occupation_kpoint_weights();
 
 void read_basis_wfc_aux(const std::string &input_dir, const std::string &fn_basis,
                         const std::string &fn_basis_wfc, const std::string &fn_basis_aux);

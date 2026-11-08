@@ -220,6 +220,11 @@ int main(int argc, char **argv)
 
         if (needs_scf_eigenvalues)
         {
+            apply_scf_occupation_kpoint_weights();
+        }
+
+        if (needs_scf_eigenvalues)
+        {
             profiler.start("driver_thermal_occupation", "Finite-temperature occupations");
             read_thermal_occupation_reference(path_thermal_occupation);
             profiler.stop("driver_thermal_occupation");

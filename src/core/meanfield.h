@@ -83,8 +83,12 @@ private:
 
     //! eigenvalues, (n_spins, n_kpoints, n_states)
     std::vector<matrix> eskb;
-    //! occupation weight, scaled by n_kpoints. (n_spins, n_kpoints, n_states)
+    //! Occupation multiplied by the normalized active k-point weight.
+    //! For a uniform full grid this is occupation / n_kpoints.
+    //! (n_spins, n_kpoints, n_states)
     std::vector<matrix> wg;
+    //! Raw per-state occupations before normalized k-point weights are applied.
+    std::vector<matrix> wg_unweighted;
     //! eigenvector, (n_spins, n_spinor, n_kpoints_local, n_states_local, n_aos_local)
     // TODO: parallelize
     std::map<int, std::map<int, std::map<int, ComplexMatrix>>> wfc;
@@ -107,6 +111,7 @@ public:
           i_state_start(-1),
           eskb(),
           wg(),
+          wg_unweighted(),
           wfc(),
           efermi(0),
           fermi_dirac_reference() {};
@@ -138,10 +143,12 @@ public:
     }
     void set_fermi_dirac_reference(const FermiDiracReference& reference);
     void clear_fermi_dirac_reference();
+    void apply_kpoint_weights(const std::vector<double>& kpoint_weights);
     std::vector<matrix>& get_eigenvals() { return eskb; }
     const std::vector<matrix>& get_eigenvals() const { return eskb; }
     std::vector<matrix>& get_weight() { return wg; }
     const std::vector<matrix>& get_weight() const { return wg; }
+    std::vector<matrix>& get_unweighted_weight() { return wg_unweighted; }
     std::map<int, std::map<int, std::map<int, ComplexMatrix>>>& get_eigenvectors() { return wfc; }
     const std::map<int, std::map<int, std::map<int, ComplexMatrix>>>& get_eigenvectors() const { return wfc; }
     ComplexMatrix* find_wfc(int ispin, int ispinor, int ikpt) noexcept;
